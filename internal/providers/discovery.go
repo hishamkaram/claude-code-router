@@ -74,33 +74,45 @@ func (d Discoverer) DiscoverOpenAICompatibleModels(ctx context.Context, cfg Disc
 }
 
 func ModelsEndpoint(baseURL string) (string, error) {
+	return endpointWithPath(baseURL, "models")
+}
+
+func ChatCompletionsEndpoint(baseURL string) (string, error) {
+	return endpointWithPath(baseURL, "chat/completions")
+}
+
+func endpointWithPath(baseURL, resource string) (string, error) {
 	cleanBase := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.ParseRequestURI(cleanBase)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("providers.ModelsEndpoint: invalid base URL %q", baseURL)
+		return "", fmt.Errorf("providers.endpointWithPath: invalid base URL %q", baseURL)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("providers.ModelsEndpoint: invalid base URL %q: scheme must be http or https", baseURL)
+		return "", fmt.Errorf("providers.endpointWithPath: invalid base URL %q: scheme must be http or https", baseURL)
 	}
 
 	path := strings.TrimRight(parsed.Path, "/")
 	if strings.HasSuffix(path, "/v1") {
-		parsed.Path = path + "/models"
+		parsed.Path = path + "/" + resource
 	} else {
-		parsed.Path = path + "/v1/models"
+		parsed.Path = path + "/v1/" + resource
 	}
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
 }
 
-func SupportsOpenAIModelDiscovery(providerType string) bool {
+func SupportsOpenAICompatibleRouting(providerType string) bool {
 	switch providerType {
 	case "litellm", "local", "openrouter":
 		return true
 	default:
 		return false
 	}
+}
+
+func SupportsOpenAIModelDiscovery(providerType string) bool {
+	return SupportsOpenAICompatibleRouting(providerType)
 }
 
 func discoveryHTTPError(statusCode int) error {

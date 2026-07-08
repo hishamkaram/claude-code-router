@@ -34,10 +34,19 @@ func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv,
 		}
 		return secretPlan{ref: secret.KeyringRef(name), value: value, store: true}, nil
 	}
-	if noAPIKey || providerType == "local" || providerType == "litellm" {
+	if noAPIKey || !providerTypeRequiresAPIKey(providerType) {
 		return secretPlan{}, nil
 	}
 	return secretPlan{}, fmt.Errorf("API key required for provider type %q; use --api-key-env <ENV>, --api-key-stdin, or --no-api-key if this endpoint is intentionally unauthenticated", providerType)
+}
+
+func providerTypeRequiresAPIKey(providerType string) bool {
+	switch providerType {
+	case "local", "litellm":
+		return false
+	default:
+		return true
+	}
 }
 
 func validateProviderAuthSourceFlags(cfg providerAddConfig) error {

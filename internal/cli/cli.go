@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -16,13 +15,12 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-var errNotImplemented = errors.New("not implemented yet")
-
 type Dependencies struct {
-	In      io.Reader
-	Out     io.Writer
-	Err     io.Writer
-	Secrets secret.Backend
+	In       io.Reader
+	Out      io.Writer
+	Err      io.Writer
+	Secrets  secret.Backend
+	Launcher ClaudeLauncher
 }
 
 type options struct {
@@ -59,6 +57,9 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	if deps.Secrets == nil {
 		deps.Secrets = secret.DefaultBackend{}
 	}
+	if deps.Launcher == nil {
+		deps.Launcher = ExecClaudeLauncher{}
+	}
 	opts := &options{}
 	cmd := &cobra.Command{
 		Use:           "ccr",
@@ -68,7 +69,7 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 		Long: `ccr manages a local Claude Code router.
 
 Claude Code is launched once through a fixed local gateway, then model aliases
-can be selected from inside the same Claude Code session with /model <alias>.
+are selected at launch time with ccr launch --model <alias>.
 
 ccr stores providers, model aliases, compatibility metadata, sessions, and
 usage metadata in a local SQLite database. API keys are never stored raw in
@@ -93,13 +94,13 @@ Significant gateway behavior must be proven with live Claude Code E2E tests.`,
 		newVersionCommand(),
 		newInitCommand(ctx, opts),
 		newProviderCommand(ctx, opts, deps),
-		newModelCommand(ctx, opts),
-		newLaunchCommand(),
+		newModelCommand(ctx, opts, deps),
+		newLaunchCommand(ctx, opts, deps),
 		newStatusCommand(ctx, opts),
 		newDoctorCommand(ctx, opts, deps),
-		newConformanceCommand(),
-		newSessionsCommand(),
-		newAgentsCommand(),
+		newConformanceCommand(ctx, opts, deps),
+		newSessionsCommand(ctx, opts),
+		newAgentsCommand(ctx, opts),
 	)
 	return cmd
 }
@@ -145,6 +146,9 @@ Examples:
   ccr provider add anthropic --api-key-stdin
   ccr provider discover-models litellm
   ccr provider import-models litellm --all
+  ccr provider test litellm
+  ccr provider update litellm --base-url http://localhost:5000
+  ccr provider remove litellm --yes
   ccr provider list`,
 	}
 	cmd.AddCommand(
@@ -152,8 +156,9 @@ Examples:
 		newProviderListCommand(ctx, opts),
 		newProviderDiscoverModelsCommand(ctx, opts, deps),
 		newProviderImportModelsCommand(ctx, opts, deps),
-		newProviderTestCommand(),
-		newNotImplementedCommand("remove <name>", "Remove a provider record", cobra.ExactArgs(1)),
+		newProviderTestCommand(ctx, opts, deps),
+		newProviderUpdateCommand(ctx, opts, deps),
+		newProviderRemoveCommand(ctx, opts, deps),
 	)
 	return cmd
 }
@@ -284,33 +289,91 @@ func newProviderListCommand(ctx context.Context, opts *options) *cobra.Command {
 	}
 }
 
-func newProviderTestCommand() *cobra.Command {
+func newProviderRemoveCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
+	var yes bool
+	var interactive bool
+	cmd := &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a provider and its model aliases",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("provider name is required; example: ccr provider remove litellm")
+			}
+			return validateName("provider name", args[0])
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			s, _, err := openMigratedStore(ctx, opts)
+			if err != nil {
+				return err
+			}
+			defer closeStore(s)
+
+			exists, err := s.ProviderExists(ctx, name)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return fmt.Errorf("provider %q does not exist", name)
+			}
+			confirmed, err := confirmRemoval(ctx, deps, yes, interactive, fmt.Sprintf("Remove provider %q and all associated model aliases?", name))
+			if err != nil {
+				return err
+			}
+			if !confirmed {
+				fmt.Fprintf(cmd.OutOrStdout(), "Provider %q was not removed.\n", name)
+				return nil
+			}
+			modelsRemoved, err := s.RemoveProvider(ctx, name)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Provider %q removed. Removed %d model aliases.\n", name, modelsRemoved)
+			fmt.Fprintln(cmd.OutOrStdout(), "Secret reference removed from SQLite; OS keychain entries are not deleted.")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "Remove without prompting for confirmation")
+	cmd.Flags().BoolVar(&interactive, "interactive", false, "Prompt for removal confirmation")
+	return cmd
+}
+
+func newProviderTestCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	return &cobra.Command{
 		Use:   "test <name>",
 		Short: "Validate provider config and connectivity",
-		Args:  cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("provider name is required; example: ccr provider test litellm")
+			}
+			return validateName("provider name", args[0])
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("provider test for %q: %w", args[0], errNotImplemented)
+			return runProviderTest(ctx, cmd, opts, deps, args[0])
 		},
 	}
 }
 
-func newModelCommand(ctx context.Context, opts *options) *cobra.Command {
+func newModelCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "model",
 		Short: "Manage Claude Code model aliases",
-		Long: `Manage model aliases used by Claude Code /model.
+		Long: `Manage model aliases used by ccr launch and gateway requests.
 
 Examples:
   ccr model add qwen --provider openrouter --model qwen/qwen3-coder
   ccr model add gpt --provider litellm --model gpt-5
+  ccr model update gpt --compat full
+  ccr model test gpt
+  ccr model remove gpt --yes
   ccr model list`,
 	}
 	cmd.AddCommand(
 		newModelAddCommand(ctx, opts),
 		newModelListCommand(ctx, opts),
-		newNotImplementedCommand("test <alias>", "Validate a model alias against its provider", cobra.ExactArgs(1)),
-		newNotImplementedCommand("remove <alias>", "Remove a model alias", cobra.ExactArgs(1)),
+		newModelUpdateCommand(ctx, opts, deps),
+		newModelTestCommand(ctx, opts, deps),
+		newModelRemoveCommand(ctx, opts, deps),
 	)
 	return cmd
 }
@@ -388,17 +451,6 @@ func newModelListCommand(ctx context.Context, opts *options) *cobra.Command {
 	}
 }
 
-func newLaunchCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "launch",
-		Short: "Launch Claude Code through the local router",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("launching Claude Code through the gateway: %w", errNotImplemented)
-		},
-	}
-}
-
 func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
@@ -451,41 +503,6 @@ func newDoctorCommand(ctx context.Context, opts *options, deps Dependencies) *co
 				fmt.Fprintln(cmd.OutOrStdout(), "Claude Code: not found in PATH")
 			}
 			return nil
-		},
-	}
-}
-
-func newConformanceCommand() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "conformance",
-		Short: "Run model compatibility checks",
-	}
-	cmd.AddCommand(&cobra.Command{
-		Use:   "run <alias>",
-		Short: "Run conformance checks for a model alias",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("conformance run for %q: %w", args[0], errNotImplemented)
-		},
-	})
-	return cmd
-}
-
-func newSessionsCommand() *cobra.Command {
-	return newNotImplementedCommand("sessions", "List tracked Claude Code sessions", cobra.NoArgs)
-}
-
-func newAgentsCommand() *cobra.Command {
-	return newNotImplementedCommand("agents", "List tracked Claude Code agents and workers", cobra.NoArgs)
-}
-
-func newNotImplementedCommand(use, short string, args cobra.PositionalArgs) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: short,
-		Args:  args,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("%s: %w", cmd.CommandPath(), errNotImplemented)
 		},
 	}
 }
