@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +15,10 @@ import (
 )
 
 type fakeSecrets struct {
-	values    map[string]string
-	failStore bool
+	values       map[string]string
+	failStore    bool
+	failResolve  bool
+	resolveCount int
 }
 
 func (f *fakeSecrets) Available(ctx context.Context) error {
@@ -38,6 +42,10 @@ func (f *fakeSecrets) Store(ctx context.Context, ref string, value string) error
 func (f *fakeSecrets) Resolve(ctx context.Context, ref string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
+	}
+	f.resolveCount++
+	if f.failResolve {
+		return "", fmt.Errorf("fake resolve should not be called")
 	}
 	return f.values[ref], nil
 }
@@ -173,6 +181,266 @@ func TestProviderAndModelAddRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProviderAddInteractiveSavesSelectedModelsWithPrefixedAliases(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"glm-5.2[1m]", "qwen/qwen3-coder"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"litellm",  // provider name
+		"1",        // LiteLLM/OpenAI-compatible
+		server.URL, // base URL
+		"3",        // no API key
+		"1",        // select models
+		"1",        // select first discovered model
+		"0",        // finish multiselect
+	}, "\n") + "\n"
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "--interactive", "litellm")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !strings.Contains(out, `Provider "litellm" added`) || !strings.Contains(out, "Imported 1 model aliases") {
+		t.Fatalf("interactive provider add output = %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "model", "list")
+	if err != nil {
+		t.Fatalf("model list error = %v", err)
+	}
+	if !strings.Contains(out, "litellm-glm-5-2-1m") || !strings.Contains(out, "model=glm-5.2[1m]") {
+		t.Fatalf("model list output = %q", out)
+	}
+}
+
+func TestProviderAddInteractiveTrimsBaseURLBeforeSave(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"litellm",                // provider name
+		"1",                      // LiteLLM/OpenAI-compatible
+		"  " + server.URL + "  ", // base URL with pasted whitespace
+		"3",                      // no API key
+		"3",                      // skip model import
+	}, "\n") + "\n"
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "--interactive", "litellm")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, server.URL) || strings.Contains(out, "  "+server.URL+"  ") {
+		t.Fatalf("provider list output did not store trimmed base URL: %q", out)
+	}
+}
+
+func TestProviderAddInteractiveDoesNotSaveWhenDiscoveryFailsAndUserDeclines(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"litellm",  // provider name
+		"1",        // LiteLLM/OpenAI-compatible
+		server.URL, // base URL
+		"3",        // no API key
+		"n",        // do not save after discovery failure
+	}, "\n") + "\n"
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "--interactive", "litellm")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !strings.Contains(out, `Provider "litellm" was not saved.`) {
+		t.Fatalf("interactive provider add output = %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "No providers configured.") {
+		t.Fatalf("provider was saved after decline: %q", out)
+	}
+}
+
+func TestProviderAddInteractiveRejectsConflictingAuthFlags(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	_, _, err := runCommand(t, "--db", dbPath, "provider", "add", "--interactive", "litellm", "--api-key-env", "LITELLM_API_KEY", "--no-api-key")
+	if err == nil {
+		t.Fatalf("interactive provider add unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "choose only one API key source") {
+		t.Fatalf("interactive provider add error = %v", err)
+	}
+}
+
+func TestProviderAddInteractiveShowsManualNextStepForUnsupportedDiscovery(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"anthropic", // provider name
+		"3",         // Anthropic
+		"",          // default base URL
+		"3",         // no API key
+		"y",         // save after unsupported discovery
+	}, "\n") + "\n"
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "--interactive", "anthropic")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if strings.Contains(out, "provider import-models anthropic") {
+		t.Fatalf("interactive provider add suggested impossible import-models step: %q", out)
+	}
+	if !strings.Contains(out, "Next: ccr model add <alias> --provider anthropic --model <provider-model>") {
+		t.Fatalf("interactive provider add output = %q", out)
+	}
+}
+
+func TestProviderDiscoverModelsPrintsModelsWithoutImport(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"gpt-5", "glm-5.2[1m]"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "discover-models", "litellm")
+	if err != nil {
+		t.Fatalf("discover-models error = %v", err)
+	}
+	for _, want := range []string{"Discovering models", "gpt-5", "glm-5.2[1m]"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("discover-models output missing %q:\n%s", want, out)
+		}
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "model", "list")
+	if err != nil {
+		t.Fatalf("model list error = %v", err)
+	}
+	if !strings.Contains(out, "No model aliases configured.") {
+		t.Fatalf("discover-models imported unexpectedly: %q", out)
+	}
+}
+
+func TestProviderDiscoverModelsRejectsUnsupportedProviderBeforeResolvingSecret(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--api-key-env", "ANTHROPIC_API_KEY"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	fake := &fakeSecrets{failResolve: true}
+	_, _, err := runCommandWithDeps(t, Dependencies{
+		Secrets: fake,
+	}, "--db", dbPath, "provider", "discover-models", "anthropic")
+	if err == nil {
+		t.Fatalf("discover-models unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "does not support OpenAI-compatible model discovery") {
+		t.Fatalf("discover-models error = %v", err)
+	}
+	if fake.resolveCount != 0 {
+		t.Fatalf("secret Resolve called %d times, want 0", fake.resolveCount)
+	}
+}
+
+func TestProviderImportModelsAllImportsDiscoveredModels(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"gpt-5", "glm-5.2[1m]"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "import-models", "litellm", "--all")
+	if err != nil {
+		t.Fatalf("import-models --all error = %v", err)
+	}
+	if !strings.Contains(out, "Imported 2 model aliases") {
+		t.Fatalf("import-models output = %q", out)
+	}
+	if !strings.Contains(out, "compat=degraded") {
+		t.Fatalf("import-models output did not surface degraded compatibility: %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "model", "list")
+	if err != nil {
+		t.Fatalf("model list error = %v", err)
+	}
+	for _, want := range []string{"litellm-gpt-5", "litellm-glm-5-2-1m", "model=glm-5.2[1m]"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("model list output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestProviderImportModelsAllSkipsExistingAliases(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"glm-5.2[1m]", "gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "litellm-glm-5-2-1m", "--provider", "litellm", "--model", "existing/model"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "import-models", "litellm", "--all")
+	if err != nil {
+		t.Fatalf("import-models --all error = %v", err)
+	}
+	if !strings.Contains(out, "Imported 1 model aliases") || !strings.Contains(out, "Skipped 1 existing aliases") {
+		t.Fatalf("import-models conflict output = %q", out)
+	}
+}
+
+func TestProviderImportModelsAllSkipsTruncatedAliasCollisions(t *testing.T) {
+	t.Parallel()
+
+	modelPrefix := strings.Repeat("a", 80)
+	server := newModelsServer(t, []string{modelPrefix + "-one", modelPrefix + "-two"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "import-models", "litellm", "--all")
+	if err != nil {
+		t.Fatalf("import-models --all error = %v", err)
+	}
+	if !strings.Contains(out, "Imported 1 model aliases") || !strings.Contains(out, "Skipped 1 existing aliases") {
+		t.Fatalf("import-models truncation collision output = %q", out)
+	}
+}
+
 func TestProviderAddFromStdinStoresKeyringReferenceOnly(t *testing.T) {
 	t.Parallel()
 
@@ -254,6 +522,27 @@ func TestProviderAddValidation(t *testing.T) {
 	}
 }
 
+func TestGenerateProviderModelAliasUsesProviderPrefix(t *testing.T) {
+	t.Parallel()
+
+	got := generateProviderModelAlias("litellm", "glm-5.2[1m]")
+	if got != "litellm-glm-5-2-1m" {
+		t.Fatalf("generateProviderModelAlias() = %q", got)
+	}
+	got = generateProviderModelAlias("openrouter", "glm-5.2[1m]")
+	if got != "openrouter-glm-5-2-1m" {
+		t.Fatalf("generateProviderModelAlias(openrouter) = %q", got)
+	}
+
+	got = generateProviderModelAlias("litellm", strings.Repeat("a", 120))
+	if len(got) > 64 {
+		t.Fatalf("generateProviderModelAlias(long) length = %d, want <= 64: %q", len(got), got)
+	}
+	if err := validateName("model alias", got); err != nil {
+		t.Fatalf("generateProviderModelAlias(long) produced invalid alias %q: %v", got, err)
+	}
+}
+
 func TestDoctorUsesDatabaseAndReportsClaudeCode(t *testing.T) {
 	t.Parallel()
 
@@ -290,4 +579,36 @@ func runCommandWithDeps(t *testing.T, deps Dependencies, args ...string) (string
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), errOut.String(), err
+}
+
+func newModelsServer(t *testing.T, models []string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q, want /v1/models", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		parts := make([]string, 0, len(models))
+		for _, model := range models {
+			parts = append(parts, fmt.Sprintf(`{"id":%q}`, model))
+		}
+		_, _ = fmt.Fprintf(w, `{"data":[%s]}`, strings.Join(parts, ","))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+type promptReader struct {
+	reader *strings.Reader
+}
+
+func newPromptReader(input string) *promptReader {
+	return &promptReader{reader: strings.NewReader(input)}
+}
+
+func (r *promptReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return r.reader.Read(p[:1])
 }
