@@ -176,6 +176,22 @@ WHERE providers.name = ?
 	return nil
 }
 
+func (s *Store) ModelExists(ctx context.Context, alias string) (bool, error) {
+	var found int
+	err := s.db.QueryRowContext(ctx, `
+SELECT 1
+FROM models
+WHERE alias = ?
+`, alias).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store.ModelExists: reading model %q: %w", alias, err)
+	}
+	return true, nil
+}
+
 func (s *Store) ListModels(ctx context.Context) ([]Model, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT models.id, models.alias, providers.name, models.provider_model, models.status, models.created_at

@@ -52,6 +52,20 @@ func TestMigrateAndProviderModelRoundTrip(t *testing.T) {
 	if addModelErr := s.AddModel(ctx, Model{Alias: "qwen", ProviderName: "openrouter", ProviderModel: "qwen/qwen3-coder", Status: "degraded"}); addModelErr != nil {
 		t.Fatalf("AddModel() error = %v", addModelErr)
 	}
+	modelExists, err := s.ModelExists(ctx, "qwen")
+	if err != nil {
+		t.Fatalf("ModelExists(qwen) error = %v", err)
+	}
+	if !modelExists {
+		t.Fatalf("ModelExists(qwen) = false, want true")
+	}
+	modelExists, err = s.ModelExists(ctx, "missing")
+	if err != nil {
+		t.Fatalf("ModelExists(missing) error = %v", err)
+	}
+	if modelExists {
+		t.Fatalf("ModelExists(missing) = true, want false")
+	}
 
 	providers, err := s.ListProviders(ctx)
 	if err != nil {
