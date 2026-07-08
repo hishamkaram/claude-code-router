@@ -62,6 +62,18 @@ func TestModelsEndpointNormalizesBaseURL(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsEndpointNormalizesBaseURL(t *testing.T) {
+	t.Parallel()
+
+	got, err := ChatCompletionsEndpoint("https://openrouter.ai/api/v1/")
+	if err != nil {
+		t.Fatalf("ChatCompletionsEndpoint() error = %v", err)
+	}
+	if got != "https://openrouter.ai/api/v1/chat/completions" {
+		t.Fatalf("ChatCompletionsEndpoint() = %q", got)
+	}
+}
+
 func TestDiscoverOpenAICompatibleModelsIncludesBearerAuth(t *testing.T) {
 	t.Parallel()
 

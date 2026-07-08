@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -57,7 +58,7 @@ func TestRootHelpExplainsRouterConcepts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("help error = %v", err)
 	}
-	for _, want := range []string{"fixed local gateway", "/model <alias>", "SQLite", "never silently fall back"} {
+	for _, want := range []string{"fixed local gateway", "launch --model <alias>", "SQLite", "never silently fall back"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help output missing %q:\n%s", want, out)
 		}
@@ -114,41 +115,46 @@ func TestNoArgCommandsRejectStrayArgs(t *testing.T) {
 	}
 }
 
-func TestPlaceholderCommandsPreserveExpectedOperands(t *testing.T) {
+func TestVisibleCommandsDoNotReturnNotImplemented(t *testing.T) {
 	t.Parallel()
 
-	tests := [][]string{
-		{"provider", "remove", "anthropic"},
-		{"model", "test", "qwen"},
-		{"model", "remove", "qwen"},
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
 	}
-	for _, args := range tests {
-		args := args
-		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			_, _, err := runCommand(t, args...)
-			if err == nil {
-				t.Fatalf("runCommand(%v) unexpectedly succeeded", args)
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "litellm-gpt-5", "--provider", "litellm", "--model", "gpt-5"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	tests := []struct {
+		name string
+		deps Dependencies
+		args []string
+	}{
+		{name: "provider_test", args: []string{"--db", dbPath, "provider", "test", "litellm"}},
+		{name: "provider_update_missing_flags", args: []string{"--db", dbPath, "provider", "update", "litellm"}},
+		{name: "provider_remove_confirm_required", args: []string{"--db", dbPath, "provider", "remove", "litellm"}},
+		{name: "model_test", args: []string{"--db", dbPath, "model", "test", "litellm-gpt-5"}},
+		{name: "model_update_missing_flags", args: []string{"--db", dbPath, "model", "update", "litellm-gpt-5"}},
+		{name: "model_remove_confirm_required", args: []string{"--db", dbPath, "model", "remove", "litellm-gpt-5"}},
+		{name: "conformance_run", args: []string{"--db", dbPath, "conformance", "run", "litellm-gpt-5"}},
+		{name: "sessions", args: []string{"--db", dbPath, "sessions"}},
+		{name: "agents", args: []string{"--db", dbPath, "agents"}},
+		{name: "launch", deps: Dependencies{Launcher: &fakeLauncher{pid: os.Getpid()}}, args: []string{"--db", dbPath, "launch"}},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			out, errOut, err := runCommandWithDeps(t, tt.deps, tt.args...)
+			combined := out + errOut
+			if err != nil {
+				combined += err.Error()
 			}
-			if !strings.Contains(err.Error(), "not implemented yet") {
-				t.Fatalf("error = %v, want not implemented", err)
-			}
-			if strings.Contains(err.Error(), "unknown command") {
-				t.Fatalf("error = %v, want operand accepted by placeholder", err)
+			if strings.Contains(strings.ToLower(combined), "not implemented yet") {
+				t.Fatalf("command returned placeholder output/error:\nstdout=%s\nstderr=%s\nerr=%v", out, errOut, err)
 			}
 		})
-	}
-}
-
-func TestProviderAddRequiresAPIKeyForOpenRouter(t *testing.T) {
-	t.Parallel()
-
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	_, _, err := runCommand(t, "--db", dbPath, "provider", "add", "openrouter")
-	if err == nil {
-		t.Fatalf("expected missing API key error")
-	}
-	if !strings.Contains(err.Error(), "API key required") {
-		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -244,6 +250,43 @@ func TestProviderAddInteractiveTrimsBaseURLBeforeSave(t *testing.T) {
 	}
 }
 
+func TestProviderAddInteractiveStoresKeychainAPIKeyFromNonTerminal(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"openrouter", // provider name
+		"2",          // OpenRouter
+		server.URL,   // custom base URL to avoid external network
+		"1",          // store API key in keychain
+		"sk-test",    // API key
+		"y",          // save after discovery failure
+	}, "\n") + "\n"
+	fake := &fakeSecrets{}
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In:      newPromptReader(input),
+		Secrets: fake,
+	}, "--db", dbPath, "provider", "add", "--interactive", "openrouter")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if strings.Contains(out, "sk-test") || strings.Contains(errOut, "sk-test") {
+		t.Fatalf("interactive provider add leaked secret:\nstdout=%s\nstderr=%s", out, errOut)
+	}
+	ref := secret.KeyringRef("openrouter")
+	if got := fake.values[ref]; got != "sk-test" {
+		t.Fatalf("stored keyring value for %s = %q, want sk-test", ref, got)
+	}
+	if !strings.Contains(out, `Provider "openrouter" added`) {
+		t.Fatalf("interactive provider add output = %q", out)
+	}
+}
+
 func TestProviderAddInteractiveDoesNotSaveWhenDiscoveryFailsAndUserDeclines(t *testing.T) {
 	t.Parallel()
 
@@ -290,6 +333,22 @@ func TestProviderAddInteractiveRejectsConflictingAuthFlags(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "choose only one API key source") {
 		t.Fatalf("interactive provider add error = %v", err)
+	}
+}
+
+func TestProviderAddInteractiveRejectsInvalidStaticTypeBeforeDatabaseOpen(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	_, _, err := runCommand(t, "--db", dbPath, "provider", "add", "--interactive", "--type", "bad", "litellm")
+	if err == nil {
+		t.Fatalf("interactive provider add unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "invalid provider type") {
+		t.Fatalf("interactive provider add error = %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("database exists after invalid interactive provider add: stat err=%v", statErr)
 	}
 }
 
@@ -611,4 +670,76 @@ func (r *promptReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	return r.reader.Read(p[:1])
+}
+
+type fakeLauncher struct {
+	pid     int
+	args    []string
+	env     []string
+	out     io.Writer
+	errOut  io.Writer
+	waitErr error
+	starts  int
+	process *fakeProcess
+}
+
+func (f *fakeLauncher) Start(ctx context.Context, args, env []string, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	f.starts++
+	f.args = append([]string(nil), args...)
+	f.env = append([]string(nil), env...)
+	f.out = out
+	f.errOut = errOut
+	f.process = &fakeProcess{pid: f.pid, waitErr: f.waitErr}
+	return f.process, nil
+}
+
+func (f *fakeLauncher) hasEnvPrefix(prefix string) bool {
+	for _, item := range f.env {
+		if strings.HasPrefix(item, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeLauncher) hasEnv(value string) bool {
+	for _, item := range f.env {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeLauncher) hasArg(value string) bool {
+	for _, item := range f.args {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+type fakeProcess struct {
+	pid     int
+	waitErr error
+	stopped bool
+	waited  bool
+}
+
+func (p *fakeProcess) PID() int {
+	return p.pid
+}
+
+func (p *fakeProcess) Wait() error {
+	p.waited = true
+	return p.waitErr
+}
+
+func (p *fakeProcess) Stop() error {
+	p.stopped = true
+	return nil
 }
