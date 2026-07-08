@@ -31,6 +31,20 @@ type options struct {
 	dbPath string
 }
 
+type secretPlan struct {
+	ref   string
+	value string
+	store bool
+}
+
+type providerAddConfig struct {
+	providerType string
+	baseURL      string
+	apiKeyEnv    string
+	apiKeyStdin  bool
+	noAPIKey     bool
+}
+
 func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
 	cmd := NewRootCommand(ctx, Dependencies{
 		In:      in,
@@ -95,6 +109,7 @@ func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print ccr version information",
+		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Fprintln(cmd.OutOrStdout(), buildinfo.String())
 		},
@@ -105,6 +120,7 @@ func newInitCommand(ctx context.Context, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Initialize the local SQLite database",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, dbPath, err := openMigratedStore(ctx, opts)
 			if err != nil {
@@ -133,7 +149,7 @@ Examples:
 		newProviderAddCommand(ctx, opts, deps),
 		newProviderListCommand(ctx, opts),
 		newProviderTestCommand(),
-		newNotImplementedCommand("remove", "Remove a provider record"),
+		newNotImplementedCommand("remove <name>", "Remove a provider record", cobra.ExactArgs(1)),
 	)
 	return cmd
 }
@@ -155,32 +171,13 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 			return validateName("provider name", args[0])
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-			resolvedType, err := resolveProviderType(name, providerType)
-			if err != nil {
-				return err
-			}
-			resolvedURL, err := resolveBaseURL(resolvedType, baseURL)
-			if err != nil {
-				return err
-			}
-			secretRef, err := resolveProviderSecret(ctx, deps, name, resolvedType, apiKeyEnv, apiKeyStdin, noAPIKey)
-			if err != nil {
-				return err
-			}
-
-			s, _, err := openMigratedStore(ctx, opts)
-			if err != nil {
-				return err
-			}
-			defer closeStore(s)
-
-			if err := s.AddProvider(ctx, store.Provider{Name: name, Type: resolvedType, BaseURL: resolvedURL, SecretRef: secretRef}); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, %s, secret=%s)\n", name, resolvedType, resolvedURL, secret.RedactRef(secretRef))
-			fmt.Fprintf(cmd.OutOrStdout(), "Next: ccr model add <alias> --provider %s --model <provider-model>\n", name)
-			return nil
+			return runProviderAdd(ctx, cmd, opts, deps, args[0], providerAddConfig{
+				providerType: providerType,
+				baseURL:      baseURL,
+				apiKeyEnv:    apiKeyEnv,
+				apiKeyStdin:  apiKeyStdin,
+				noAPIKey:     noAPIKey,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&providerType, "type", "", "Provider type: anthropic, openrouter, litellm, or local (defaults to provider name when recognized)")
@@ -191,10 +188,52 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 	return cmd
 }
 
+func runProviderAdd(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, name string, cfg providerAddConfig) error {
+	resolvedType, err := resolveProviderType(name, cfg.providerType)
+	if err != nil {
+		return err
+	}
+	resolvedURL, err := resolveBaseURL(resolvedType, cfg.baseURL)
+	if err != nil {
+		return err
+	}
+	plan, err := resolveProviderSecretPlan(deps, name, resolvedType, cfg.apiKeyEnv, cfg.apiKeyStdin, cfg.noAPIKey)
+	if err != nil {
+		return err
+	}
+
+	s, _, err := openMigratedStore(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer closeStore(s)
+
+	exists, err := s.ProviderExists(ctx, name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return fmt.Errorf("provider %q already exists", name)
+	}
+
+	if plan.store {
+		if err := deps.Secrets.Store(ctx, plan.ref, plan.value); err != nil {
+			return fmt.Errorf("storing API key for provider %q: %w", name, err)
+		}
+	}
+	if err := s.AddProvider(ctx, store.Provider{Name: name, Type: resolvedType, BaseURL: resolvedURL, SecretRef: plan.ref}); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, %s, secret=%s)\n", name, resolvedType, resolvedURL, secret.RedactRef(plan.ref))
+	fmt.Fprintf(cmd.OutOrStdout(), "Next: ccr model add <alias> --provider %s --model <provider-model>\n", name)
+	return nil
+}
+
 func newProviderListCommand(ctx context.Context, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List configured providers",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, _, err := openMigratedStore(ctx, opts)
 			if err != nil {
@@ -242,8 +281,8 @@ Examples:
 	cmd.AddCommand(
 		newModelAddCommand(ctx, opts),
 		newModelListCommand(ctx, opts),
-		newNotImplementedCommand("test", "Validate a model alias against its provider"),
-		newNotImplementedCommand("remove", "Remove a model alias"),
+		newNotImplementedCommand("test <alias>", "Validate a model alias against its provider", cobra.ExactArgs(1)),
+		newNotImplementedCommand("remove <alias>", "Remove a model alias", cobra.ExactArgs(1)),
 	)
 	return cmd
 }
@@ -298,6 +337,7 @@ func newModelListCommand(ctx context.Context, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List configured model aliases",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, _, err := openMigratedStore(ctx, opts)
 			if err != nil {
@@ -324,6 +364,7 @@ func newLaunchCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "launch",
 		Short: "Launch Claude Code through the local router",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("launching Claude Code through the gateway: %w", errNotImplemented)
 		},
@@ -334,6 +375,7 @@ func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show local router status",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, dbPath, err := openMigratedStore(ctx, opts)
 			if err != nil {
@@ -358,6 +400,7 @@ func newDoctorCommand(ctx context.Context, opts *options, deps Dependencies) *co
 	return &cobra.Command{
 		Use:   "doctor",
 		Short: "Check local database, secret backend, and Claude Code availability",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			s, dbPath, err := openMigratedStore(ctx, opts)
 			if err != nil {
@@ -401,19 +444,20 @@ func newConformanceCommand() *cobra.Command {
 }
 
 func newSessionsCommand() *cobra.Command {
-	return newNotImplementedCommand("sessions", "List tracked Claude Code sessions")
+	return newNotImplementedCommand("sessions", "List tracked Claude Code sessions", cobra.NoArgs)
 }
 
 func newAgentsCommand() *cobra.Command {
-	return newNotImplementedCommand("agents", "List tracked Claude Code agents and workers")
+	return newNotImplementedCommand("agents", "List tracked Claude Code agents and workers", cobra.NoArgs)
 }
 
-func newNotImplementedCommand(use, short string) *cobra.Command {
+func newNotImplementedCommand(use, short string, args cobra.PositionalArgs) *cobra.Command {
 	return &cobra.Command{
 		Use:   use,
 		Short: short,
+		Args:  args,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fmt.Errorf("%s: %w", use, errNotImplemented)
+			return fmt.Errorf("%s: %w", cmd.CommandPath(), errNotImplemented)
 		},
 	}
 }
@@ -442,7 +486,7 @@ func closeStore(s *store.Store) {
 	_ = s.Close()
 }
 
-func resolveProviderSecret(ctx context.Context, deps Dependencies, name, providerType, apiKeyEnv string, apiKeyStdin, noAPIKey bool) (string, error) {
+func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv string, apiKeyStdin, noAPIKey bool) (secretPlan, error) {
 	selected := 0
 	for _, enabled := range []bool{apiKeyEnv != "", apiKeyStdin, noAPIKey} {
 		if enabled {
@@ -450,30 +494,29 @@ func resolveProviderSecret(ctx context.Context, deps Dependencies, name, provide
 		}
 	}
 	if selected > 1 {
-		return "", fmt.Errorf("choose only one of --api-key-env, --api-key-stdin, or --no-api-key")
+		return secretPlan{}, fmt.Errorf("choose only one of --api-key-env, --api-key-stdin, or --no-api-key")
 	}
 	if apiKeyEnv != "" {
 		if err := validateEnvName(apiKeyEnv); err != nil {
-			return "", err
+			return secretPlan{}, err
 		}
-		return secret.EnvRef(apiKeyEnv), nil
+		return secretPlan{ref: secret.EnvRef(apiKeyEnv)}, nil
 	}
 	if apiKeyStdin {
 		raw, err := io.ReadAll(deps.In)
 		if err != nil {
-			return "", fmt.Errorf("reading API key from stdin: %w", err)
+			return secretPlan{}, fmt.Errorf("reading API key from stdin: %w", err)
 		}
 		value := strings.TrimSpace(string(raw))
-		ref := secret.KeyringRef(name)
-		if err := deps.Secrets.Store(ctx, ref, value); err != nil {
-			return "", err
+		if value == "" {
+			return secretPlan{}, fmt.Errorf("--api-key-stdin received an empty API key")
 		}
-		return ref, nil
+		return secretPlan{ref: secret.KeyringRef(name), value: value, store: true}, nil
 	}
 	if noAPIKey || providerType == "local" || providerType == "litellm" {
-		return "", nil
+		return secretPlan{}, nil
 	}
-	return "", fmt.Errorf("API key required for provider type %q; use --api-key-env <ENV>, --api-key-stdin, or --no-api-key if this endpoint is intentionally unauthenticated", providerType)
+	return secretPlan{}, fmt.Errorf("API key required for provider type %q; use --api-key-env <ENV>, --api-key-stdin, or --no-api-key if this endpoint is intentionally unauthenticated", providerType)
 }
 
 func resolveProviderType(name, explicit string) (string, error) {
