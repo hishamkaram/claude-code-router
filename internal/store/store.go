@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -109,6 +110,22 @@ WHERE name = ?
 		return Provider{}, fmt.Errorf("store.GetProvider: reading provider %q: %w", name, err)
 	}
 	return provider, nil
+}
+
+func (s *Store) ProviderExists(ctx context.Context, name string) (bool, error) {
+	var found int
+	err := s.db.QueryRowContext(ctx, `
+SELECT 1
+FROM providers
+WHERE name = ?
+`, name).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("store.ProviderExists: reading provider %q: %w", name, err)
+	}
+	return true, nil
 }
 
 func (s *Store) ListProviders(ctx context.Context) ([]Provider, error) {

@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -23,6 +24,9 @@ func (DefaultBackend) Available(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("secret.DefaultBackend.Available: context canceled: %w", err)
 	}
+	if _, err := keyring.Get(serviceName, "__availability_probe__"); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return fmt.Errorf("secret.DefaultBackend.Available: OS keychain unavailable: %w; use --api-key-env <ENV> to store an environment-variable reference instead", err)
+	}
 	return nil
 }
 
@@ -38,7 +42,7 @@ func (DefaultBackend) Store(ctx context.Context, ref, value string) error {
 		return fmt.Errorf("secret.DefaultBackend.Store: empty secret for %q", RedactRef(ref))
 	}
 	if err := keyring.Set(serviceName, account, value); err != nil {
-		return fmt.Errorf("secret.DefaultBackend.Store: storing %q in OS keychain: %w", RedactRef(ref), err)
+		return fmt.Errorf("secret.DefaultBackend.Store: storing %q in OS keychain: %w; use --api-key-env <ENV> to store an environment-variable reference instead", RedactRef(ref), err)
 	}
 	return nil
 }

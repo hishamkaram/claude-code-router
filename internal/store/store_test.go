@@ -35,6 +35,20 @@ func TestMigrateAndProviderModelRoundTrip(t *testing.T) {
 	if addProviderErr := s.AddProvider(ctx, Provider{Name: "openrouter", Type: "openrouter", BaseURL: "https://openrouter.ai/api", SecretRef: "env:OPENROUTER_API_KEY"}); addProviderErr != nil {
 		t.Fatalf("AddProvider() error = %v", addProviderErr)
 	}
+	exists, err := s.ProviderExists(ctx, "openrouter")
+	if err != nil {
+		t.Fatalf("ProviderExists() error = %v", err)
+	}
+	if !exists {
+		t.Fatalf("ProviderExists() = false, want true")
+	}
+	exists, err = s.ProviderExists(ctx, "missing")
+	if err != nil {
+		t.Fatalf("ProviderExists(missing) error = %v", err)
+	}
+	if exists {
+		t.Fatalf("ProviderExists(missing) = true, want false")
+	}
 	if addModelErr := s.AddModel(ctx, Model{Alias: "qwen", ProviderName: "openrouter", ProviderModel: "qwen/qwen3-coder", Status: "degraded"}); addModelErr != nil {
 		t.Fatalf("AddModel() error = %v", addModelErr)
 	}
