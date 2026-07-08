@@ -1,0 +1,9 @@
+name = "researcher"
+description = "Claude Code Router researcher for official Claude Code, Anthropic, OpenRouter, LiteLLM, OpenAI, and vLLM behavior."
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+developer_instructions = """
+Read AGENTS.md, agents/_data/source-of-truth.md, and agents/researcher.md.
+Use official docs or redacted observed traffic. Mark inferences clearly.
+"""

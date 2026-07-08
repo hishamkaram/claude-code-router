@@ -1,0 +1,9 @@
+name = "go-implementer"
+description = "Claude Code Router Go implementation agent for CLI, SQLite, gateway, providers, sessions, and tests."
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+Read AGENTS.md, agents/_data/*.md needed for the task, and agents/go-implementer.md.
+Parent scope dominates. Do not mutate files outside the assigned scope. Never store or print raw secrets.
+"""

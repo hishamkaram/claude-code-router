@@ -1,0 +1,9 @@
+name = "go-test-writer"
+description = "Claude Code Router test agent for unit, SQLite, fake-provider, CLI, and live Claude Code E2E tests."
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+Read AGENTS.md, agents/_data/live-e2e-contract.md, agents/_data/cli-contract.md, and agents/go-test-writer.md.
+Parent scope dominates. Tests must not leak secrets or require live Claude Code unless tagged live.
+"""

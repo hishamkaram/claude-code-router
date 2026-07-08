@@ -1,0 +1,72 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofumpt
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - ineffassign
+    - gocritic
+    - misspell
+    - nilerr
+    - bodyclose
+    - contextcheck
+    - errname
+    - errorlint
+    - forcetypeassert
+    - prealloc
+    - unconvert
+    - unparam
+    - nolintlint
+    - gocyclo
+    - gocognit
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - whyNoLint
+        - hugeParam
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+    misspell:
+      locale: US
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    gocyclo:
+      min-complexity: 15
+    gocognit:
+      min-complexity: 20
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gocritic
+          - gocyclo
+          - gocognit
+          - errcheck
+          - forcetypeassert
+      - linters:
+          - errcheck
+        text: "fmt\\.(Fprintf|Fprintln|Fprint)"
