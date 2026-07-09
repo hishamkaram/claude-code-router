@@ -14,20 +14,15 @@ import (
 )
 
 func validateThinking(raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
+	thinkingType, err := openAIThinkingType(raw)
+	if err != nil {
+		return err
 	}
-	var payload struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return fmt.Errorf("unsupported thinking field: %w", err)
-	}
-	switch payload.Type {
-	case "", "adaptive", "disabled":
+	switch thinkingType {
+	case "", "adaptive", "disabled", "enabled":
 		return nil
 	default:
-		return fmt.Errorf("thinking mode %q is not supported by the OpenAI-compatible gateway path", payload.Type)
+		return fmt.Errorf("thinking mode %q is not supported by the OpenAI-compatible gateway path", thinkingType)
 	}
 }
 
@@ -299,9 +294,22 @@ func openAIMessagesFromAnthropic(message anthropicMessage) ([]openAIMessage, err
 		return openAIUserMessagesFromAnthropic(message.Content)
 	case "assistant":
 		return openAIAssistantMessagesFromAnthropic(message.Content)
+	case "system":
+		return openAISystemMessagesFromAnthropic(message.Content)
 	default:
 		return nil, fmt.Errorf("unsupported message role %q", message.Role)
 	}
+}
+
+func openAISystemMessagesFromAnthropic(content any) ([]openAIMessage, error) {
+	text, err := anthropicContentText(content)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported system message content: %w", err)
+	}
+	if text == "" {
+		return nil, nil
+	}
+	return []openAIMessage{{Role: "system", Content: text}}, nil
 }
 
 func openAIUserMessagesFromAnthropic(content any) ([]openAIMessage, error) {
@@ -449,6 +457,12 @@ func openAIOptionsFromAnthropic(req anthropicRequest) (openAIRequestOptions, err
 	if err != nil {
 		return openAIRequestOptions{}, err
 	}
+	if reasoningEffort == "" {
+		reasoningEffort, err = openAIReasoningEffortFromThinking(req.Thinking)
+		if err != nil {
+			return openAIRequestOptions{}, err
+		}
+	}
 	return openAIRequestOptions{user: user, reasoningEffort: reasoningEffort}, nil
 }
 
@@ -488,6 +502,30 @@ func openAIReasoningEffortFromOutputConfig(raw json.RawMessage) (string, error) 
 		}
 	}
 	return openAIReasoningEffortFromClaudeEffort(effort)
+}
+
+func openAIReasoningEffortFromThinking(raw json.RawMessage) (string, error) {
+	thinkingType, err := openAIThinkingType(raw)
+	if err != nil {
+		return "", err
+	}
+	if thinkingType == "enabled" {
+		return "high", nil
+	}
+	return "", nil
+}
+
+func openAIThinkingType(raw json.RawMessage) (string, error) {
+	if !rawJSONPresent(raw) {
+		return "", nil
+	}
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", fmt.Errorf("unsupported thinking field: %w", err)
+	}
+	return strings.TrimSpace(payload.Type), nil
 }
 
 func openAIReasoningEffortFromClaudeEffort(effort string) (string, error) {
@@ -544,138 +582,186 @@ func anthropicTextBlockText(block map[string]any) (string, error) {
 	return text, nil
 }
 
-func writeAnthropicStream(w http.ResponseWriter, alias string, resp openAIChatResponse, finishReason string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
-
-	blocks := anthropicContentBlocksFromOpenAI(resp)
-	id := firstNonEmpty(resp.ID, "msg_ccr")
-	writeSSEEvent(w, flusher, "message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":            id,
-			"type":          "message",
-			"role":          "assistant",
-			"model":         alias,
-			"content":       []any{},
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]int{
-				"input_tokens":  resp.Usage.PromptTokens,
-				"output_tokens": 0,
-			},
-		},
-	})
-	for index, block := range blocks {
-		writeSSEEvent(w, flusher, "content_block_start", map[string]any{
-			"type":          "content_block_start",
-			"index":         index,
-			"content_block": streamStartBlock(block),
-		})
-		if text, ok := block["text"].(string); ok && text != "" {
-			writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
-				"type":  "content_block_delta",
-				"index": index,
-				"delta": map[string]string{"type": "text_delta", "text": text},
-			})
-		}
-		writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
-			"type":  "content_block_stop",
-			"index": index,
-		})
-	}
-	writeSSEEvent(w, flusher, "message_delta", map[string]any{
-		"type": "message_delta",
-		"delta": map[string]any{
-			"stop_reason":   finishReason,
-			"stop_sequence": nil,
-		},
-		"usage": map[string]int{"output_tokens": resp.Usage.CompletionTokens},
-	})
-	writeSSEEvent(w, flusher, "message_stop", map[string]string{"type": "message_stop"})
-}
-
-func writeSSEEvent(w io.Writer, flusher http.Flusher, event string, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
-	if flusher != nil {
-		flusher.Flush()
-	}
-}
-
-func toAnthropicResponse(alias string, resp openAIChatResponse, finishReason string) map[string]any {
-	return map[string]any{
-		"id":            firstNonEmpty(resp.ID, "msg_ccr"),
-		"type":          "message",
-		"role":          "assistant",
-		"model":         alias,
-		"content":       anthropicContentBlocksFromOpenAI(resp),
-		"stop_reason":   finishReason,
-		"stop_sequence": nil,
-		"usage": map[string]int{
-			"input_tokens":  resp.Usage.PromptTokens,
-			"output_tokens": resp.Usage.CompletionTokens,
-		},
-	}
-}
-
-func anthropicContentBlocksFromOpenAI(resp openAIChatResponse) []map[string]any {
-	if len(resp.Choices) == 0 {
-		return []map[string]any{{"type": "text", "text": ""}}
-	}
-	message := resp.Choices[0].Message
-	toolCalls := message.ToolCalls
-	if len(toolCalls) == 0 && message.FunctionCall != nil {
-		toolCalls = []openAIToolCall{{
-			ID:       "toolu_ccr_function_call",
-			Type:     "function",
-			Function: *message.FunctionCall,
-		}}
-	}
-	blocks := make([]map[string]any, 0, 1+len(toolCalls))
-	if message.Content != "" || len(toolCalls) == 0 {
-		blocks = append(blocks, map[string]any{"type": "text", "text": message.Content})
-	}
-	for _, toolCall := range toolCalls {
-		blocks = append(blocks, map[string]any{
-			"type":  "tool_use",
-			"id":    firstNonEmpty(toolCall.ID, "toolu_ccr"),
-			"name":  toolCall.Function.Name,
-			"input": openAIToolArguments(toolCall.Function.Arguments),
-		})
-	}
-	return blocks
-}
-
-func streamStartBlock(block map[string]any) map[string]any {
-	if block["type"] == "text" {
-		return map[string]any{"type": "text", "text": ""}
-	}
-	return block
-}
-
 func openAIToolArguments(raw string) any {
+	return openAIToolArgumentsForTool("", raw)
+}
+
+func openAIToolArgumentsForTool(toolName, raw string) any {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return map[string]any{}
 	}
-	var decoded any
-	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+	decoded, ok := decodeOpenAIToolArguments(raw)
+	if !ok {
 		return map[string]any{"arguments": raw}
 	}
 	if decoded == nil {
 		return map[string]any{}
 	}
-	if _, ok := decoded.(map[string]any); !ok {
+	decodedObject, ok := decoded.(map[string]any)
+	if !ok {
 		return map[string]any{"value": decoded}
 	}
+	if strings.EqualFold(strings.TrimSpace(toolName), "Agent") {
+		return normalizeAgentToolInput(decodedObject)
+	}
 	return decoded
+}
+
+func normalizeAgentToolInput(input map[string]any) map[string]any {
+	normalized := make(map[string]any, 6)
+	prompt := trimmedStringField(input, "prompt")
+	if prompt != "" {
+		normalized["prompt"] = prompt
+	}
+	description := trimmedStringField(input, "description")
+	if description == "" {
+		description = agentDescriptionFromPrompt(prompt)
+	}
+	if description != "" {
+		normalized["description"] = description
+	}
+	if subagentType := firstTrimmedStringField(input, "subagent_type", "agent_type"); subagentType != "" {
+		normalized["subagent_type"] = subagentType
+	}
+	if isolation := allowedStringField(input, "isolation", "worktree", "remote"); isolation != "" {
+		normalized["isolation"] = isolation
+	}
+	if model := allowedStringField(input, "model", "sonnet", "opus", "haiku", "fable"); model != "" {
+		normalized["model"] = model
+	}
+	if runInBackground, ok := boolField(input, "run_in_background"); ok {
+		normalized["run_in_background"] = runInBackground
+	}
+	return normalized
+}
+
+func agentDescriptionFromPrompt(prompt string) string {
+	words := strings.Fields(prompt)
+	if len(words) == 0 {
+		return ""
+	}
+	if len(words) > 5 {
+		words = words[:5]
+	}
+	return strings.Join(words, " ")
+}
+
+func firstTrimmedStringField(input map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := trimmedStringField(input, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func trimmedStringField(input map[string]any, key string) string {
+	value, _ := input[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func allowedStringField(input map[string]any, key string, allowed ...string) string {
+	value := trimmedStringField(input, key)
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value
+		}
+	}
+	return ""
+}
+
+func boolField(input map[string]any, key string) (value, ok bool) {
+	switch value := input[key].(type) {
+	case bool:
+		return value, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func decodeOpenAIToolArguments(raw string) (any, bool) {
+	var decoded any
+	if err := json.Unmarshal([]byte(raw), &decoded); err == nil {
+		return decoded, true
+	}
+	suffix, ok := missingJSONClosingSuffix(raw)
+	if !ok {
+		return nil, false
+	}
+	if err := json.Unmarshal([]byte(raw+suffix), &decoded); err != nil {
+		return nil, false
+	}
+	return decoded, true
+}
+
+func missingJSONClosingSuffix(raw string) (string, bool) {
+	state := jsonClosingSuffixState{stack: make([]byte, 0, 4)}
+	for i := 0; i < len(raw); i++ {
+		if !state.consume(raw[i]) {
+			return "", false
+		}
+	}
+	if state.inString || len(state.stack) == 0 {
+		return "", false
+	}
+	suffix := make([]byte, 0, len(state.stack))
+	for i := len(state.stack) - 1; i >= 0; i-- {
+		suffix = append(suffix, state.stack[i])
+	}
+	return string(suffix), true
+}
+
+type jsonClosingSuffixState struct {
+	stack    []byte
+	inString bool
+	escaped  bool
+}
+
+func (s *jsonClosingSuffixState) consume(b byte) bool {
+	if s.inString {
+		s.consumeStringByte(b)
+		return true
+	}
+	switch b {
+	case '"':
+		s.inString = true
+	case '{':
+		s.stack = append(s.stack, '}')
+	case '[':
+		s.stack = append(s.stack, ']')
+	case '}', ']':
+		return s.consumeClosingDelimiter(b)
+	}
+	return true
+}
+
+func (s *jsonClosingSuffixState) consumeStringByte(b byte) {
+	if s.escaped {
+		s.escaped = false
+		return
+	}
+	if b == '\\' {
+		s.escaped = true
+		return
+	}
+	if b == '"' {
+		s.inString = false
+	}
+}
+
+func (s *jsonClosingSuffixState) consumeClosingDelimiter(b byte) bool {
+	if len(s.stack) == 0 || s.stack[len(s.stack)-1] != b {
+		return false
+	}
+	s.stack = s.stack[:len(s.stack)-1]
+	return true
 }
 
 func anthropicStopReasonFromOpenAI(resp openAIChatResponse) (string, error) {

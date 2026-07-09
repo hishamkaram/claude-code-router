@@ -139,6 +139,32 @@ func TestProviderUpdateWithFlags(t *testing.T) {
 	}
 }
 
+func TestProviderUpdateWithAPIKeyFile(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", "http://localhost:4000", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	keyPath := writeAPIKeyFile(t, 0o600)
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "update", "litellm", "--api-key-file", keyPath)
+	if err != nil {
+		t.Fatalf("provider update file error = %v", err)
+	}
+	if strings.Contains(out, "sk-file-secret") || !strings.Contains(out, "file:***") {
+		t.Fatalf("provider update output did not redact file secret: %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if strings.Contains(out, "sk-file-secret") || !strings.Contains(out, "file:***") {
+		t.Fatalf("provider list output did not redact file secret: %q", out)
+	}
+}
+
 func TestProviderUpdateTypeRequiresExplicitAuthDecision(t *testing.T) {
 	t.Parallel()
 

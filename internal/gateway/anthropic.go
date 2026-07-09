@@ -3,7 +3,6 @@ package gateway
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +14,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, responseModel string) {
+func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string) {
 	if body == nil {
 		var err error
 		body, err = io.ReadAll(io.LimitReader(r.Body, 16<<20))
@@ -24,11 +23,11 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	provider, err := h.anthropicProviderForRequest(r.Context(), providerOverride)
-	if err != nil {
-		writeAnthropicError(w, http.StatusBadGateway, err.Error())
+	if providerOverride == nil {
+		writeAnthropicError(w, http.StatusBadGateway, "Anthropic route missing upstream provider")
 		return
 	}
+	provider := *providerOverride
 	endpoint, err := anthropicEndpoint(provider.BaseURL, anthropicResourceFromPath(r.URL.Path))
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())
@@ -49,14 +48,16 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("creating Anthropic pass-through request: %v", err))
 		return
 	}
-	copyAnthropicPassThroughHeaders(req.Header, r.Header)
-	apiKey, err := resolveProviderSecret(r.Context(), h.cfg.Secrets, provider.SecretRef)
-	if err != nil {
-		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(provider.SecretRef)))
-		return
-	}
-	if apiKey != "" {
-		req.Header.Set("x-api-key", apiKey)
+	copyAnthropicPassThroughHeaders(req.Header, r.Header, h.cfg.Token, authMode == anthropicAuthIncoming)
+	if authMode == anthropicAuthProviderSecret {
+		apiKey, secretErr := resolveProviderSecret(r.Context(), h.cfg.Secrets, provider.SecretRef)
+		if secretErr != nil {
+			writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(provider.SecretRef)))
+			return
+		}
+		if apiKey != "" {
+			req.Header.Set("x-api-key", apiKey)
+		}
 	}
 
 	resp, err := h.httpClient().Do(req)
@@ -71,37 +72,6 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	copyProviderResponseBody(w, resp, responseModel)
-}
-
-func (h *handler) anthropicProviderForRequest(ctx context.Context, override *store.Provider) (store.Provider, error) {
-	if override != nil {
-		return *override, nil
-	}
-	return h.defaultAnthropicProvider(ctx)
-}
-
-func (h *handler) defaultAnthropicProvider(ctx context.Context) (store.Provider, error) {
-	providersList, err := h.cfg.Store.ListProviders(ctx)
-	if err != nil {
-		return store.Provider{}, fmt.Errorf("listing providers for Anthropic pass-through: %w", err)
-	}
-	var first store.Provider
-	for i := range providersList {
-		provider := providersList[i]
-		if provider.Type != "anthropic" {
-			continue
-		}
-		if provider.Name == "anthropic" {
-			return provider, nil
-		}
-		if first.Name == "" {
-			first = provider
-		}
-	}
-	if first.Name != "" {
-		return first, nil
-	}
-	return store.Provider{}, errNoAnthropicPassThroughProvider
 }
 
 func rewriteAnthropicRequestModel(body []byte, model string) ([]byte, error) {
@@ -148,25 +118,68 @@ func anthropicEndpoint(baseURL, resource string) (string, error) {
 	return parsed.String(), nil
 }
 
-func copyAnthropicPassThroughHeaders(dst, src http.Header) {
+func copyAnthropicPassThroughHeaders(dst, src http.Header, localToken string, forwardAuth bool) {
 	for key, values := range src {
 		canonical := http.CanonicalHeaderKey(key)
 		lower := strings.ToLower(canonical)
-		if lower == "authorization" || lower == "x-api-key" || lower == "host" || lower == "content-length" {
-			continue
-		}
-		if lower == "content-type" || lower == "accept" || lower == "user-agent" ||
-			strings.HasPrefix(lower, "anthropic-") || strings.HasPrefix(lower, "x-claude-code-") {
-			for _, value := range values {
-				dst.Add(canonical, value)
-			}
-		}
+		copyAnthropicPassThroughHeader(dst, canonical, lower, values, localToken, forwardAuth)
 	}
 	if dst.Get("Content-Type") == "" {
 		dst.Set("Content-Type", "application/json")
 	}
 	if dst.Get("Accept") == "" {
 		dst.Set("Accept", "application/json")
+	}
+}
+
+func copyAnthropicPassThroughHeader(dst http.Header, canonical, lower string, values []string, localToken string, forwardAuth bool) {
+	if isSkippedAnthropicPassThroughHeader(lower) {
+		return
+	}
+	if lower == "authorization" || lower == "x-api-key" {
+		if forwardAuth {
+			copyIncomingAnthropicAuthHeader(dst, canonical, lower, values, localToken)
+		}
+		return
+	}
+	if !isAllowedAnthropicPassThroughHeader(lower) {
+		return
+	}
+	for _, value := range values {
+		dst.Add(canonical, value)
+	}
+}
+
+func isSkippedAnthropicPassThroughHeader(lower string) bool {
+	return lower == "host" || lower == "content-length" || lower == ccrSessionTokenLower
+}
+
+func isAllowedAnthropicPassThroughHeader(lower string) bool {
+	return lower == "content-type" || lower == "accept" || lower == "user-agent" ||
+		strings.HasPrefix(lower, "anthropic-") || strings.HasPrefix(lower, "x-claude-code-")
+}
+
+func copyIncomingAnthropicAuthHeader(dst http.Header, canonical, lower string, values []string, localToken string) {
+	for _, value := range values {
+		if isLocalGatewayAuthValue(lower, value, localToken) {
+			continue
+		}
+		dst.Add(canonical, value)
+	}
+}
+
+func isLocalGatewayAuthValue(lowerHeader, value, localToken string) bool {
+	token := strings.TrimSpace(localToken)
+	if token == "" {
+		return false
+	}
+	switch lowerHeader {
+	case "x-api-key":
+		return strings.TrimSpace(value) == token
+	case "authorization":
+		return strings.EqualFold(strings.TrimSpace(value), "Bearer "+token)
+	default:
+		return false
 	}
 }
 

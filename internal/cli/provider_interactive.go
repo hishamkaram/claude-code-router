@@ -22,6 +22,7 @@ const (
 	authModeKeep     = "keep"
 	authModeKeychain = "keychain"
 	authModeEnv      = "env"
+	authModeFile     = "file"
 	authModeNone     = "none"
 )
 
@@ -33,6 +34,7 @@ type providerSetupPrompt struct {
 	baseURL      string
 	authMode     string
 	apiKeyEnv    string
+	apiKeyFile   string
 	apiKeyValue  string
 	noAPIKey     bool
 }
@@ -96,6 +98,11 @@ func validateProviderAddInteractiveStaticFlags(initialName string, cfg providerA
 			return err
 		}
 	}
+	if strings.TrimSpace(cfg.apiKeyFile) != "" {
+		if _, err := secret.FileRefFromPath(cfg.apiKeyFile); err != nil {
+			return fmt.Errorf("--api-key-file: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -108,6 +115,7 @@ func promptInteractiveProviderConfig(ctx context.Context, deps Dependencies, ini
 		baseURL:      cfg.baseURL,
 		authMode:     interactiveAuthModeDefault(cfg),
 		apiKeyEnv:    cfg.apiKeyEnv,
+		apiKeyFile:   cfg.apiKeyFile,
 		noAPIKey:     cfg.noAPIKey,
 	})
 	if err != nil {
@@ -122,7 +130,7 @@ func promptInteractiveProviderConfig(ctx context.Context, deps Dependencies, ini
 	if err != nil {
 		return store.Provider{}, secretPlan{}, err
 	}
-	plan, err := resolveProviderSecretPlan(deps, setup.name, resolvedType, setup.apiKeyEnv, setup.apiKeyValue, false, setup.noAPIKey)
+	plan, err := resolveProviderSecretPlan(deps, setup.name, resolvedType, setup.apiKeyEnv, setup.apiKeyFile, setup.apiKeyValue, false, setup.noAPIKey)
 	if err != nil {
 		return store.Provider{}, secretPlan{}, err
 	}
@@ -159,9 +167,10 @@ func initialProviderUpdatePrompt(existing store.Provider, cfg providerAddConfig)
 		baseURL:      firstNonEmptyString(cfg.baseURL, existing.BaseURL),
 		authMode:     authModeKeep,
 		apiKeyEnv:    cfg.apiKeyEnv,
+		apiKeyFile:   cfg.apiKeyFile,
 		noAPIKey:     cfg.noAPIKey,
 	}
-	if cfg.apiKeyEnv != "" || cfg.noAPIKey {
+	if cfg.apiKeyEnv != "" || cfg.apiKeyFile != "" || cfg.noAPIKey {
 		setup.authMode = interactiveAuthModeDefault(cfg)
 	}
 	return setup
@@ -207,6 +216,7 @@ func runProviderUpdatePrompt(ctx context.Context, deps Dependencies, setup *prov
 				huh.NewOption("Keep current secret reference", authModeKeep),
 				huh.NewOption("Store new API key in OS keychain", authModeKeychain),
 				huh.NewOption("Use environment variable", authModeEnv),
+				huh.NewOption("Use API key file", authModeFile),
 				huh.NewOption("No API key", authModeNone),
 			).
 			Value(&setup.authMode),
@@ -241,52 +251,96 @@ func resolveProviderUpdateBase(existing store.Provider, setup providerSetupPromp
 func applyProviderUpdateAuth(ctx context.Context, deps Dependencies, updated store.Provider, setup providerSetupPrompt) (store.Provider, secretPlan, error) {
 	switch setup.authMode {
 	case authModeKeep:
-		if providerTypeRequiresAPIKey(updated.Type) && updated.SecretRef == "" {
-			return store.Provider{}, secretPlan{}, fmt.Errorf("provider type %q requires an API key; choose an API key source or No API key to confirm unauthenticated use", updated.Type)
-		}
-		return updated, secretPlan{}, nil
+		return applyProviderUpdateKeepAuth(updated)
 	case authModeKeychain:
-		value, err := promptAPIKey(ctx, deps)
-		if err != nil {
-			return store.Provider{}, secretPlan{}, err
-		}
-		plan, err := resolveProviderSecretPlan(deps, updated.Name, updated.Type, "", value, false, false)
-		if err != nil {
-			return store.Provider{}, secretPlan{}, err
-		}
-		updated.SecretRef = plan.ref
-		return updated, plan, nil
+		return applyProviderUpdateKeychainAuth(ctx, deps, updated)
 	case authModeEnv:
-		var envName string
-		var err error
-		in := readerOrDefault(deps.In, os.Stdin)
-		if !isTerminal(in) {
-			envName, err = readNonTerminalPromptValue(ctx, in, setup.apiKeyEnv, true)
-			if err == nil {
-				err = validateEnvName(envName)
-			}
-		} else {
-			envName, err = promptAPIKeyEnv(ctx, deps, setup.apiKeyEnv)
-		}
-		if err != nil {
-			return store.Provider{}, secretPlan{}, err
-		}
-		plan, err := resolveProviderSecretPlan(deps, updated.Name, updated.Type, envName, "", false, false)
-		if err != nil {
-			return store.Provider{}, secretPlan{}, err
-		}
-		updated.SecretRef = plan.ref
-		return updated, plan, nil
+		return applyProviderUpdateEnvAuth(ctx, deps, updated, setup.apiKeyEnv)
+	case authModeFile:
+		return applyProviderUpdateFileAuth(ctx, deps, updated, setup.apiKeyFile)
 	case authModeNone:
-		plan, err := resolveProviderSecretPlan(deps, updated.Name, updated.Type, "", "", false, true)
-		if err != nil {
-			return store.Provider{}, secretPlan{}, err
-		}
-		updated.SecretRef = plan.ref
-		return updated, plan, nil
+		return applyProviderUpdateNoAuth(deps, updated)
 	default:
 		return store.Provider{}, secretPlan{}, fmt.Errorf("invalid authentication mode %q", setup.authMode)
 	}
+}
+
+func applyProviderUpdateKeepAuth(updated store.Provider) (store.Provider, secretPlan, error) {
+	if providerTypeRequiresAPIKey(updated.Type) && updated.SecretRef == "" {
+		return store.Provider{}, secretPlan{}, fmt.Errorf("provider type %q requires an API key; choose an API key source or No API key to confirm unauthenticated use", updated.Type)
+	}
+	return updated, secretPlan{}, nil
+}
+
+func applyProviderUpdateKeychainAuth(ctx context.Context, deps Dependencies, updated store.Provider) (store.Provider, secretPlan, error) {
+	value, err := promptAPIKey(ctx, deps)
+	if err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
+	plan, err := resolveProviderSecretPlan(deps, updated.Name, updated.Type, "", "", value, false, false)
+	if err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
+	updated.SecretRef = plan.ref
+	return updated, plan, nil
+}
+
+func applyProviderUpdateEnvAuth(ctx context.Context, deps Dependencies, updated store.Provider, initial string) (store.Provider, secretPlan, error) {
+	envName, err := promptProviderUpdateEnvName(ctx, deps, initial)
+	if err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
+	plan, err := resolveProviderSecretPlan(deps, updated.Name, updated.Type, envName, "", "", false, false)
+	if err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
+	updated.SecretRef = plan.ref
+	return updated, plan, nil
+}
+
+func promptProviderUpdateEnvName(ctx context.Context, deps Dependencies, initial string) (string, error) {
+	in := readerOrDefault(deps.In, os.Stdin)
+	if isTerminal(in) {
+		return promptAPIKeyEnv(ctx, deps, initial)
+	}
+	envName, err := readNonTerminalPromptValue(ctx, in, initial, true)
+	if err != nil {
+		return "", err
+	}
+	if err := validateEnvName(envName); err != nil {
+		return "", err
+	}
+	return envName, nil
+}
+
+func applyProviderUpdateFileAuth(ctx context.Context, deps Dependencies, updated store.Provider, initial string) (store.Provider, secretPlan, error) {
+	filePath, err := promptProviderUpdateAPIKeyFile(ctx, deps, initial)
+	if err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
+	plan, err := resolveProviderSecretPlan(deps, updated.Name, updated.Type, "", filePath, "", false, false)
+	if err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
+	updated.SecretRef = plan.ref
+	return updated, plan, nil
+}
+
+func promptProviderUpdateAPIKeyFile(ctx context.Context, deps Dependencies, initial string) (string, error) {
+	in := readerOrDefault(deps.In, os.Stdin)
+	if isTerminal(in) {
+		return promptAPIKeyFile(ctx, deps, initial)
+	}
+	return readNonTerminalPromptValue(ctx, in, initial, true)
+}
+
+func applyProviderUpdateNoAuth(deps Dependencies, updated store.Provider) (store.Provider, secretPlan, error) {
+	plan, err := resolveProviderSecretPlan(deps, updated.Name, updated.Type, "", "", "", false, true)
+	if err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
+	updated.SecretRef = plan.ref
+	return updated, plan, nil
 }
 
 func firstNonEmptyString(values ...string) string {
@@ -439,6 +493,7 @@ func promptProviderSetup(ctx context.Context, deps Dependencies, initial provide
 			Options(
 				huh.NewOption("Store API key in OS keychain", authModeKeychain),
 				huh.NewOption("Use environment variable", authModeEnv),
+				huh.NewOption("Use API key file", authModeFile),
 				huh.NewOption("No API key", authModeNone),
 			).
 			Value(&setup.authMode),
@@ -453,8 +508,9 @@ func promptProviderSetup(ctx context.Context, deps Dependencies, initial provide
 		if err != nil {
 			return providerSetupPrompt{}, err
 		}
-		setup.apiKeyValue = value
 		setup.apiKeyEnv = ""
+		setup.apiKeyFile = ""
+		setup.apiKeyValue = value
 		setup.noAPIKey = false
 	case authModeEnv:
 		envName, err := promptAPIKeyEnv(ctx, deps, setup.apiKeyEnv)
@@ -462,10 +518,21 @@ func promptProviderSetup(ctx context.Context, deps Dependencies, initial provide
 			return providerSetupPrompt{}, err
 		}
 		setup.apiKeyEnv = envName
+		setup.apiKeyFile = ""
+		setup.apiKeyValue = ""
+		setup.noAPIKey = false
+	case authModeFile:
+		filePath, err := promptAPIKeyFile(ctx, deps, setup.apiKeyFile)
+		if err != nil {
+			return providerSetupPrompt{}, err
+		}
+		setup.apiKeyEnv = ""
+		setup.apiKeyFile = filePath
 		setup.apiKeyValue = ""
 		setup.noAPIKey = false
 	case authModeNone:
 		setup.apiKeyEnv = ""
+		setup.apiKeyFile = ""
 		setup.apiKeyValue = ""
 		setup.noAPIKey = true
 	default:
@@ -536,8 +603,9 @@ func completeNonTerminalProviderAuth(ctx context.Context, in io.Reader, setup pr
 		if err != nil {
 			return providerSetupPrompt{}, err
 		}
-		setup.apiKeyValue = value
 		setup.apiKeyEnv = ""
+		setup.apiKeyFile = ""
+		setup.apiKeyValue = value
 		setup.noAPIKey = false
 	case authModeEnv:
 		envName, err := readNonTerminalPromptValue(ctx, in, setup.apiKeyEnv, true)
@@ -548,10 +616,21 @@ func completeNonTerminalProviderAuth(ctx context.Context, in io.Reader, setup pr
 			return providerSetupPrompt{}, err
 		}
 		setup.apiKeyEnv = envName
+		setup.apiKeyFile = ""
+		setup.apiKeyValue = ""
+		setup.noAPIKey = false
+	case authModeFile:
+		filePath, err := readNonTerminalPromptValue(ctx, in, setup.apiKeyFile, true)
+		if err != nil {
+			return providerSetupPrompt{}, fmt.Errorf("API key file: %w", err)
+		}
+		setup.apiKeyEnv = ""
+		setup.apiKeyFile = filePath
 		setup.apiKeyValue = ""
 		setup.noAPIKey = false
 	case authModeNone:
 		setup.apiKeyEnv = ""
+		setup.apiKeyFile = ""
 		setup.apiKeyValue = ""
 		setup.noAPIKey = true
 	default:
@@ -596,6 +675,7 @@ func addAuthModeChoices() map[string]string {
 		"1": authModeKeychain,
 		"2": authModeEnv,
 		"3": authModeNone,
+		"4": authModeFile,
 	}
 }
 
@@ -605,5 +685,6 @@ func updateAuthModeChoices() map[string]string {
 		"2": authModeKeychain,
 		"3": authModeEnv,
 		"4": authModeNone,
+		"5": authModeFile,
 	}
 }

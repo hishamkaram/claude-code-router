@@ -2,8 +2,9 @@
 
 Private Go implementation of a local Claude Code router.
 
-`ccr` launches Claude Code through a fixed local gateway and routes the session
-to a configured model alias selected at launch time.
+`ccr` launches Claude Code through a fixed local gateway and routes each turn
+to first-party Anthropic or a configured model alias selected with Claude Code's
+`/model` picker.
 
 ## Current Status
 
@@ -13,7 +14,7 @@ Local CLI foundation:
   interactive guided flows.
 - SQLite local state for providers, model aliases, launch sessions, observed
   agents, and conformance records.
-- API keys stored as environment references or OS keychain references, never raw
+- API keys stored as environment, file, or OS keychain references, never raw
   SQLite values.
 - Protocol-based provider profiles for Anthropic-compatible and
   OpenAI-compatible providers, including separate Z.AI Anthropic and Z.AI
@@ -21,12 +22,16 @@ Local CLI foundation:
 - OpenAI-compatible model discovery through `/v1/models` for LiteLLM,
   OpenRouter, Z.AI OpenAI, and local providers when the provider declares model
   discovery support.
-- Loopback-only local gateway launch that injects `ANTHROPIC_BASE_URL`,
-  `ANTHROPIC_AUTH_TOKEN`, and Claude gateway/simple-mode environment.
+- Loopback-only local gateway launch that injects `ANTHROPIC_BASE_URL`, enables
+  gateway model discovery, and adds a CCR-local `X-CCR-Session-Token` through
+  `ANTHROPIC_CUSTOM_HEADERS` without overwriting Anthropic subscription or API
+  key auth. Legacy `ANTHROPIC_AUTH_TOKEN` gateway auth remains available with
+  `ccr launch --auth-mode gateway-token`.
 - Anthropic-compatible pass-through routing and OpenAI-compatible translation.
-  `ccr launch --model <alias>` sets the default route for Claude Code's
-  built-in model names; configured aliases requested by Claude Code are honored.
-  When omitted, launch auto-selects only if one routable alias exists.
+  First-party Claude Code model names route to Anthropic before any default CCR
+  alias fallback. Exact configured aliases and `claude-ccr-<alias>` discovery
+  IDs route to their configured providers. When `--model` is omitted, launch
+  auto-selects only if one routable alias exists.
 - Tool use, streaming, thinking, model discovery, and token counting are gated
   by visible provider capability metadata. Unsupported requests return explicit
   errors instead of falling back silently. Claude Code launch disables tools
@@ -44,6 +49,7 @@ ccr init
 ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
 ccr provider add zai --api-key-env ZAI_API_KEY
 ccr provider add glm --protocol anthropic-compatible --base-url https://example.invalid --api-key-env GLM_API_KEY
+ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
 ccr provider add litellm --base-url http://localhost:4000 --no-api-key
 ccr provider test litellm
 ccr provider update litellm --base-url http://localhost:5000
@@ -52,6 +58,7 @@ ccr model add qwen --provider openrouter --model qwen/qwen3-coder
 ccr model test qwen
 ccr conformance run qwen
 ccr launch --model qwen
+ccr launch --auth-mode gateway-token --model qwen
 ccr sessions
 ccr model list
 ccr doctor
@@ -61,6 +68,16 @@ Direct API-key entry is supported through stdin and OS keychain storage:
 
 ```bash
 printf '%s' "$ANTHROPIC_API_KEY" | ccr provider add anthropic --api-key-stdin
+```
+
+Headless machines without OS keychain support can store only a file reference in
+SQLite:
+
+```bash
+mkdir -p ~/.config/ccr
+install -m 600 /dev/null ~/.config/ccr/litellm.key
+read -rsp 'LiteLLM key: ' key; printf '\n'; printf '%s\n' "$key" > ~/.config/ccr/litellm.key; unset key
+ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
 ```
 
 ## Safety Rules

@@ -77,7 +77,7 @@ func TestGatewayRoutesZAIAnthropicCompatibleProvider(t *testing.T) {
 	}
 }
 
-func TestGatewayDoesNotUseZAIForUnconfiguredClaudePassThrough(t *testing.T) {
+func TestGatewayFirstPartyClaudeRouteDoesNotUseZAI(t *testing.T) {
 	ctx := context.Background()
 	called := false
 	zai := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,9 +85,19 @@ func TestGatewayDoesNotUseZAIForUnconfiguredClaudePassThrough(t *testing.T) {
 		http.Error(w, "should not be called", http.StatusInternalServerError)
 	}))
 	defer zai.Close()
+	anthropicCalled := false
+	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		anthropicCalled = true
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("Anthropic path = %q, want /v1/messages", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer anthropic.Close()
 
 	s := newGatewayStore(t, store.Provider{Name: "zai", Type: "zai", BaseURL: zai.URL, SecretRef: "env:ZAI_API_KEY"}, store.Model{Alias: "glm", ProviderName: "zai", ProviderModel: "glm-4.7", Status: "full"})
-	server := startGateway(t, ctx, s, fakeGatewaySecrets{"env:ZAI_API_KEY": "zai-secret"})
+	server := startGatewayWithConfig(t, ctx, Config{Store: s, Secrets: fakeGatewaySecrets{"env:ZAI_API_KEY": "zai-secret"}, Token: "local-token", AnthropicBaseURL: anthropic.URL})
 	defer func() {
 		if err := server.Shutdown(ctx); err != nil {
 			t.Fatalf("Shutdown() error = %v", err)
@@ -98,21 +108,24 @@ func TestGatewayDoesNotUseZAIForUnconfiguredClaudePassThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("gateway request error = %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("gateway status = %d, want 502", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
 	}
 	if called {
 		t.Fatalf("Z.AI provider was called for unconfigured Claude pass-through")
 	}
+	if !anthropicCalled {
+		t.Fatalf("first-party Anthropic provider was not called")
+	}
 }
 
-func TestGatewayPrefersCanonicalAnthropicProviderForPassThrough(t *testing.T) {
+func TestGatewayFirstPartyClaudeRouteIgnoresConfiguredAnthropicProviders(t *testing.T) {
 	ctx := context.Background()
 	otherCalled := false
 	otherAnthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,7 +148,7 @@ func TestGatewayPrefersCanonicalAnthropicProviderForPassThrough(t *testing.T) {
 	if err := s.AddProvider(ctx, store.Provider{Name: "anthropic", Type: "anthropic", BaseURL: canonicalAnthropic.URL, SecretRef: ""}); err != nil {
 		t.Fatalf("AddProvider(anthropic) error = %v", err)
 	}
-	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	server := startGatewayWithConfig(t, ctx, Config{Store: s, Secrets: fakeGatewaySecrets{}, Token: "local-token", AnthropicBaseURL: canonicalAnthropic.URL})
 	defer func() {
 		if err := server.Shutdown(ctx); err != nil {
 			t.Fatalf("Shutdown() error = %v", err)
@@ -146,7 +159,7 @@ func TestGatewayPrefersCanonicalAnthropicProviderForPassThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("gateway request error = %v", err)

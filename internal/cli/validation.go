@@ -12,8 +12,8 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv, apiKeyValue string, apiKeyStdin, noAPIKey bool) (secretPlan, error) {
-	if err := validateProviderAuthSources(apiKeyEnv != "", strings.TrimSpace(apiKeyValue) != "", apiKeyStdin, noAPIKey); err != nil {
+func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv, apiKeyFile, apiKeyValue string, apiKeyStdin, noAPIKey bool) (secretPlan, error) {
+	if err := validateProviderAuthSources(apiKeyEnv != "", strings.TrimSpace(apiKeyFile) != "", strings.TrimSpace(apiKeyValue) != "", apiKeyStdin, noAPIKey); err != nil {
 		return secretPlan{}, err
 	}
 	if apiKeyEnv != "" {
@@ -21,6 +21,13 @@ func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv,
 			return secretPlan{}, err
 		}
 		return secretPlan{ref: secret.EnvRef(apiKeyEnv)}, nil
+	}
+	if strings.TrimSpace(apiKeyFile) != "" {
+		ref, err := secret.FileRefFromPath(apiKeyFile)
+		if err != nil {
+			return secretPlan{}, fmt.Errorf("--api-key-file: %w", err)
+		}
+		return secretPlan{ref: ref}, nil
 	}
 	if strings.TrimSpace(apiKeyValue) != "" {
 		return secretPlan{ref: secret.KeyringRef(name), value: strings.TrimSpace(apiKeyValue), store: true}, nil
@@ -39,7 +46,7 @@ func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv,
 	if noAPIKey || !providerTypeRequiresAPIKey(providerType) {
 		return secretPlan{}, nil
 	}
-	return secretPlan{}, fmt.Errorf("API key required for provider type %q; use --api-key-env <ENV>, --api-key-stdin, or --no-api-key if this endpoint is intentionally unauthenticated", providerType)
+	return secretPlan{}, fmt.Errorf("API key required for provider type %q; use --api-key-env <ENV>, --api-key-file <PATH>, --api-key-stdin, or --no-api-key if this endpoint is intentionally unauthenticated", providerType)
 }
 
 func providerTypeRequiresAPIKey(providerType string) bool {
@@ -48,7 +55,7 @@ func providerTypeRequiresAPIKey(providerType string) bool {
 }
 
 func validateProviderAuthSourceFlags(cfg providerAddConfig) error {
-	return validateProviderAuthSources(cfg.apiKeyEnv != "", strings.TrimSpace(cfg.apiKeyValue) != "", cfg.apiKeyStdin, cfg.noAPIKey)
+	return validateProviderAuthSources(cfg.apiKeyEnv != "", strings.TrimSpace(cfg.apiKeyFile) != "", strings.TrimSpace(cfg.apiKeyValue) != "", cfg.apiKeyStdin, cfg.noAPIKey)
 }
 
 func validateProviderAuthSources(sources ...bool) error {

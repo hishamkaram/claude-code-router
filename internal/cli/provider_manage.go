@@ -19,6 +19,7 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 	var mode string
 	var baseURL string
 	var apiKeyEnv string
+	var apiKeyFile string
 	var apiKeyStdin bool
 	var noAPIKey bool
 	var interactive bool
@@ -39,6 +40,7 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 				mode:         mode,
 				baseURL:      baseURL,
 				apiKeyEnv:    apiKeyEnv,
+				apiKeyFile:   apiKeyFile,
 				apiKeyStdin:  apiKeyStdin,
 				noAPIKey:     noAPIKey,
 			}
@@ -54,6 +56,7 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 	cmd.Flags().StringVar(&mode, "mode", "", "Provider compatibility mode: full, degraded, or chat-only")
 	cmd.Flags().StringVar(&baseURL, "base-url", "", "Provider base URL")
 	cmd.Flags().StringVar(&apiKeyEnv, "api-key-env", "", "Environment variable containing the API key; stores only env:<name>")
+	cmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to a 0600 file containing the API key; stores only file:<absolute-path>")
 	cmd.Flags().BoolVar(&apiKeyStdin, "api-key-stdin", false, "Read API key from stdin and store it in the OS keychain")
 	cmd.Flags().BoolVar(&noAPIKey, "no-api-key", false, "Clear the provider API key reference")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Guide provider updates with prompts")
@@ -117,7 +120,7 @@ func providerUpdateChangesFromCommand(cmd *cobra.Command) providerUpdateChanges 
 		protocol:     flags.Changed("protocol"),
 		mode:         flags.Changed("mode"),
 		baseURL:      flags.Changed("base-url"),
-		auth:         flags.Changed("api-key-env") || flags.Changed("api-key-stdin") || flags.Changed("no-api-key"),
+		auth:         flags.Changed("api-key-env") || flags.Changed("api-key-file") || flags.Changed("api-key-stdin") || flags.Changed("no-api-key"),
 	}
 }
 
@@ -149,7 +152,7 @@ func buildProviderUpdateFromFlags(deps Dependencies, name string, cfg providerAd
 		}
 		return updated, secretPlan{}, nil
 	}
-	plan, err := resolveProviderSecretPlan(deps, name, updated.Type, cfg.apiKeyEnv, "", cfg.apiKeyStdin, cfg.noAPIKey)
+	plan, err := resolveProviderSecretPlan(deps, name, updated.Type, cfg.apiKeyEnv, cfg.apiKeyFile, "", cfg.apiKeyStdin, cfg.noAPIKey)
 	if err != nil {
 		return store.Provider{}, secretPlan{}, err
 	}
@@ -201,34 +204,61 @@ func validateProviderUpdateAuthDecision(existing, updated store.Provider, change
 	if !providerTypeRequiresAPIKey(updated.Type) || existing.SecretRef != "" {
 		return nil
 	}
-	return fmt.Errorf("provider type %q requires an API key; pass --api-key-env, --api-key-stdin, or --no-api-key to confirm unauthenticated use", updated.Type)
+	return fmt.Errorf("provider type %q requires an API key; pass --api-key-env, --api-key-file, --api-key-stdin, or --no-api-key to confirm unauthenticated use", updated.Type)
 }
 
 func validateProviderUpdateStaticFlags(name string, cfg providerAddConfig, changes providerUpdateChanges) error {
-	if changes.providerType {
-		if _, err := resolveProviderTypeWithProtocol(name, strings.TrimSpace(cfg.providerType), strings.TrimSpace(cfg.protocol)); err != nil {
-			return err
-		}
+	if err := validateProviderUpdateTypeProtocol(name, cfg, changes); err != nil {
+		return err
 	}
-	if changes.protocol {
-		if _, err := resolveProviderTypeWithProtocol(name, strings.TrimSpace(cfg.providerType), strings.TrimSpace(cfg.protocol)); err != nil {
-			return err
-		}
+	if err := validateProviderUpdateMode(cfg, changes); err != nil {
+		return err
 	}
-	if changes.mode {
-		if err := validateProviderMode(cfg.mode); err != nil {
-			return err
-		}
+	if err := validateProviderUpdateBaseURL(cfg, changes); err != nil {
+		return err
 	}
-	if changes.baseURL && strings.TrimSpace(cfg.baseURL) != "" {
-		if err := validateBaseURLSyntax(cfg.baseURL); err != nil {
-			return err
-		}
+	if err := validateProviderUpdateAuthFlags(cfg, changes); err != nil {
+		return err
 	}
-	if changes.auth && cfg.apiKeyEnv != "" {
+	return nil
+}
+
+func validateProviderUpdateTypeProtocol(name string, cfg providerAddConfig, changes providerUpdateChanges) error {
+	if !changes.providerType && !changes.protocol {
+		return nil
+	}
+	_, err := resolveProviderTypeWithProtocol(name, strings.TrimSpace(cfg.providerType), strings.TrimSpace(cfg.protocol))
+	return err
+}
+
+func validateProviderUpdateMode(cfg providerAddConfig, changes providerUpdateChanges) error {
+	if !changes.mode {
+		return nil
+	}
+	return validateProviderMode(cfg.mode)
+}
+
+func validateProviderUpdateBaseURL(cfg providerAddConfig, changes providerUpdateChanges) error {
+	if !changes.baseURL || strings.TrimSpace(cfg.baseURL) == "" {
+		return nil
+	}
+	return validateBaseURLSyntax(cfg.baseURL)
+}
+
+func validateProviderUpdateAuthFlags(cfg providerAddConfig, changes providerUpdateChanges) error {
+	if !changes.auth {
+		return nil
+	}
+	if cfg.apiKeyEnv != "" {
 		if err := validateEnvName(cfg.apiKeyEnv); err != nil {
 			return err
 		}
+	}
+	if strings.TrimSpace(cfg.apiKeyFile) == "" {
+		return nil
+	}
+	if _, err := secret.FileRefFromPath(cfg.apiKeyFile); err != nil {
+		return fmt.Errorf("--api-key-file: %w", err)
 	}
 	return nil
 }

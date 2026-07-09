@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/hishamkaram/claude-code-router/internal/secret"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 type fakeSecrets struct {
@@ -628,6 +629,77 @@ func TestProviderAddFromStdinStoresKeyringReferenceOnly(t *testing.T) {
 	}
 }
 
+func TestProviderAddWithAPIKeyFileStoresReferenceOnly(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	keyPath := writeAPIKeyFile(t, 0o600)
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "add", "openrouter", "--api-key-file", keyPath)
+	if err != nil {
+		t.Fatalf("provider add file error = %v", err)
+	}
+	if strings.Contains(out, "sk-file-secret") {
+		t.Fatalf("provider add leaked secret: %q", out)
+	}
+	if !strings.Contains(out, "file:***") {
+		t.Fatalf("provider add output missing redacted file ref: %q", out)
+	}
+
+	s, err := store.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("store open error = %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("store close error = %v", closeErr)
+		}
+	})
+	provider, err := s.GetProvider(context.Background(), "openrouter")
+	if err != nil {
+		t.Fatalf("GetProvider error = %v", err)
+	}
+	if provider.SecretRef != secret.FileRef(keyPath) {
+		t.Fatalf("SecretRef = %q, want %q", provider.SecretRef, secret.FileRef(keyPath))
+	}
+	if strings.Contains(provider.SecretRef, "sk-file-secret") {
+		t.Fatalf("provider secret ref leaked secret: %q", provider.SecretRef)
+	}
+}
+
+func TestProviderAddWithAPIKeyFileRejectsLoosePermissions(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	keyPath := writeAPIKeyFile(t, 0o644)
+	_, _, err := runCommand(t, "--db", dbPath, "provider", "add", "openrouter", "--api-key-file", keyPath)
+	if err == nil {
+		t.Fatalf("provider add file unexpectedly succeeded")
+	}
+	if strings.Contains(err.Error(), "sk-file-secret") {
+		t.Fatalf("provider add leaked secret in error: %v", err)
+	}
+	if strings.Contains(err.Error(), keyPath) {
+		t.Fatalf("provider add leaked file path in error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "permissions 0600") {
+		t.Fatalf("provider add file error = %v", err)
+	}
+}
+
+func TestProviderAddRejectsConflictingAPIKeyFileSource(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	keyPath := writeAPIKeyFile(t, 0o600)
+	_, _, err := runCommand(t, "--db", dbPath, "provider", "add", "openrouter", "--api-key-file", keyPath, "--api-key-env", "OPENROUTER_API_KEY")
+	if err == nil {
+		t.Fatalf("provider add conflict unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "choose only one API key source") {
+		t.Fatalf("provider add conflict error = %v", err)
+	}
+}
+
 func TestDuplicateProviderDoesNotOverwriteKeyringSecret(t *testing.T) {
 	t.Parallel()
 
@@ -765,6 +837,18 @@ func newModelsServer(t *testing.T, models []string) *httptest.Server {
 	return server
 }
 
+func writeAPIKeyFile(t *testing.T, perm os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "api.key")
+	if err := os.WriteFile(path, []byte("sk-file-secret\n"), perm); err != nil {
+		t.Fatalf("WriteFile error = %v", err)
+	}
+	if err := os.Chmod(path, perm); err != nil {
+		t.Fatalf("Chmod error = %v", err)
+	}
+	return path
+}
+
 type promptReader struct {
 	reader *strings.Reader
 }
@@ -822,6 +906,16 @@ func (f *fakeLauncher) hasEnv(value string) bool {
 	return false
 }
 
+func (f *fakeLauncher) envValue(name string) (string, bool) {
+	prefix := name + "="
+	for _, item := range f.env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix), true
+		}
+	}
+	return "", false
+}
+
 func (f *fakeLauncher) hasArg(value string) bool {
 	for _, item := range f.args {
 		if item == value {
@@ -829,6 +923,15 @@ func (f *fakeLauncher) hasArg(value string) bool {
 		}
 	}
 	return false
+}
+
+func (f *fakeLauncher) settingsArgValue() (string, bool) {
+	for index, item := range f.args {
+		if item == "--settings" && index+1 < len(f.args) {
+			return f.args[index+1], true
+		}
+	}
+	return "", false
 }
 
 type fakeProcess struct {

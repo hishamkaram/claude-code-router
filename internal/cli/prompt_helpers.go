@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"golang.org/x/term"
 
+	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -130,6 +131,24 @@ func promptAPIKeyEnv(ctx context.Context, deps Dependencies, initial string) (st
 		return "", err
 	}
 	return apiKeyEnv, nil
+}
+
+func promptAPIKeyFile(ctx context.Context, deps Dependencies, initial string) (string, error) {
+	apiKeyFile := initial
+	form := huh.NewForm(huh.NewGroup(
+		huh.NewInput().
+			Title("API key file").
+			Description("Must be a regular file with permissions 0600.").
+			Value(&apiKeyFile).
+			Validate(func(value string) error {
+				_, err := secret.FileRefFromPath(value)
+				return err
+			}),
+	))
+	if err := runHuhForm(ctx, deps, form); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(apiKeyFile), nil
 }
 
 func promptImportChoice(ctx context.Context, deps Dependencies, discovered int) (modelImportChoice, error) {
@@ -306,6 +325,8 @@ func interactiveAuthModeDefault(cfg providerAddConfig) string {
 	switch {
 	case cfg.apiKeyEnv != "":
 		return authModeEnv
+	case cfg.apiKeyFile != "":
+		return authModeFile
 	case cfg.noAPIKey:
 		return authModeNone
 	default:
