@@ -1,16 +1,17 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/providers"
@@ -19,11 +20,11 @@ import (
 )
 
 type Config struct {
-	Store            *store.Store
-	Secrets          secret.Backend
-	HTTPClient       *http.Client
-	Token            string
-	ForcedModelAlias string
+	Store             *store.Store
+	Secrets           secret.Backend
+	HTTPClient        *http.Client
+	Token             string
+	DefaultModelAlias string
 }
 
 type Server struct {
@@ -109,15 +110,36 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 type handler struct {
 	cfg Config
+
+	anthropicModelMu     sync.Mutex
+	anthropicModelIDs    map[string]struct{}
+	anthropicModelExpiry time.Time
 }
 
+const (
+	discoveryAliasPrefix           = "claude-ccr-"
+	nativeAnthropicDiscoveryPrefix = "claude-native-"
+)
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodHead && r.URL.Path == "/" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	if !h.authorized(r) {
 		writeAnthropicError(w, http.StatusUnauthorized, "invalid local gateway token")
 		return
 	}
+	if r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models") {
+		h.handleModels(w, r)
+		return
+	}
 	if r.Method == http.MethodPost && (r.URL.Path == "/v1/messages" || r.URL.Path == "/messages") {
 		h.handleMessages(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && (r.URL.Path == "/v1/messages/count_tokens" || r.URL.Path == "/messages/count_tokens") {
+		h.handleCountTokens(w, r)
 		return
 	}
 	writeAnthropicError(w, http.StatusNotFound, "unsupported gateway route")
@@ -136,35 +158,48 @@ func (h *handler) authorized(r *http.Request) bool {
 }
 
 func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
-	req, ok := decodeAnthropicRequest(w, r)
+	req, body, ok := decodeAnthropicRequest(w, r)
 	if !ok {
 		return
 	}
-	if err := h.validateMessageRequest(&req); err != nil {
-		writeAnthropicError(w, err.status, err.message)
-		return
-	}
-	routeAlias, validationErr := h.selectRouteAlias(r.Context(), req.Model)
+	route, validationErr := h.selectRoute(r.Context(), req.Model, r.Header)
 	if validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return
 	}
-	model, provider, ok := h.loadRouteTarget(w, r, routeAlias)
-	if !ok {
+	if route.model.Status == "chat-only" && anthropicRequestUsesTools(req) {
+		writeAnthropicError(w, http.StatusNotImplemented, fmt.Sprintf("model alias %q is chat-only and cannot be used with tools", route.model.Alias))
+		return
+	}
+	if route.kind == routeAnthropic {
+		passBody := body
+		if route.model.Alias != "" && route.model.ProviderModel != "" {
+			rewritten, err := rewriteAnthropicRequestModel(body, route.model.ProviderModel)
+			if err != nil {
+				writeAnthropicError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			passBody = rewritten
+		}
+		h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.responseModel)
+		return
+	}
+	if err := h.validateOpenAIMessageRequest(&req); err != nil {
+		writeAnthropicError(w, err.status, err.message)
 		return
 	}
 
-	apiKey, err := resolveProviderSecret(r.Context(), h.cfg.Secrets, provider.SecretRef)
+	apiKey, err := resolveProviderSecret(r.Context(), h.cfg.Secrets, route.provider.SecretRef)
 	if err != nil {
-		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(provider.SecretRef)))
+		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(route.provider.SecretRef)))
 		return
 	}
-	openAIReq, err := toOpenAIChatRequest(req, model.ProviderModel)
+	openAIReq, err := toOpenAIChatRequest(req, route.model.ProviderModel)
 	if err != nil {
 		writeAnthropicError(w, http.StatusNotImplemented, err.Error())
 		return
 	}
-	resp, err := h.callOpenAICompatible(r.Context(), provider, apiKey, openAIReq)
+	resp, err := h.callOpenAICompatible(r.Context(), route.provider, apiKey, openAIReq)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())
 		return
@@ -175,10 +210,36 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Stream {
-		writeAnthropicStream(w, routeAlias, resp, finishReason)
+		writeAnthropicStream(w, route.responseModel, resp, finishReason)
 		return
 	}
-	writeJSON(w, http.StatusOK, toAnthropicResponse(routeAlias, resp, finishReason))
+	writeJSON(w, http.StatusOK, toAnthropicResponse(route.responseModel, resp, finishReason))
+}
+
+func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
+	req, body, ok := decodeAnthropicRequest(w, r)
+	if !ok {
+		return
+	}
+	route, validationErr := h.selectRoute(r.Context(), req.Model, r.Header)
+	if validationErr != nil {
+		writeAnthropicError(w, validationErr.status, validationErr.message)
+		return
+	}
+	if route.kind != routeAnthropic {
+		writeAnthropicError(w, http.StatusNotImplemented, fmt.Sprintf("token counting is not supported for OpenAI-compatible model %q", req.Model))
+		return
+	}
+	passBody := body
+	if route.model.Alias != "" && route.model.ProviderModel != "" {
+		rewritten, err := rewriteAnthropicRequestModel(body, route.model.ProviderModel)
+		if err != nil {
+			writeAnthropicError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		passBody = rewritten
+	}
+	h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.responseModel)
 }
 
 type requestValidationError struct {
@@ -186,24 +247,29 @@ type requestValidationError struct {
 	message string
 }
 
-func decodeAnthropicRequest(w http.ResponseWriter, r *http.Request) (anthropicRequest, bool) {
-	var req anthropicRequest
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 8<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&req); err != nil {
-		if strings.Contains(err.Error(), "unknown field") {
-			writeAnthropicError(w, http.StatusNotImplemented, "unsupported Anthropic request field: "+err.Error())
-			return anthropicRequest{}, false
-		}
+func decodeAnthropicRequest(w http.ResponseWriter, r *http.Request) (anthropicRequest, []byte, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+	if err != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid Anthropic message request")
-		return anthropicRequest{}, false
+		return anthropicRequest{}, nil, false
 	}
-	return req, true
+	var req anthropicRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid Anthropic message request")
+		return anthropicRequest{}, nil, false
+	}
+	if err := json.Unmarshal(body, &req.Fields); err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid Anthropic message request")
+		return anthropicRequest{}, nil, false
+	}
+	return req, body, true
 }
 
-func (h *handler) validateMessageRequest(req *anthropicRequest) *requestValidationError {
-	if len(req.Tools) > 0 || len(req.ToolChoice) > 0 {
-		return &requestValidationError{status: http.StatusNotImplemented, message: "tool use is not supported by the OpenAI-compatible gateway path yet"}
+func (h *handler) validateOpenAIMessageRequest(req *anthropicRequest) *requestValidationError {
+	for field := range req.Fields {
+		if !openAIPathSupportsAnthropicField(field) {
+			return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("Anthropic request field %q is not supported by the OpenAI-compatible gateway path", field)}
+		}
 	}
 	if err := validateThinking(req.Thinking); err != nil {
 		return &requestValidationError{status: http.StatusNotImplemented, message: err.Error()}
@@ -211,427 +277,264 @@ func (h *handler) validateMessageRequest(req *anthropicRequest) *requestValidati
 	return nil
 }
 
-func (h *handler) selectRouteAlias(ctx context.Context, requested string) (string, *requestValidationError) {
-	requested = strings.TrimSpace(requested)
-	forced := strings.TrimSpace(h.cfg.ForcedModelAlias)
-	if requested == "" {
-		if forced != "" {
-			return forced, nil
-		}
-		return "", &requestValidationError{status: http.StatusBadRequest, message: "message request model must be a configured ccr model alias"}
+func openAIPathSupportsAnthropicField(field string) bool {
+	switch field {
+	case "model", "system", "messages", "max_tokens", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config":
+		return true
+	default:
+		return false
 	}
-	if forced != "" {
-		exists, err := h.cfg.Store.ModelExists(ctx, requested)
-		if err != nil {
-			return "", &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("checking requested model alias %q: %v", requested, err)}
-		}
-		if exists {
-			return requested, nil
-		}
-		return forced, nil
-	}
-	return requested, nil
 }
 
-func (h *handler) loadRouteTarget(w http.ResponseWriter, r *http.Request, routeAlias string) (store.Model, store.Provider, bool) {
-	model, err := h.cfg.Store.GetModel(r.Context(), routeAlias)
+type routeKind int
+
+const (
+	routeOpenAI routeKind = iota
+	routeAnthropic
+)
+
+var errNoDefaultModelAlias = errors.New("no default model alias configured")
+
+type messageRoute struct {
+	kind              routeKind
+	model             store.Model
+	provider          store.Provider
+	anthropicProvider *store.Provider
+	responseModel     string
+}
+
+func (h *handler) selectRoute(ctx context.Context, requested string, incoming http.Header) (messageRoute, *requestValidationError) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: "message request model is required"}
+	}
+	aliasLookup, validationErr := h.configuredAliasForRequest(ctx, requested)
+	if validationErr != nil {
+		return messageRoute{}, validationErr
+	}
+	if aliasLookup.exists {
+		return h.routeConfiguredAlias(ctx, aliasLookup.alias, requested)
+	}
+	if nativeModel, ok := nativeAnthropicModelFromDiscoveryID(requested); ok {
+		return h.routeAdvertisedAnthropicModel(ctx, requested, nativeModel, incoming)
+	}
+	defaultRoute, defaultErr := h.defaultAliasRoute(ctx)
+	if defaultErr == nil {
+		return defaultRoute, nil
+	}
+	if !errors.Is(defaultErr, errNoDefaultModelAlias) {
+		return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("default model alias could not be routed: %v", defaultErr)}
+	}
+	anthropicProvider, err := h.defaultAnthropicProvider(ctx)
 	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, fmt.Sprintf("model alias %q is not configured", routeAlias))
-		return store.Model{}, store.Provider{}, false
+		return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("model %q is not a configured ccr alias and no Anthropic pass-through provider is configured", requested)}
+	}
+	return messageRoute{kind: routeAnthropic, anthropicProvider: &anthropicProvider, responseModel: requested}, nil
+}
+
+type configuredAliasLookup struct {
+	alias  string
+	exists bool
+}
+
+func (h *handler) configuredAliasForRequest(ctx context.Context, requested string) (configuredAliasLookup, *requestValidationError) {
+	alias := requested
+	aliasExists, err := h.cfg.Store.ModelExists(ctx, alias)
+	if err != nil {
+		return configuredAliasLookup{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("checking requested model alias %q: %v", alias, err)}
+	}
+	if aliasExists {
+		return configuredAliasLookup{alias: alias, exists: true}, nil
+	}
+	discoveryAlias, ok := aliasFromDiscoveryID(requested)
+	if !ok {
+		return configuredAliasLookup{alias: alias}, nil
+	}
+	aliasExists, err = h.cfg.Store.ModelExists(ctx, discoveryAlias)
+	if err != nil {
+		return configuredAliasLookup{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("checking requested model alias %q: %v", discoveryAlias, err)}
+	}
+	return configuredAliasLookup{alias: discoveryAlias, exists: aliasExists}, nil
+}
+
+func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel string) (messageRoute, *requestValidationError) {
+	model, modelErr := h.cfg.Store.GetModel(ctx, alias)
+	if modelErr != nil {
+		return messageRoute{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("reading requested model alias %q: %v", alias, modelErr)}
 	}
 	if model.Status == "blocked" {
-		writeAnthropicError(w, http.StatusForbidden, fmt.Sprintf("model alias %q is blocked and cannot be routed", routeAlias))
-		return store.Model{}, store.Provider{}, false
+		return messageRoute{}, &requestValidationError{status: http.StatusForbidden, message: fmt.Sprintf("model alias %q is blocked and cannot be routed", alias)}
 	}
-	provider, err := h.cfg.Store.GetProvider(r.Context(), model.ProviderName)
+	provider, providerErr := h.cfg.Store.GetProvider(ctx, model.ProviderName)
+	if providerErr != nil {
+		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("provider %q for model alias %q is not configured", model.ProviderName, alias)}
+	}
+	if providers.SupportsOpenAICompatibleRouting(provider.Type) {
+		return messageRoute{kind: routeOpenAI, model: model, provider: provider, responseModel: responseModel}, nil
+	}
+	if provider.Type == "anthropic" {
+		rewrittenProvider := provider
+		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, responseModel: responseModel}, nil
+	}
+	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q is not supported by the gateway path", provider.Type)}
+}
+
+func (h *handler) defaultAliasRoute(ctx context.Context) (messageRoute, error) {
+	alias := strings.TrimSpace(h.cfg.DefaultModelAlias)
+	if alias == "" {
+		return messageRoute{}, errNoDefaultModelAlias
+	}
+	model, err := h.cfg.Store.GetModel(ctx, alias)
 	if err != nil {
-		writeAnthropicError(w, http.StatusBadRequest, fmt.Sprintf("provider %q for model alias %q is not configured", model.ProviderName, routeAlias))
-		return store.Model{}, store.Provider{}, false
+		return messageRoute{}, err
 	}
-	if !providers.SupportsOpenAICompatibleRouting(provider.Type) {
-		writeAnthropicError(w, http.StatusNotImplemented, fmt.Sprintf("provider type %q is not supported by the OpenAI-compatible gateway path", provider.Type))
-		return store.Model{}, store.Provider{}, false
+	if model.Status == "blocked" {
+		return messageRoute{}, fmt.Errorf("default model alias %q is blocked", alias)
 	}
-	return model, provider, true
-}
-
-func validateThinking(raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var payload struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return fmt.Errorf("unsupported thinking field: %w", err)
-	}
-	switch payload.Type {
-	case "", "adaptive", "disabled":
-		return nil
-	default:
-		return fmt.Errorf("thinking mode %q is not supported by the OpenAI-compatible gateway path", payload.Type)
-	}
-}
-
-func resolveProviderSecret(ctx context.Context, backend secret.Backend, ref string) (string, error) {
-	if strings.TrimSpace(ref) == "" {
-		return "", nil
-	}
-	value, err := backend.Resolve(ctx, ref)
+	provider, err := h.cfg.Store.GetProvider(ctx, model.ProviderName)
 	if err != nil {
-		return "", err
+		return messageRoute{}, err
 	}
-	return strings.TrimSpace(value), nil
+	if providers.SupportsOpenAICompatibleRouting(provider.Type) {
+		return messageRoute{kind: routeOpenAI, model: model, provider: provider, responseModel: alias}, nil
+	}
+	if provider.Type == "anthropic" {
+		rewrittenProvider := provider
+		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, responseModel: alias}, nil
+	}
+	return messageRoute{}, fmt.Errorf("default model alias %q uses provider type %q", alias, provider.Type)
 }
 
-func (h *handler) callOpenAICompatible(ctx context.Context, provider store.Provider, apiKey string, payload openAIChatRequest) (openAIChatResponse, error) {
-	endpoint, err := providers.ChatCompletionsEndpoint(provider.BaseURL)
+func aliasFromDiscoveryID(id string) (string, bool) {
+	id = strings.TrimSpace(id)
+	if !strings.HasPrefix(id, discoveryAliasPrefix) {
+		return "", false
+	}
+	alias := strings.TrimPrefix(id, discoveryAliasPrefix)
+	if alias == "" {
+		return "", false
+	}
+	return alias, true
+}
+
+func nativeAnthropicModelFromDiscoveryID(id string) (string, bool) {
+	id = strings.TrimSpace(id)
+	if !strings.HasPrefix(id, nativeAnthropicDiscoveryPrefix) {
+		return "", false
+	}
+	model := strings.TrimPrefix(id, nativeAnthropicDiscoveryPrefix)
+	if !looksLikeAnthropicModelID(model) {
+		return "", false
+	}
+	return model, true
+}
+
+var errNoAnthropicPassThroughProvider = errors.New("no Anthropic provider configured for pass-through")
+
+func (h *handler) routeAdvertisedAnthropicModel(ctx context.Context, requested, nativeModel string, incoming http.Header) (messageRoute, *requestValidationError) {
+	advertised, err := h.anthropicModelAdvertised(ctx, nativeModel, incoming)
 	if err != nil {
-		return openAIChatResponse{}, err
+		return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("checking Anthropic model discovery for %q: %v", nativeModel, err)}
 	}
-	body, err := json.Marshal(payload)
+	if !advertised {
+		return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("Anthropic model %q is not advertised by model discovery", nativeModel)}
+	}
+	anthropicProvider, err := h.defaultAnthropicProvider(ctx)
 	if err != nil {
-		return openAIChatResponse{}, fmt.Errorf("encoding OpenAI-compatible request: %w", err)
+		return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("advertised Anthropic model %q could not be routed: %v", nativeModel, err)}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return openAIChatResponse{}, fmt.Errorf("creating OpenAI-compatible request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-
-	client := h.cfg.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return openAIChatResponse{}, fmt.Errorf("requesting OpenAI-compatible provider %q: %w", provider.Name, err)
-	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return openAIChatResponse{}, fmt.Errorf("OpenAI-compatible provider %q returned HTTP %d %s", provider.Name, resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
-	var decoded openAIChatResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&decoded); err != nil {
-		return openAIChatResponse{}, fmt.Errorf("decoding OpenAI-compatible provider response: %w", err)
-	}
-	if len(decoded.Choices) == 0 {
-		return openAIChatResponse{}, fmt.Errorf("OpenAI-compatible provider %q returned no choices", provider.Name)
-	}
-	return decoded, nil
-}
-
-type anthropicRequest struct {
-	Model        string             `json:"model"`
-	System       any                `json:"system,omitempty"`
-	Messages     []anthropicMessage `json:"messages"`
-	MaxTokens    int                `json:"max_tokens,omitempty"`
-	Stream       bool               `json:"stream,omitempty"`
-	Tools        []json.RawMessage  `json:"tools,omitempty"`
-	ToolChoice   json.RawMessage    `json:"tool_choice,omitempty"`
-	Thinking     json.RawMessage    `json:"thinking,omitempty"`
-	Metadata     json.RawMessage    `json:"metadata,omitempty"`
-	OutputConfig json.RawMessage    `json:"output_config,omitempty"`
-}
-
-type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
-}
-
-type openAIChatRequest struct {
-	Model           string          `json:"model"`
-	Messages        []openAIMessage `json:"messages"`
-	MaxTokens       int             `json:"max_tokens,omitempty"`
-	Stream          bool            `json:"stream"`
-	User            string          `json:"user,omitempty"`
-	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
-}
-
-type openAIMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type openAIChatResponse struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
-}
-
-func toOpenAIChatRequest(req anthropicRequest, providerModel string) (openAIChatRequest, error) {
-	options, err := openAIOptionsFromAnthropic(req)
-	if err != nil {
-		return openAIChatRequest{}, err
-	}
-	messages := make([]openAIMessage, 0, len(req.Messages)+1)
-	if req.System != nil {
-		text, err := anthropicContentText(req.System)
-		if err != nil {
-			return openAIChatRequest{}, fmt.Errorf("unsupported system content: %w", err)
-		}
-		if text != "" {
-			messages = append(messages, openAIMessage{Role: "system", Content: text})
-		}
-	}
-	for _, message := range req.Messages {
-		if message.Role != "user" && message.Role != "assistant" {
-			return openAIChatRequest{}, fmt.Errorf("unsupported message role %q", message.Role)
-		}
-		text, err := anthropicContentText(message.Content)
-		if err != nil {
-			return openAIChatRequest{}, fmt.Errorf("unsupported %s message content: %w", message.Role, err)
-		}
-		messages = append(messages, openAIMessage{Role: message.Role, Content: text})
-	}
-	return openAIChatRequest{
-		Model:           providerModel,
-		Messages:        messages,
-		MaxTokens:       req.MaxTokens,
-		Stream:          false,
-		User:            options.user,
-		ReasoningEffort: options.reasoningEffort,
+	return messageRoute{
+		kind:              routeAnthropic,
+		model:             store.Model{Alias: requested, ProviderModel: nativeModel},
+		anthropicProvider: &anthropicProvider,
+		responseModel:     requested,
 	}, nil
 }
 
-type openAIRequestOptions struct {
-	user            string
-	reasoningEffort string
-}
-
-func openAIOptionsFromAnthropic(req anthropicRequest) (openAIRequestOptions, error) {
-	user, err := openAIUserFromMetadata(req.Metadata)
+func (h *handler) anthropicModelAdvertised(ctx context.Context, requested string, incoming http.Header) (bool, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || !looksLikeAnthropicModelID(requested) {
+		return false, nil
+	}
+	if advertised, valid := h.cachedAnthropicModelAdvertised(requested); valid {
+		return advertised, nil
+	}
+	entries, err := h.discoverAnthropicModels(ctx, incoming)
 	if err != nil {
-		return openAIRequestOptions{}, err
+		if errors.Is(err, errNoAnthropicPassThroughProvider) {
+			return false, nil
+		}
+		return false, err
 	}
-	reasoningEffort, err := openAIReasoningEffortFromOutputConfig(req.OutputConfig)
-	if err != nil {
-		return openAIRequestOptions{}, err
-	}
-	return openAIRequestOptions{user: user, reasoningEffort: reasoningEffort}, nil
-}
-
-func openAIUserFromMetadata(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return "", nil
-	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return "", fmt.Errorf("unsupported metadata: %w", err)
-	}
-	var user string
-	for key, value := range payload {
-		switch key {
-		case "user_id":
-			if err := json.Unmarshal(value, &user); err != nil {
-				return "", fmt.Errorf("metadata.user_id must be a string")
-			}
-		default:
-			return "", fmt.Errorf("metadata field %q is not supported by the OpenAI-compatible gateway path", key)
+	for _, entry := range entries {
+		if entry.ID == requested {
+			return true, nil
 		}
 	}
-	return strings.TrimSpace(user), nil
+	return false, nil
 }
 
-func openAIReasoningEffortFromOutputConfig(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return "", nil
+func looksLikeAnthropicModelID(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), "claude-")
+}
+
+func (h *handler) cachedAnthropicModelAdvertised(requested string) (advertised, valid bool) {
+	h.anthropicModelMu.Lock()
+	defer h.anthropicModelMu.Unlock()
+	if time.Now().After(h.anthropicModelExpiry) {
+		return false, false
 	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return "", fmt.Errorf("unsupported output_config: %w", err)
-	}
-	var effort string
-	for key, value := range payload {
-		switch key {
-		case "effort":
-			if err := json.Unmarshal(value, &effort); err != nil {
-				return "", fmt.Errorf("output_config.effort must be a string")
-			}
-		default:
-			return "", fmt.Errorf("output_config field %q is not supported by the OpenAI-compatible gateway path", key)
+	_, ok := h.anthropicModelIDs[requested]
+	return ok, true
+}
+
+func (h *handler) cacheAnthropicModels(entries []gatewayModelEntry) {
+	ids := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		id := strings.TrimSpace(entry.ID)
+		if id != "" {
+			ids[id] = struct{}{}
 		}
 	}
-	return openAIReasoningEffortFromClaudeEffort(effort)
+	h.anthropicModelMu.Lock()
+	defer h.anthropicModelMu.Unlock()
+	h.anthropicModelIDs = ids
+	h.anthropicModelExpiry = time.Now().Add(5 * time.Minute)
 }
 
-func openAIReasoningEffortFromClaudeEffort(effort string) (string, error) {
-	trimmed := strings.TrimSpace(effort)
-	switch trimmed {
-	case "":
-		return "", nil
-	case "low", "medium", "high":
-		return trimmed, nil
-	case "xhigh", "max":
-		return "high", nil
-	default:
-		return "", fmt.Errorf("output_config.effort %q is not supported by the OpenAI-compatible gateway path", effort)
+func anthropicRequestUsesTools(req anthropicRequest) bool {
+	if len(req.Tools) > 0 || rawJSONPresent(req.ToolChoice) {
+		return true
 	}
-}
-
-func anthropicContentText(value any) (string, error) {
-	switch content := value.(type) {
-	case string:
-		return content, nil
-	case []any:
-		var parts []string
-		for _, item := range content {
-			block, ok := item.(map[string]any)
-			if !ok {
-				return "", fmt.Errorf("content block is not an object")
-			}
-			text, err := anthropicTextBlockText(block)
-			if err != nil {
-				return "", err
-			}
-			parts = append(parts, text)
-		}
-		return strings.Join(parts, "\n"), nil
-	default:
-		return "", fmt.Errorf("content type %T is not supported", value)
-	}
-}
-
-func anthropicTextBlockText(block map[string]any) (string, error) {
-	for key := range block {
-		if key != "type" && key != "text" && key != "cache_control" {
-			return "", fmt.Errorf("content block field %q is not supported", key)
+	for _, message := range req.Messages {
+		if anthropicContentUsesTools(message.Content) {
+			return true
 		}
 	}
-	blockType, _ := block["type"].(string)
-	if blockType != "text" {
-		return "", fmt.Errorf("content block type %q is not supported", blockType)
-	}
-	text, ok := block["text"].(string)
+	return false
+}
+
+func rawJSONPresent(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null"
+}
+
+func anthropicContentUsesTools(content any) bool {
+	blocks, ok := content.([]any)
 	if !ok {
-		return "", fmt.Errorf("content block text must be a string")
+		return false
 	}
-	return text, nil
-}
-
-func writeAnthropicStream(w http.ResponseWriter, alias string, resp openAIChatResponse, finishReason string) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
-
-	text := ""
-	if len(resp.Choices) > 0 {
-		text = resp.Choices[0].Message.Content
-	}
-	id := firstNonEmpty(resp.ID, "msg_ccr")
-	writeSSEEvent(w, flusher, "message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":            id,
-			"type":          "message",
-			"role":          "assistant",
-			"model":         alias,
-			"content":       []any{},
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]int{
-				"input_tokens":  resp.Usage.PromptTokens,
-				"output_tokens": 0,
-			},
-		},
-	})
-	writeSSEEvent(w, flusher, "content_block_start", map[string]any{
-		"type":          "content_block_start",
-		"index":         0,
-		"content_block": map[string]string{"type": "text", "text": ""},
-	})
-	if text != "" {
-		writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
-			"type":  "content_block_delta",
-			"index": 0,
-			"delta": map[string]string{"type": "text_delta", "text": text},
-		})
-	}
-	writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
-		"type":  "content_block_stop",
-		"index": 0,
-	})
-	writeSSEEvent(w, flusher, "message_delta", map[string]any{
-		"type": "message_delta",
-		"delta": map[string]any{
-			"stop_reason":   finishReason,
-			"stop_sequence": nil,
-		},
-		"usage": map[string]int{"output_tokens": resp.Usage.CompletionTokens},
-	})
-	writeSSEEvent(w, flusher, "message_stop", map[string]string{"type": "message_stop"})
-}
-
-func writeSSEEvent(w io.Writer, flusher http.Flusher, event string, payload any) {
-	data, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data)
-	if flusher != nil {
-		flusher.Flush()
-	}
-}
-
-func toAnthropicResponse(alias string, resp openAIChatResponse, finishReason string) map[string]any {
-	text := ""
-	if len(resp.Choices) > 0 {
-		text = resp.Choices[0].Message.Content
-	}
-	return map[string]any{
-		"id":            firstNonEmpty(resp.ID, "msg_ccr"),
-		"type":          "message",
-		"role":          "assistant",
-		"model":         alias,
-		"content":       []map[string]string{{"type": "text", "text": text}},
-		"stop_reason":   finishReason,
-		"stop_sequence": nil,
-		"usage": map[string]int{
-			"input_tokens":  resp.Usage.PromptTokens,
-			"output_tokens": resp.Usage.CompletionTokens,
-		},
-	}
-}
-
-func anthropicStopReasonFromOpenAI(resp openAIChatResponse) (string, error) {
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("OpenAI-compatible provider returned no choices")
-	}
-	switch finishReason := resp.Choices[0].FinishReason; finishReason {
-	case "", "stop":
-		return "end_turn", nil
-	case "length":
-		return "max_tokens", nil
-	default:
-		return "", fmt.Errorf("OpenAI-compatible provider returned unsupported finish_reason %q", finishReason)
-	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType, _ := block["type"].(string)
+		if blockType == "tool_use" || blockType == "tool_result" {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, message string) {
