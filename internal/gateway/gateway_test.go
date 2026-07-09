@@ -233,6 +233,61 @@ func TestGatewayTranslatesEnabledThinkingToOpenAIReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestGatewayTranslatesSystemMessageRoleOnOpenAIPath(t *testing.T) {
+	ctx := context.Background()
+	var gotMessages []openAIMessage
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []openAIMessage `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		gotMessages = payload.Messages
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","choices":[{"message":{"content":"routed"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	body := `{
+		"model":"gpt",
+		"system":"top-level system",
+		"messages":[
+			{"role":"system","content":[{"type":"text","text":"message system","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":"hello"}
+		]
+	}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if len(gotMessages) != 3 {
+		t.Fatalf("provider messages = %#v, want 3 messages", gotMessages)
+	}
+	if gotMessages[0].Role != "system" || gotMessages[0].Content != "top-level system" ||
+		gotMessages[1].Role != "system" || gotMessages[1].Content != "message system" ||
+		gotMessages[2].Role != "user" || gotMessages[2].Content != "hello" {
+		t.Fatalf("provider messages = %#v", gotMessages)
+	}
+}
+
 func TestGatewayDiscoveryShimRoutesConfiguredRequestAlias(t *testing.T) {
 	ctx := context.Background()
 	var gotModel string

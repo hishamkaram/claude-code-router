@@ -294,9 +294,22 @@ func openAIMessagesFromAnthropic(message anthropicMessage) ([]openAIMessage, err
 		return openAIUserMessagesFromAnthropic(message.Content)
 	case "assistant":
 		return openAIAssistantMessagesFromAnthropic(message.Content)
+	case "system":
+		return openAISystemMessagesFromAnthropic(message.Content)
 	default:
 		return nil, fmt.Errorf("unsupported message role %q", message.Role)
 	}
+}
+
+func openAISystemMessagesFromAnthropic(content any) ([]openAIMessage, error) {
+	text, err := anthropicContentText(content)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported system message content: %w", err)
+	}
+	if text == "" {
+		return nil, nil
+	}
+	return []openAIMessage{{Role: "system", Content: text}}, nil
 }
 
 func openAIUserMessagesFromAnthropic(content any) ([]openAIMessage, error) {
