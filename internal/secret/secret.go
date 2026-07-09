@@ -5,12 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	keyring "github.com/zalando/go-keyring"
 )
 
-const serviceName = "claude-code-router"
+const (
+	serviceName                = "claude-code-router"
+	fileSecretPerm os.FileMode = 0o600
+)
 
 type Backend interface {
 	Available(ctx context.Context) error
@@ -25,7 +29,7 @@ func (DefaultBackend) Available(ctx context.Context) error {
 		return fmt.Errorf("secret.DefaultBackend.Available: context canceled: %w", err)
 	}
 	if _, err := keyring.Get(serviceName, "__availability_probe__"); err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return fmt.Errorf("secret.DefaultBackend.Available: OS keychain unavailable: %w; use --api-key-env <ENV> to store an environment-variable reference instead", err)
+		return fmt.Errorf("secret.DefaultBackend.Available: OS keychain unavailable: %w; use --api-key-env <ENV> or --api-key-file <PATH> to store a secret reference instead", err)
 	}
 	return nil
 }
@@ -42,7 +46,7 @@ func (DefaultBackend) Store(ctx context.Context, ref, value string) error {
 		return fmt.Errorf("secret.DefaultBackend.Store: empty secret for %q", RedactRef(ref))
 	}
 	if err := keyring.Set(serviceName, account, value); err != nil {
-		return fmt.Errorf("secret.DefaultBackend.Store: storing %q in OS keychain: %w; use --api-key-env <ENV> to store an environment-variable reference instead", RedactRef(ref), err)
+		return fmt.Errorf("secret.DefaultBackend.Store: storing %q in OS keychain: %w; use --api-key-env <ENV> or --api-key-file <PATH> to store a secret reference instead", RedactRef(ref), err)
 	}
 	return nil
 }
@@ -65,11 +69,37 @@ func (DefaultBackend) Resolve(ctx context.Context, ref string) (string, error) {
 		}
 		return value, nil
 	}
+	if path, ok := strings.CutPrefix(ref, "file:"); ok {
+		value, err := readFileSecret(path)
+		if err != nil {
+			return "", fmt.Errorf("secret.DefaultBackend.Resolve: reading %q: %w", RedactRef(ref), err)
+		}
+		return value, nil
+	}
 	return "", fmt.Errorf("secret.DefaultBackend.Resolve: unsupported secret ref %q", RedactRef(ref))
 }
 
 func EnvRef(name string) string {
 	return "env:" + name
+}
+
+func FileRef(path string) string {
+	return "file:" + path
+}
+
+func FileRefFromPath(path string) (string, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return "", fmt.Errorf("API key file path is required")
+	}
+	absolute, err := filepath.Abs(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("resolving API key file path: %w", err)
+	}
+	if _, err := readFileSecret(absolute); err != nil {
+		return "", err
+	}
+	return FileRef(absolute), nil
 }
 
 func KeyringRef(providerName string) string {
@@ -87,4 +117,39 @@ func RedactRef(ref string) string {
 		return prefix + ":***"
 	}
 	return "***"
+}
+
+func readFileSecret(path string) (string, error) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return "", fmt.Errorf("API key file path is required")
+	}
+	info, err := os.Lstat(trimmed)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("API key file does not exist")
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return "", fmt.Errorf("API key file cannot be inspected: permission denied")
+		}
+		return "", fmt.Errorf("API key file cannot be inspected")
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("API key file must be a regular file")
+	}
+	if perm := info.Mode().Perm(); perm != fileSecretPerm {
+		return "", fmt.Errorf("API key file must have permissions 0600 (got %04o)", perm)
+	}
+	raw, err := os.ReadFile(trimmed)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return "", fmt.Errorf("API key file cannot be read: permission denied")
+		}
+		return "", fmt.Errorf("API key file cannot be read")
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" {
+		return "", fmt.Errorf("API key file is empty")
+	}
+	return value, nil
 }

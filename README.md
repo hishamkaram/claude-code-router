@@ -14,7 +14,7 @@ Local CLI foundation:
   interactive guided flows.
 - SQLite local state for providers, model aliases, launch sessions, observed
   agents, and conformance records.
-- API keys stored as environment references or OS keychain references, never raw
+- API keys stored as environment, file, or OS keychain references, never raw
   SQLite values.
 - Protocol-based provider profiles for Anthropic-compatible and
   OpenAI-compatible providers, including separate Z.AI Anthropic and Z.AI
@@ -49,6 +49,7 @@ ccr init
 ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
 ccr provider add zai --api-key-env ZAI_API_KEY
 ccr provider add glm --protocol anthropic-compatible --base-url https://example.invalid --api-key-env GLM_API_KEY
+ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
 ccr provider add litellm --base-url http://localhost:4000 --no-api-key
 ccr provider test litellm
 ccr provider update litellm --base-url http://localhost:5000
@@ -67,6 +68,16 @@ Direct API-key entry is supported through stdin and OS keychain storage:
 
 ```bash
 printf '%s' "$ANTHROPIC_API_KEY" | ccr provider add anthropic --api-key-stdin
+```
+
+Headless machines without OS keychain support can store only a file reference in
+SQLite:
+
+```bash
+mkdir -p ~/.config/ccr
+install -m 600 /dev/null ~/.config/ccr/litellm.key
+read -rsp 'LiteLLM key: ' key; printf '\n'; printf '%s\n' "$key" > ~/.config/ccr/litellm.key; unset key
+ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
 ```
 
 ## Safety Rules

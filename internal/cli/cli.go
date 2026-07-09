@@ -40,6 +40,7 @@ type providerAddConfig struct {
 	mode         string
 	baseURL      string
 	apiKeyEnv    string
+	apiKeyFile   string
 	apiKeyValue  string
 	apiKeyStdin  bool
 	noAPIKey     bool
@@ -78,8 +79,8 @@ launch time with ccr launch --model <alias> or later through Claude Code's
 
 ccr stores providers, model aliases, compatibility metadata, sessions, and
 usage metadata in a local SQLite database. API keys are never stored raw in
-SQLite. Use environment-variable references or the OS keychain-backed prompt
-flow when it is available on your machine.
+SQLite. Use environment-variable references, 0600 API-key file references, or
+the OS keychain-backed prompt flow when it is available on your machine.
 
 Compatibility policy:
   - use the selected model wherever safely possible
@@ -147,6 +148,7 @@ func newProviderCommand(ctx context.Context, opts *options, deps Dependencies) *
 Examples:
   ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
   ccr provider add --interactive litellm
+  ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
   ccr provider add litellm --base-url http://localhost:4000 --no-api-key
   ccr provider add anthropic --api-key-stdin
   ccr provider discover-models litellm
@@ -174,6 +176,7 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 	var mode string
 	var baseURL string
 	var apiKeyEnv string
+	var apiKeyFile string
 	var apiKeyStdin bool
 	var noAPIKey bool
 	var interactive bool
@@ -208,6 +211,7 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 					mode:         mode,
 					baseURL:      baseURL,
 					apiKeyEnv:    apiKeyEnv,
+					apiKeyFile:   apiKeyFile,
 					apiKeyStdin:  apiKeyStdin,
 					noAPIKey:     noAPIKey,
 				})
@@ -218,6 +222,7 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 				mode:         mode,
 				baseURL:      baseURL,
 				apiKeyEnv:    apiKeyEnv,
+				apiKeyFile:   apiKeyFile,
 				apiKeyStdin:  apiKeyStdin,
 				noAPIKey:     noAPIKey,
 			})
@@ -228,6 +233,7 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 	cmd.Flags().StringVar(&mode, "mode", "", "Provider compatibility mode: full, degraded, or chat-only (default comes from provider type)")
 	cmd.Flags().StringVar(&baseURL, "base-url", "", "Provider base URL")
 	cmd.Flags().StringVar(&apiKeyEnv, "api-key-env", "", "Environment variable containing the API key; stores only env:<name>")
+	cmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to a 0600 file containing the API key; stores only file:<absolute-path>")
 	cmd.Flags().BoolVar(&apiKeyStdin, "api-key-stdin", false, "Read API key from stdin and store it in the OS keychain")
 	cmd.Flags().BoolVar(&noAPIKey, "no-api-key", false, "Declare that this provider does not need an API key")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Guide provider setup and optional model import with prompts")
@@ -246,7 +252,7 @@ func runProviderAdd(ctx context.Context, cmd *cobra.Command, opts *options, deps
 	if err != nil {
 		return err
 	}
-	plan, err := resolveProviderSecretPlan(deps, name, resolvedType, cfg.apiKeyEnv, cfg.apiKeyValue, cfg.apiKeyStdin, cfg.noAPIKey)
+	plan, err := resolveProviderSecretPlan(deps, name, resolvedType, cfg.apiKeyEnv, cfg.apiKeyFile, cfg.apiKeyValue, cfg.apiKeyStdin, cfg.noAPIKey)
 	if err != nil {
 		return err
 	}
