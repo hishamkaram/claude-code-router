@@ -629,6 +629,49 @@ func TestGatewayRejectsUnsupportedAnthropicFieldsOnOpenAIPath(t *testing.T) {
 	}
 }
 
+func TestGatewayDropsContextManagementOnOpenAIPath(t *testing.T) {
+	ctx := context.Background()
+	var gotContextManagement bool
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		_, gotContextManagement = payload["context_management"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer provider.Close()
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	body := `{"model":"gpt","context_management":{"edits":[{"type":"clear_tool_uses"}]},"messages":[{"role":"user","content":"hello"}]}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if gotContextManagement {
+		t.Fatalf("provider received Anthropic context_management field")
+	}
+	if got := resp.Header.Get(ccrIgnoredFieldsHeader); got != "context_management" {
+		t.Fatalf("%s = %q, want context_management", ccrIgnoredFieldsHeader, got)
+	}
+}
+
 func TestGatewayIgnoresUnknownAcceptedOptionFields(t *testing.T) {
 	ctx := context.Background()
 

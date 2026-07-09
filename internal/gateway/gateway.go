@@ -117,6 +117,7 @@ const (
 	discoveryAliasPrefix    = "claude-ccr-"
 	ccrSessionTokenHeader   = "X-CCR-Session-Token"
 	ccrSessionTokenLower    = "x-ccr-session-token"
+	ccrIgnoredFieldsHeader  = "X-CCR-Ignored-Anthropic-Fields"
 )
 
 // DiscoveryAliasPrefix returns the Claude-compatible prefix used for CCR model aliases.
@@ -199,6 +200,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, err.status, err.message)
 		return
 	}
+	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredOpenAIAnthropicFields(req.Fields))
 
 	apiKey, err := resolveProviderSecret(r.Context(), h.cfg.Secrets, route.provider.SecretRef)
 	if err != nil {
@@ -294,11 +296,25 @@ func (h *handler) validateOpenAIMessageRequest(req *anthropicRequest) *requestVa
 
 func openAIPathSupportsAnthropicField(field string) bool {
 	switch field {
-	case "model", "system", "messages", "max_tokens", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config":
+	case "model", "system", "messages", "max_tokens", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config", "context_management":
 		return true
 	default:
 		return false
 	}
+}
+
+func ignoredOpenAIAnthropicFields(fields map[string]json.RawMessage) []string {
+	if _, ok := fields["context_management"]; ok {
+		return []string{"context_management"}
+	}
+	return nil
+}
+
+func addIgnoredAnthropicFieldsHeader(header http.Header, fields []string) {
+	if len(fields) == 0 {
+		return
+	}
+	header.Set(ccrIgnoredFieldsHeader, strings.Join(fields, ", "))
 }
 
 type routeKind int
