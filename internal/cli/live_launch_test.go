@@ -111,6 +111,30 @@ func TestLiveLaunchOpenAIProviderStreamsAgentToolInput(t *testing.T) {
 	state.assertComplete(t, out, errOut)
 }
 
+func TestLiveLaunchOpenAIProviderRunsDynamicWorkflow(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if _, err := liveclaude.Check(ctx); err != nil {
+		t.Skipf("live Claude Code unavailable: %v", err)
+	}
+
+	provider, state := newLiveWorkflowProvider(t)
+	defer provider.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
+
+	prompt := `Use a workflow now. The workflow should run one worker that returns exactly CCR_LIVE_WORKFLOW_CHILD_OK. After the workflow starts, reply exactly CCR_LIVE_WORKFLOW_LAUNCHED_OK. Do not use shell or web.`
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader(prompt + "\n")}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--permission-mode", "bypassPermissions")
+	if err != nil {
+		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !strings.Contains(out, "CCR_LIVE_WORKFLOW_LAUNCHED_OK") {
+		t.Fatalf("launch output missing workflow launch response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	state.assertComplete(t, out, errOut)
+}
+
 func TestLiveLaunchPreserveAuthRoutesThroughFakeAnthropicCompatibleProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -342,6 +366,14 @@ type liveAgentToolProviderState struct {
 	parentToolResultSeen     bool
 }
 
+type liveWorkflowProviderState struct {
+	mu                          sync.Mutex
+	chatCalls                   int
+	firstRequestHadWorkflowTool bool
+	workflowChildPromptSeen     bool
+	workflowLaunchResultSeen    bool
+}
+
 func newLiveAgentToolProvider(t *testing.T) (*httptest.Server, *liveAgentToolProviderState) {
 	t.Helper()
 	state := &liveAgentToolProviderState{}
@@ -351,7 +383,29 @@ func newLiveAgentToolProvider(t *testing.T) (*httptest.Server, *liveAgentToolPro
 	return server, state
 }
 
+func newLiveWorkflowProvider(t *testing.T) (*httptest.Server, *liveWorkflowProviderState) {
+	t.Helper()
+	state := &liveWorkflowProviderState{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		state.handle(t, w, r)
+	}))
+	return server, state
+}
+
 func (s *liveAgentToolProviderState) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	switch r.URL.Path {
+	case "/v1/models":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
+	case "/v1/chat/completions":
+		s.handleChat(t, w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *liveWorkflowProviderState) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	t.Helper()
 	switch r.URL.Path {
 	case "/v1/models":
@@ -389,6 +443,34 @@ func (s *liveAgentToolProviderState) handleChat(t *testing.T, w http.ResponseWri
 	}
 }
 
+func (s *liveWorkflowProviderState) handleChat(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	payload, ok := decodeLiveOpenAIChatPayload(t, w, r)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chatCalls++
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case s.chatCalls == 1:
+		s.firstRequestHadWorkflowTool = liveToolsContain(payload.Tools, "Workflow")
+		writeOpenAIWorkflowToolCall(w)
+	case isWorkflowSubagentRequest(payload.Messages):
+		s.workflowChildPromptSeen = true
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-child","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+	case openAIMessagesContainRole(payload.Messages, "tool", "Workflow launched in background"):
+		s.workflowLaunchResultSeen = true
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-started","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_LAUNCHED_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+	case openAIMessagesContain(payload.Messages, "<task-notification>"):
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-parent","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_PARENT_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+	default:
+		t.Errorf("unexpected provider request in Workflow live route: %#v", payload.Messages)
+		http.Error(w, "unexpected request", http.StatusBadRequest)
+	}
+}
+
 func decodeLiveOpenAIChatPayload(t *testing.T, w http.ResponseWriter, r *http.Request) (liveOpenAIChatPayload, bool) {
 	t.Helper()
 	var payload liveOpenAIChatPayload
@@ -405,6 +487,46 @@ func decodeLiveOpenAIChatPayload(t *testing.T, w http.ResponseWriter, r *http.Re
 	return payload, true
 }
 
+func writeOpenAIWorkflowToolCall(w http.ResponseWriter) {
+	arguments, _ := json.Marshal(map[string]string{"script": liveWorkflowScript()})
+	response := map[string]any{
+		"id": "chatcmpl-workflow-tool",
+		"choices": []map[string]any{{
+			"message": map[string]any{
+				"content": "",
+				"tool_calls": []map[string]any{{
+					"id":   "toolu_workflow_live",
+					"type": "function",
+					"function": map[string]string{
+						"name":      "Workflow",
+						"arguments": string(arguments),
+					},
+				}},
+			},
+			"finish_reason": "tool_calls",
+		}},
+		"usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 3},
+	}
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func liveWorkflowScript() string {
+	return `export const meta = {
+  name: 'ccr-live-workflow',
+  description: 'Return workflow sentinel',
+  phases: [{ title: 'Run' }],
+}
+phase('Run')
+const result = await agent('Return exactly CCR_LIVE_WORKFLOW_CHILD_OK and nothing else.', {label: 'sentinel', phase: 'Run'})
+return result
+`
+}
+
+func isWorkflowSubagentRequest(messages []liveOpenAIChatMessage) bool {
+	return openAIMessagesContain(messages, "subagent spawned by a workflow orchestration script") &&
+		openAIMessagesContain(messages, "Return exactly CCR_LIVE_WORKFLOW_CHILD_OK")
+}
+
 func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.ResponseWriter, messages []liveOpenAIChatMessage) {
 	t.Helper()
 	if openAIMessagesContainRole(messages, "tool", "") || !openAIMessagesContain(messages, "Return exactly CCR_LIVE_CHILD_OK") {
@@ -414,6 +536,15 @@ func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.Res
 	}
 	s.childPromptSeen = true
 	_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-child","choices":[{"message":{"content":"CCR_LIVE_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+}
+
+func (s *liveWorkflowProviderState) assertComplete(t *testing.T, out, errOut string) {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.firstRequestHadWorkflowTool || !s.workflowChildPromptSeen || !s.workflowLaunchResultSeen {
+		t.Fatalf("Workflow live route incomplete: firstRequestHadWorkflowTool=%v workflowChildPromptSeen=%v workflowLaunchResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWorkflowTool, s.workflowChildPromptSeen, s.workflowLaunchResultSeen, s.chatCalls, out, errOut)
+	}
 }
 
 func (s *liveAgentToolProviderState) assertComplete(t *testing.T, out, errOut string) {
@@ -430,8 +561,16 @@ func liveToolsContainAgent(tools []struct {
 		Name string `json:"name"`
 	} `json:"function"`
 }) bool {
+	return liveToolsContain(tools, "Agent")
+}
+
+func liveToolsContain(tools []struct {
+	Function struct {
+		Name string `json:"name"`
+	} `json:"function"`
+}, name string) bool {
 	for _, tool := range tools {
-		if tool.Function.Name == "Agent" {
+		if tool.Function.Name == name {
 			return true
 		}
 	}
