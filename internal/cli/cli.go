@@ -71,8 +71,10 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 		SilenceErrors: true,
 		Long: `ccr manages a local Claude Code router.
 
-Claude Code is launched once through a fixed local gateway, then model aliases
-are selected at launch time with ccr launch --model <alias>.
+Claude Code is launched once through a fixed local gateway. First-party Claude
+model names route to Anthropic, and configured CCR aliases can be selected at
+launch time with ccr launch --model <alias> or later through Claude Code's
+/model picker.
 
 ccr stores providers, model aliases, compatibility metadata, sessions, and
 usage metadata in a local SQLite database. API keys are never stored raw in

@@ -2,8 +2,9 @@
 
 Private Go implementation of a local Claude Code router.
 
-`ccr` launches Claude Code through a fixed local gateway and routes the session
-to a configured model alias selected at launch time.
+`ccr` launches Claude Code through a fixed local gateway and routes each turn
+to first-party Anthropic or a configured model alias selected with Claude Code's
+`/model` picker.
 
 ## Current Status
 
@@ -21,12 +22,16 @@ Local CLI foundation:
 - OpenAI-compatible model discovery through `/v1/models` for LiteLLM,
   OpenRouter, Z.AI OpenAI, and local providers when the provider declares model
   discovery support.
-- Loopback-only local gateway launch that injects `ANTHROPIC_BASE_URL`,
-  `ANTHROPIC_AUTH_TOKEN`, and Claude gateway/simple-mode environment.
+- Loopback-only local gateway launch that injects `ANTHROPIC_BASE_URL`, enables
+  gateway model discovery, and adds a CCR-local `X-CCR-Session-Token` through
+  `ANTHROPIC_CUSTOM_HEADERS` without overwriting Anthropic subscription or API
+  key auth. Legacy `ANTHROPIC_AUTH_TOKEN` gateway auth remains available with
+  `ccr launch --auth-mode gateway-token`.
 - Anthropic-compatible pass-through routing and OpenAI-compatible translation.
-  `ccr launch --model <alias>` sets the default route for Claude Code's
-  built-in model names; configured aliases requested by Claude Code are honored.
-  When omitted, launch auto-selects only if one routable alias exists.
+  First-party Claude Code model names route to Anthropic before any default CCR
+  alias fallback. Exact configured aliases and `claude-ccr-<alias>` discovery
+  IDs route to their configured providers. When `--model` is omitted, launch
+  auto-selects only if one routable alias exists.
 - Tool use, streaming, thinking, model discovery, and token counting are gated
   by visible provider capability metadata. Unsupported requests return explicit
   errors instead of falling back silently. Claude Code launch disables tools
@@ -52,6 +57,7 @@ ccr model add qwen --provider openrouter --model qwen/qwen3-coder
 ccr model test qwen
 ccr conformance run qwen
 ccr launch --model qwen
+ccr launch --auth-mode gateway-token --model qwen
 ccr sessions
 ccr model list
 ccr doctor

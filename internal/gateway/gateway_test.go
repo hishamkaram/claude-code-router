@@ -19,6 +19,7 @@ import (
 func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 	ctx := context.Background()
 	var gotAuth string
+	var gotAPIKey string
 	var gotModel string
 	var gotContent string
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -26,6 +27,7 @@ func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 			t.Fatalf("provider path = %q, want /v1/chat/completions", r.URL.Path)
 		}
 		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
 		var payload struct {
 			Model    string `json:"model"`
 			Messages []struct {
@@ -60,7 +62,9 @@ func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	req.Header.Set("Authorization", "Bearer anthropic-session")
+	req.Header.Set("x-api-key", "anthropic-api-key")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("gateway request error = %v", err)
@@ -83,6 +87,9 @@ func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 	}
 	if gotAuth != "Bearer provider-secret" {
 		t.Fatalf("provider did not receive expected bearer auth")
+	}
+	if gotAPIKey != "" {
+		t.Fatalf("provider received leaked Anthropic x-api-key %q", gotAPIKey)
 	}
 	if gotModel != "gpt-5" || gotContent != "hello" {
 		t.Fatalf("provider received model=%q content=%q", gotModel, gotContent)
@@ -138,7 +145,7 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 		"stream":true,
 		"metadata":{"user_id":"test"},
 		"output_config":{"effort":"xhigh"},
-		"thinking":{"type":"adaptive"},
+		"thinking":{"type":"enabled","budget_tokens":1024},
 		"system":[
 			{"type":"text","text":"system one"},
 			{"type":"text","text":"system two","cache_control":{"type":"ephemeral"}}
@@ -152,7 +159,8 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	req.Header.Set("Authorization", "Bearer anthropic-session")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("gateway request error = %v", err)
@@ -173,6 +181,55 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 	}
 	if gotModel != "gpt-5" || gotSystem != "system one\nsystem two" || gotContent != "hello\nworld" || gotUser != "test" || gotReasoningEffort != "high" {
 		t.Fatalf("provider received model=%q system=%q content=%q user=%q effort=%q", gotModel, gotSystem, gotContent, gotUser, gotReasoningEffort)
+	}
+}
+
+func TestGatewayTranslatesEnabledThinkingToOpenAIReasoningEffort(t *testing.T) {
+	ctx := context.Background()
+	var gotReasoningEffort string
+	var gotThinking bool
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		if raw, ok := payload["reasoning_effort"]; ok {
+			if err := json.Unmarshal(raw, &gotReasoningEffort); err != nil {
+				t.Fatalf("reasoning_effort decode error = %v", err)
+			}
+		}
+		_, gotThinking = payload["thinking"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","choices":[{"message":{"content":"routed"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if gotReasoningEffort != "high" {
+		t.Fatalf("provider reasoning_effort = %q, want high", gotReasoningEffort)
+	}
+	if gotThinking {
+		t.Fatalf("provider received raw Anthropic thinking field")
 	}
 }
 
@@ -207,7 +264,8 @@ func TestGatewayDiscoveryShimRoutesConfiguredRequestAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	req.Header.Set("Authorization", "Bearer anthropic-session")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("gateway request error = %v", err)
@@ -287,6 +345,45 @@ func TestGatewayRejectsMissingLocalToken(t *testing.T) {
 	}
 }
 
+func TestGatewayAcceptsCCRSessionTokenHeaderAndRejectsWrongToken(t *testing.T) {
+	ctx := context.Background()
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	okReq, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL()+"/v1/models", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest(ok) error = %v", err)
+	}
+	okReq.Header.Set("X-CCR-Session-Token", "local-token")
+	okResp, err := http.DefaultClient.Do(okReq)
+	if err != nil {
+		t.Fatalf("gateway ok request error = %v", err)
+	}
+	defer okResp.Body.Close()
+	if okResp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway ok status = %d, want 200", okResp.StatusCode)
+	}
+
+	badReq, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL()+"/v1/models", http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest(bad) error = %v", err)
+	}
+	badReq.Header.Set("X-CCR-Session-Token", "wrong-token")
+	badResp, err := http.DefaultClient.Do(badReq)
+	if err != nil {
+		t.Fatalf("gateway bad request error = %v", err)
+	}
+	defer badResp.Body.Close()
+	if badResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("gateway bad status = %d, want 401", badResp.StatusCode)
+	}
+}
+
 func TestGatewayRejectsUnsupportedProviderWithoutFallback(t *testing.T) {
 	ctx := context.Background()
 	s := newGatewayStore(t, store.Provider{Name: "unsupported", Type: "unsupported", BaseURL: "http://127.0.0.1:1", SecretRef: ""}, store.Model{Alias: "claude", ProviderName: "unsupported", ProviderModel: "claude-opus", Status: "degraded"})
@@ -332,7 +429,8 @@ func TestGatewayRejectsBlockedAliasWithoutProviderCall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	req.Header.Set("Authorization", "Bearer anthropic-session")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("gateway request error = %v", err)
@@ -610,6 +708,77 @@ func TestGatewayRejectsUnsupportedEffortValue(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsUnsupportedThinkingBeforeProviderCall(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name     string
+		provider store.Provider
+		body     string
+	}{
+		{
+			name: "unsupported capability",
+			provider: store.Provider{
+				Name:                   "litellm",
+				Type:                   "litellm",
+				BaseURL:                "http://127.0.0.1:1",
+				Protocol:               "openai-compatible",
+				SupportsTools:          true,
+				SupportsStreaming:      true,
+				SupportsThinking:       false,
+				SupportsModelDiscovery: true,
+				Mode:                   "degraded",
+			},
+			body: `{"model":"gpt","thinking":{"type":"enabled"},"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			name:     "malformed",
+			provider: store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""},
+			body:     `{"model":"gpt","thinking":true,"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			name:     "unknown type",
+			provider: store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""},
+			body:     `{"model":"gpt","thinking":{"type":"budget_tokens"},"messages":[{"role":"user","content":"hello"}]}`,
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				http.Error(w, "should not be called", http.StatusInternalServerError)
+			}))
+			defer provider.Close()
+			tt.provider.BaseURL = provider.URL
+			s := newGatewayStoreWithContext(t, ctx, tt.provider, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+			server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+			defer func() {
+				if err := server.Shutdown(ctx); err != nil {
+					t.Fatalf("Shutdown() error = %v", err)
+				}
+			}()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("NewRequest() error = %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer local-token")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("gateway request error = %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusNotImplemented {
+				t.Fatalf("gateway status = %d, want 501", resp.StatusCode)
+			}
+			if called {
+				t.Fatalf("provider was called for unsupported thinking")
+			}
+		})
+	}
+}
+
 func TestGatewayRejectsUnsupportedNestedTextBlockFields(t *testing.T) {
 	ctx := context.Background()
 	called := false
@@ -666,7 +835,10 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	if err := s.AddModel(ctx, store.Model{Alias: "claude-custom", ProviderName: "litellm", ProviderModel: "claude-compatible", Status: "full"}); err != nil {
 		t.Fatalf("AddModel(claude-custom) error = %v", err)
 	}
-	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	if err := s.AddModel(ctx, store.Model{Alias: "blocked", ProviderName: "litellm", ProviderModel: "blocked-model", Status: "blocked"}); err != nil {
+		t.Fatalf("AddModel(blocked) error = %v", err)
+	}
+	server := startGatewayWithConfig(t, ctx, Config{Store: s, Secrets: fakeGatewaySecrets{}, Token: "local-token", AnthropicBaseURL: anthropic.URL})
 	defer func() {
 		if err := server.Shutdown(ctx); err != nil {
 			t.Fatalf("Shutdown() error = %v", err)
@@ -677,7 +849,8 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	req.Header.Set("Authorization", "Bearer anthropic-session")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("gateway models request error = %v", err)
@@ -698,13 +871,15 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"claude-sonnet-4-6", "claude-ccr-gpt", "claude-custom"} {
+	for _, want := range []string{"default", "sonnet", "opus", "haiku", "claude-ccr-gpt", "claude-ccr-claude-custom"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}
 	}
-	if containsString(ids, "gpt") {
-		t.Fatalf("discovery ids = %#v, raw non-Claude alias should not duplicate shim", ids)
+	for _, hidden := range []string{"gpt", "claude-custom", "claude-native-claude-sonnet-4-6", "claude-ccr-blocked"} {
+		if containsString(ids, hidden) {
+			t.Fatalf("discovery ids = %#v, should hide %q", ids, hidden)
+		}
 	}
 }
 
@@ -714,6 +889,7 @@ func TestGatewayAnthropicPassThroughPreservesToolsAndHeaders(t *testing.T) {
 	var gotSession string
 	var gotLocalAuth string
 	var gotAPIKey string
+	var gotCCRToken string
 	var gotBody string
 	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/messages" || r.URL.RawQuery != "beta=true" {
@@ -723,6 +899,7 @@ func TestGatewayAnthropicPassThroughPreservesToolsAndHeaders(t *testing.T) {
 		gotSession = r.Header.Get("x-claude-code-session-id")
 		gotLocalAuth = r.Header.Get("Authorization")
 		gotAPIKey = r.Header.Get("x-api-key")
+		gotCCRToken = r.Header.Get("X-CCR-Session-Token")
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatalf("reading pass-through body: %v", err)
@@ -741,12 +918,13 @@ func TestGatewayAnthropicPassThroughPreservesToolsAndHeaders(t *testing.T) {
 		}
 	}()
 
-	body := `{"model":"claude-opus","tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"future_field":{"kept":true}}`
+	body := `{"model":"gpt","tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"future_field":{"kept":true}}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages?beta=true", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer local-token")
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	req.Header.Set("Authorization", "Bearer anthropic-session")
 	req.Header.Set("anthropic-beta", "tools-2026")
 	req.Header.Set("x-claude-code-session-id", "session-1")
 	resp, err := http.DefaultClient.Do(req)
@@ -760,11 +938,11 @@ func TestGatewayAnthropicPassThroughPreservesToolsAndHeaders(t *testing.T) {
 	if gotAPIKey != "upstream-secret" {
 		t.Fatalf("pass-through did not receive expected API key header")
 	}
-	if gotBeta != "tools-2026" || gotSession != "session-1" || gotLocalAuth != "" {
-		t.Fatalf("pass-through headers beta=%q session=%q auth=%q", gotBeta, gotSession, gotLocalAuth)
+	if gotBeta != "tools-2026" || gotSession != "session-1" || gotLocalAuth != "" || gotCCRToken != "" {
+		t.Fatalf("pass-through headers beta=%q session=%q auth=%q ccr=%q", gotBeta, gotSession, gotLocalAuth, gotCCRToken)
 	}
-	if gotBody != body {
-		t.Fatalf("pass-through body = %s, want %s", gotBody, body)
+	if !strings.Contains(gotBody, `"model":"claude-opus"`) || !strings.Contains(gotBody, `"future_field"`) {
+		t.Fatalf("pass-through body = %s, want provider model rewrite with future field", gotBody)
 	}
 }
 

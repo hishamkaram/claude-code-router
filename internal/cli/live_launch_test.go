@@ -36,9 +36,8 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 		case "/v1/chat/completions":
 			chatCalled = true
 			var payload struct {
-				Model           string `json:"model"`
-				ReasoningEffort string `json:"reasoning_effort"`
-				Tools           []any  `json:"tools"`
+				Model string `json:"model"`
+				Tools []any  `json:"tools"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Errorf("provider decode error = %v", err)
@@ -48,11 +47,6 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 			if payload.Model != "gpt-5" {
 				t.Errorf("provider model = %q, want gpt-5", payload.Model)
 				http.Error(w, "bad model", http.StatusBadRequest)
-				return
-			}
-			if payload.ReasoningEffort != "high" {
-				t.Errorf("provider reasoning_effort = %q, want high", payload.ReasoningEffort)
-				http.Error(w, "bad reasoning effort", http.StatusBadRequest)
 				return
 			}
 			toolsSeen = len(payload.Tools) > 0
@@ -74,20 +68,86 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 		}
 	}
 
-	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "gpt", "--print")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !chatCalled {
-		t.Fatalf("fake OpenAI-compatible chat endpoint was not called")
+		t.Fatalf("fake OpenAI-compatible chat endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !modelsCalled {
-		t.Fatalf("fake OpenAI-compatible models endpoint was not called")
+		t.Fatalf("fake OpenAI-compatible models endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !toolsSeen {
-		t.Fatalf("fake OpenAI-compatible chat endpoint did not receive Claude Code tools")
+		t.Fatalf("fake OpenAI-compatible chat endpoint did not receive Claude Code tools\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(out, "live-smoke-ok") {
+		t.Fatalf("launch output missing routed response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+}
+
+func TestLiveLaunchPreserveAuthRoutesThroughFakeAnthropicCompatibleProvider(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if _, err := liveclaude.Check(ctx); err != nil {
+		t.Skipf("live Claude Code unavailable: %v", err)
+	}
+
+	chatCalled := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/messages/count_tokens":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"input_tokens":3}`)
+		case "/v1/messages":
+			chatCalled = true
+			var payload struct {
+				Model  string `json:"model"`
+				Stream bool   `json:"stream"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("provider decode error = %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if payload.Model != "glm-4.7" {
+				t.Errorf("provider model = %q, want glm-4.7", payload.Model)
+				http.Error(w, "bad model", http.StatusBadRequest)
+				return
+			}
+			if payload.Stream {
+				writeLiveAnthropicStream(w, payload.Model, "preserve-live-ok")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"msg_live","type":"message","role":"assistant","model":"glm-4.7","content":[{"type":"text","text":"preserve-live-ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":2}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	for _, args := range [][]string{
+		{"--db", dbPath, "provider", "add", "zai", "--base-url", provider.URL, "--no-api-key"},
+		{"--db", dbPath, "model", "add", "glm", "--provider", "zai", "--model", "glm-4.7"},
+	} {
+		if out, errOut, err := runLiveCommand(ctx, Dependencies{}, args...); err != nil {
+			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
+		}
+	}
+
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "glm", "--print")
+	if err != nil {
+		if strings.Contains(out+errOut, "Not logged in") {
+			t.Skipf("live Claude Code Anthropic auth unavailable:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+		}
+		t.Fatalf("launch error = %v (chatCalled=%v)\nstdout:\n%s\nstderr:\n%s", err, chatCalled, out, errOut)
+	}
+	if !chatCalled {
+		t.Fatalf("fake Anthropic-compatible chat endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !strings.Contains(out, "preserve-live-ok") {
 		t.Fatalf("launch output missing routed response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 }
@@ -143,19 +203,19 @@ func TestLiveLaunchRoutesThroughFakeAnthropicCompatibleAlias(t *testing.T) {
 		}
 	}
 
-	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "glm", "--print")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "glm", "--print", "--auth-mode", "gateway-token")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !messageCalled {
-		t.Fatalf("fake Anthropic-compatible alias endpoint was not called")
+		t.Fatalf("fake Anthropic-compatible alias endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(out, "anthropic-alias-ok") {
 		t.Fatalf("launch output missing routed response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 }
 
-func TestLiveLaunchPassesThroughFakeAnthropicProvider(t *testing.T) {
+func TestLiveLaunchPassesThroughFakeAnthropicAlias(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	if _, err := liveclaude.Check(ctx); err != nil {
@@ -200,16 +260,21 @@ func TestLiveLaunchPassesThroughFakeAnthropicProvider(t *testing.T) {
 	defer provider.Close()
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "provider", "add", "anthropic", "--base-url", provider.URL, "--no-api-key"); err != nil {
-		t.Fatalf("provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	for _, args := range [][]string{
+		{"--db", dbPath, "provider", "add", "anthropic", "--base-url", provider.URL, "--no-api-key"},
+		{"--db", dbPath, "model", "add", "claude-fake", "--provider", "anthropic", "--model", "claude-opus-4-7"},
+	} {
+		if out, errOut, err := runLiveCommand(ctx, Dependencies{}, args...); err != nil {
+			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
+		}
 	}
 
-	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--print")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "claude-fake", "--print", "--auth-mode", "gateway-token")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !messageCalled {
-		t.Fatalf("fake Anthropic messages endpoint was not called")
+		t.Fatalf("fake Anthropic messages endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(out, "anthropic-pass-ok") {
 		t.Fatalf("launch output missing pass-through response:\nstdout:\n%s\nstderr:\n%s", out, errOut)

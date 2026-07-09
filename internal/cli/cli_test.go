@@ -822,6 +822,16 @@ func (f *fakeLauncher) hasEnv(value string) bool {
 	return false
 }
 
+func (f *fakeLauncher) envValue(name string) (string, bool) {
+	prefix := name + "="
+	for _, item := range f.env {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix), true
+		}
+	}
+	return "", false
+}
+
 func (f *fakeLauncher) hasArg(value string) bool {
 	for _, item := range f.args {
 		if item == value {
@@ -829,6 +839,15 @@ func (f *fakeLauncher) hasArg(value string) bool {
 		}
 	}
 	return false
+}
+
+func (f *fakeLauncher) settingsArgValue() (string, bool) {
+	for index, item := range f.args {
+		if item == "--settings" && index+1 < len(f.args) {
+			return f.args[index+1], true
+		}
+	}
+	return "", false
 }
 
 type fakeProcess struct {

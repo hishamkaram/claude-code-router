@@ -14,20 +14,15 @@ import (
 )
 
 func validateThinking(raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
+	thinkingType, err := openAIThinkingType(raw)
+	if err != nil {
+		return err
 	}
-	var payload struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return fmt.Errorf("unsupported thinking field: %w", err)
-	}
-	switch payload.Type {
-	case "", "adaptive", "disabled":
+	switch thinkingType {
+	case "", "adaptive", "disabled", "enabled":
 		return nil
 	default:
-		return fmt.Errorf("thinking mode %q is not supported by the OpenAI-compatible gateway path", payload.Type)
+		return fmt.Errorf("thinking mode %q is not supported by the OpenAI-compatible gateway path", thinkingType)
 	}
 }
 
@@ -449,6 +444,12 @@ func openAIOptionsFromAnthropic(req anthropicRequest) (openAIRequestOptions, err
 	if err != nil {
 		return openAIRequestOptions{}, err
 	}
+	if reasoningEffort == "" {
+		reasoningEffort, err = openAIReasoningEffortFromThinking(req.Thinking)
+		if err != nil {
+			return openAIRequestOptions{}, err
+		}
+	}
 	return openAIRequestOptions{user: user, reasoningEffort: reasoningEffort}, nil
 }
 
@@ -488,6 +489,30 @@ func openAIReasoningEffortFromOutputConfig(raw json.RawMessage) (string, error) 
 		}
 	}
 	return openAIReasoningEffortFromClaudeEffort(effort)
+}
+
+func openAIReasoningEffortFromThinking(raw json.RawMessage) (string, error) {
+	thinkingType, err := openAIThinkingType(raw)
+	if err != nil {
+		return "", err
+	}
+	if thinkingType == "enabled" {
+		return "high", nil
+	}
+	return "", nil
+}
+
+func openAIThinkingType(raw json.RawMessage) (string, error) {
+	if !rawJSONPresent(raw) {
+		return "", nil
+	}
+	var payload struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", fmt.Errorf("unsupported thinking field: %w", err)
+	}
+	return strings.TrimSpace(payload.Type), nil
 }
 
 func openAIReasoningEffortFromClaudeEffort(effort string) (string, error) {
