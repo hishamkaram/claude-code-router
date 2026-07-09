@@ -21,19 +21,21 @@ import (
 
 func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	var modelAlias string
+	var printMode bool
 	cmd := &cobra.Command{
 		Use:   "launch",
 		Short: "Launch Claude Code through the local router",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLaunch(ctx, cmd, opts, deps, modelAlias)
+			return runLaunch(ctx, cmd, opts, deps, modelAlias, printMode)
 		},
 	}
 	cmd.Flags().StringVar(&modelAlias, "model", "", "Optional model alias to validate before launch")
+	cmd.Flags().BoolVarP(&printMode, "print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
 	return cmd
 }
 
-func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, modelAlias string) error {
+func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, modelAlias string, printMode bool) error {
 	if modelAlias != "" {
 		if validateErr := validateName("model alias", modelAlias); validateErr != nil {
 			return validateErr
@@ -50,29 +52,28 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	if err != nil {
 		return err
 	}
+	disableTools, err := launchShouldDisableTools(ctx, s, resolvedModelAlias)
+	if err != nil {
+		return err
+	}
 
 	token, err := gateway.NewToken()
 	if err != nil {
 		return err
 	}
 	server, err := gateway.Start(ctx, gateway.Config{
-		Store:            s,
-		Secrets:          deps.Secrets,
-		Token:            token,
-		ForcedModelAlias: resolvedModelAlias,
+		Store:             s,
+		Secrets:           deps.Secrets,
+		Token:             token,
+		DefaultModelAlias: resolvedModelAlias,
 	})
 	if err != nil {
 		return err
 	}
 	defer shutdownGateway(ctx, server)
 
-	claudeArgs := []string{"--tools", ""}
-	env := []string{
-		"ANTHROPIC_BASE_URL=" + server.URL(),
-		"ANTHROPIC_AUTH_TOKEN=" + token,
-		"CLAUDE_CODE_USE_GATEWAY=1",
-		"CLAUDE_CODE_SIMPLE=1",
-	}
+	claudeArgs := launchClaudeArgs(resolvedModelAlias, printMode, disableTools)
+	env := launchClaudeEnv(server.URL(), token, resolvedModelAlias, disableTools)
 	outputLock := &sync.Mutex{}
 	out := launchProcessWriter(cmd.OutOrStdout(), outputLock)
 	errOut := launchProcessWriter(cmd.ErrOrStderr(), outputLock)
@@ -91,11 +92,76 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 		}
 		return fmt.Errorf("recording launch session: %w", err)
 	}
-	fmt.Fprintf(out, "Claude Code launched through %s (session=%d pid=%d)\n", server.URL(), sessionID, process.PID())
-	fmt.Fprintf(out, "Default route for Claude Code model names is model alias %q; configured request aliases are honored.\n", resolvedModelAlias)
-	fmt.Fprintln(out, "Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN for this process.")
-	fmt.Fprintln(out, "Gateway launch uses Claude Code simple mode with tools disabled for this OpenAI-compatible text route.")
+	summaryOut := out
+	if printMode {
+		summaryOut = errOut
+	}
+	writeLaunchSummary(ctx, summaryOut, s, server.URL(), sessionID, process.PID(), resolvedModelAlias, disableTools)
 	return process.Wait()
+}
+
+func launchClaudeArgs(modelAlias string, printMode, disableTools bool) []string {
+	args := []string{}
+	if printMode {
+		args = append(args, "--print")
+	}
+	if disableTools {
+		args = append(args, "--tools", "")
+	}
+	if modelAlias != "" {
+		args = append(args, "--model", modelAlias)
+	}
+	return args
+}
+
+func launchClaudeEnv(gatewayURL, token, modelAlias string, disableTools bool) []string {
+	env := make([]string, 0, 8)
+	env = append(env,
+		"ANTHROPIC_BASE_URL="+gatewayURL,
+		"ANTHROPIC_AUTH_TOKEN="+token,
+		"CLAUDE_CODE_USE_GATEWAY=1",
+		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+	)
+	if disableTools {
+		env = append(env, "CLAUDE_CODE_SIMPLE=1")
+	}
+	if modelAlias == "" {
+		return env
+	}
+	return append(env,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION="+modelAlias,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=CCR "+modelAlias,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Model alias registered in ccr",
+	)
+}
+
+func launchShouldDisableTools(ctx context.Context, s *store.Store, modelAlias string) (bool, error) {
+	if modelAlias == "" {
+		return false, nil
+	}
+	model, err := s.GetModel(ctx, modelAlias)
+	if err != nil {
+		return false, fmt.Errorf("checking model alias %q launch compatibility: %w", modelAlias, err)
+	}
+	return model.Status == "chat-only", nil
+}
+
+func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool) {
+	fmt.Fprintf(out, "Claude Code launched through %s (session=%d pid=%d)\n", gatewayURL, sessionID, pid)
+	if modelAlias != "" {
+		fmt.Fprintf(out, "Selected ccr model alias %q is exposed to Claude Code and used as the startup model.\n", modelAlias)
+		fmt.Fprintf(out, "Unmatched Claude model requests in this launch are routed through selected ccr alias %q.\n", modelAlias)
+		if disableTools {
+			fmt.Fprintln(out, "Selected model alias is chat-only; Claude Code tools are disabled for this launch.")
+		}
+		if hasAnthropic, err := hasAnthropicProvider(ctx, s); err == nil && !hasAnthropic {
+			fmt.Fprintln(out, "No Anthropic pass-through provider is configured; built-in Claude model pass-through is unavailable in this launch.")
+		}
+	} else {
+		fmt.Fprintln(out, "No ccr startup model selected; Claude Code will use its configured default model.")
+	}
+	fmt.Fprintln(out, "Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN for this process.")
+	fmt.Fprintln(out, "Gateway model discovery is enabled; registered aliases are exposed through /v1/models.")
 }
 
 func launchProcessWriter(writer io.Writer, lock *sync.Mutex) io.Writer {
@@ -118,7 +184,7 @@ func (w synchronizedWriter) Write(p []byte) (int, error) {
 
 func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.Store, requested string) (string, error) {
 	if requested != "" {
-		if _, _, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, requested, true); validateErr != nil {
+		if _, _, _, validateErr := validateModelAliasTargetWithStore(ctx, deps, s, requested, true); validateErr != nil {
 			return "", validateErr
 		}
 		return requested, nil
@@ -129,15 +195,74 @@ func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.St
 	}
 	switch len(aliases) {
 	case 0:
-		return "", fmt.Errorf("ccr launch requires one routable OpenAI-compatible model alias; add one with ccr model add or pass --model <alias>")
+		if err := validateLaunchAnthropicProvider(ctx, deps, s); err == nil {
+			return "", nil
+		} else if !errors.Is(err, errNoAnthropicProvider) {
+			return "", err
+		}
+		return "", fmt.Errorf("ccr launch requires a configured Anthropic provider for Claude pass-through or one routable OpenAI-compatible model alias; add one with ccr provider add/model add or pass --model <alias>")
 	case 1:
 		if _, _, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, aliases[0], true); validateErr != nil {
 			return "", validateErr
 		}
 		return aliases[0], nil
 	default:
-		return "", fmt.Errorf("ccr launch requires --model when multiple routable model aliases exist: %s", strings.Join(aliases, ", "))
+		if err := validateLaunchAnthropicProvider(ctx, deps, s); err == nil {
+			return "", nil
+		} else if !errors.Is(err, errNoAnthropicProvider) {
+			return "", err
+		}
+		return "", fmt.Errorf("ccr launch requires --model when multiple routable model aliases exist and no Anthropic pass-through provider is configured: %s", strings.Join(aliases, ", "))
 	}
+}
+
+var errNoAnthropicProvider = errors.New("no Anthropic provider configured")
+
+func validateLaunchAnthropicProvider(ctx context.Context, deps Dependencies, s *store.Store) error {
+	provider, err := launchAnthropicProvider(ctx, s)
+	if err != nil {
+		return err
+	}
+	if _, err := validateProviderConfigAndSecret(ctx, deps, provider); err != nil {
+		return fmt.Errorf("validating Anthropic pass-through provider %q: %w", provider.Name, err)
+	}
+	return nil
+}
+
+func launchAnthropicProvider(ctx context.Context, s *store.Store) (store.Provider, error) {
+	providerList, err := s.ListProviders(ctx)
+	if err != nil {
+		return store.Provider{}, err
+	}
+	var first store.Provider
+	for _, provider := range providerList {
+		if provider.Type != "anthropic" {
+			continue
+		}
+		if provider.Name == "anthropic" {
+			return provider, nil
+		}
+		if first.Name == "" {
+			first = provider
+		}
+	}
+	if first.Name != "" {
+		return first, nil
+	}
+	return store.Provider{}, errNoAnthropicProvider
+}
+
+func hasAnthropicProvider(ctx context.Context, s *store.Store) (bool, error) {
+	providerList, err := s.ListProviders(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, provider := range providerList {
+		if provider.Type == "anthropic" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func routableModelAliases(ctx context.Context, s *store.Store) ([]string, error) {
