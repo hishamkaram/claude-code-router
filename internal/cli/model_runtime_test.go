@@ -163,7 +163,7 @@ func TestConformanceRunRecordsLocalUnverifiedStatus(t *testing.T) {
 	}
 }
 
-func TestConformanceRunRejectsGatewayUnsupportedProvider(t *testing.T) {
+func TestConformanceRunAcceptsAnthropicCompatibleProvider(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
@@ -174,16 +174,18 @@ func TestConformanceRunRejectsGatewayUnsupportedProvider(t *testing.T) {
 		t.Fatalf("model add error = %v", err)
 	}
 
-	_, _, err := runCommand(t, "--db", dbPath, "conformance", "run", "claude")
-	if err == nil {
-		t.Fatalf("conformance run unexpectedly succeeded")
-	}
-	if !strings.Contains(err.Error(), "not supported by the OpenAI-compatible gateway path") {
+	out, _, err := runCommand(t, "--db", dbPath, "conformance", "run", "claude")
+	if err != nil {
 		t.Fatalf("conformance run error = %v", err)
+	}
+	for _, want := range []string{"local-verified", "protocol=anthropic-compatible", "Live runtime status: unverified"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("conformance output missing %q:\n%s", want, out)
+		}
 	}
 }
 
-func TestConformanceRunRejectsGatewayUnsupportedProviderBeforeSecretLookup(t *testing.T) {
+func TestConformanceRunValidatesAnthropicCompatibleSecret(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
@@ -201,11 +203,11 @@ func TestConformanceRunRejectsGatewayUnsupportedProviderBeforeSecretLookup(t *te
 	if err == nil {
 		t.Fatalf("conformance run unexpectedly succeeded")
 	}
-	if !strings.Contains(err.Error(), "not supported by the OpenAI-compatible gateway path") {
+	if !strings.Contains(err.Error(), "resolving API key") {
 		t.Fatalf("conformance run error = %v", err)
 	}
-	if fake.resolveCount != 0 {
-		t.Fatalf("secret Resolve called %d times, want 0", fake.resolveCount)
+	if fake.resolveCount != 1 {
+		t.Fatalf("secret Resolve called %d times, want 1", fake.resolveCount)
 	}
 }
 
@@ -252,6 +254,87 @@ func TestLaunchRejectsInvalidAnthropicPassThroughBeforeStartingClaude(t *testing
 		t.Fatalf("launch unexpectedly succeeded")
 	}
 	if !strings.Contains(err.Error(), "validating Anthropic pass-through provider") {
+		t.Fatalf("launch error = %v", err)
+	}
+	if launcher.starts != 0 {
+		t.Fatalf("launcher starts = %d, want 0", launcher.starts)
+	}
+}
+
+func TestLaunchChatOnlyAnthropicPassThroughDisablesClaudeTools(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--mode", "chat-only", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	out, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+	}, "--db", dbPath, "launch")
+	if err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	if !launcher.hasArg("--tools") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") {
+		t.Fatalf("chat-only pass-through launch args=%#v env=%#v", launcher.args, launcher.env)
+	}
+	if !strings.Contains(out, `Anthropic pass-through provider "anthropic" protocol=anthropic-compatible mode=chat-only`) ||
+		!strings.Contains(out, "Anthropic pass-through route does not support tools") {
+		t.Fatalf("launch output missing pass-through degradation:\n%s", out)
+	}
+}
+
+func TestLaunchRequiresAliasForZAIWithoutAnthropicPassThrough(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "zai", "--api-key-env", "ZAI_API_KEY"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+	}, "--db", dbPath, "launch")
+	if err == nil {
+		t.Fatalf("launch unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), "requires a configured Anthropic provider for Claude pass-through or one routable model alias") {
+		t.Fatalf("launch error = %v", err)
+	}
+	if launcher.starts != 0 {
+		t.Fatalf("launcher starts = %d, want 0", launcher.starts)
+	}
+}
+
+func TestLaunchExplicitModelRejectsUnsupportedProtocolBeforeStartingClaude(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", "http://localhost:4000", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "native", "--provider", "litellm", "--model", "native-model"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer db.Close()
+	if _, execErr := db.Exec(`UPDATE providers SET protocol = 'native-unknown' WHERE name = 'litellm'`); execErr != nil {
+		t.Fatalf("update provider protocol error = %v", execErr)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err = runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+	}, "--db", dbPath, "launch", "--model", "native")
+	if err == nil {
+		t.Fatalf("launch unexpectedly succeeded")
+	}
+	if !strings.Contains(err.Error(), `protocol "native-unknown"`) || !strings.Contains(err.Error(), "not supported by the gateway path") {
 		t.Fatalf("launch error = %v", err)
 	}
 	if launcher.starts != 0 {
@@ -424,8 +507,35 @@ func TestLaunchChatOnlyAliasDisablesClaudeTools(t *testing.T) {
 	if !launcher.hasArg("--tools") || !launcher.hasArg("") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") {
 		t.Fatalf("chat-only launch args=%#v env=%#v", launcher.args, launcher.env)
 	}
-	if !strings.Contains(out, "Selected model alias is chat-only; Claude Code tools are disabled for this launch.") {
+	if !strings.Contains(out, "Selected route does not support tools; Claude Code tools are disabled for this launch.") {
 		t.Fatalf("launch output missing chat-only degradation: %q", out)
+	}
+}
+
+func TestLaunchChatOnlyProviderDisablesClaudeTools(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--mode", "chat-only", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	out, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+	}, "--db", dbPath, "launch", "--model", "gpt")
+	if err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	if !launcher.hasArg("--tools") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") {
+		t.Fatalf("chat-only provider launch args=%#v env=%#v", launcher.args, launcher.env)
+	}
+	if !strings.Contains(out, "Provider protocol=openai-compatible mode=chat-only") || !strings.Contains(out, "tools are disabled") {
+		t.Fatalf("launch output missing provider degradation:\n%s", out)
 	}
 }
 

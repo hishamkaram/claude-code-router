@@ -74,6 +74,38 @@ func TestChatCompletionsEndpointNormalizesBaseURL(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsEndpointKeepsVersionedBaseURL(t *testing.T) {
+	t.Parallel()
+
+	got, err := ChatCompletionsEndpoint("https://api.z.ai/api/coding/paas/v4")
+	if err != nil {
+		t.Fatalf("ChatCompletionsEndpoint() error = %v", err)
+	}
+	if got != "https://api.z.ai/api/coding/paas/v4/chat/completions" {
+		t.Fatalf("ChatCompletionsEndpoint() = %q", got)
+	}
+}
+
+func TestRegistryProfilesIncludeZAIProtocols(t *testing.T) {
+	t.Parallel()
+
+	registry := Registry{}
+	zai, ok := registry.Profile("zai")
+	if !ok {
+		t.Fatalf("zai profile missing")
+	}
+	if zai.Protocol != ProtocolAnthropicCompatible || zai.DefaultBaseURL != "https://api.z.ai/api/anthropic" || !zai.Capabilities.SupportsTools || zai.Capabilities.SupportsModelDiscovery {
+		t.Fatalf("zai profile = %#v", zai)
+	}
+	zaiOpenAI, ok := registry.Profile("zai-openai")
+	if !ok {
+		t.Fatalf("zai-openai profile missing")
+	}
+	if zaiOpenAI.Protocol != ProtocolOpenAICompatible || zaiOpenAI.DefaultBaseURL != "https://api.z.ai/api/coding/paas/v4" || !zaiOpenAI.Capabilities.SupportsModelDiscovery {
+		t.Fatalf("zai-openai profile = %#v", zaiOpenAI)
+	}
+}
+
 func TestDiscoverOpenAICompatibleModelsIncludesBearerAuth(t *testing.T) {
 	t.Parallel()
 

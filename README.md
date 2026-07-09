@@ -15,31 +15,35 @@ Local CLI foundation:
   agents, and conformance records.
 - API keys stored as environment references or OS keychain references, never raw
   SQLite values.
+- Protocol-based provider profiles for Anthropic-compatible and
+  OpenAI-compatible providers, including separate Z.AI Anthropic and Z.AI
+  OpenAI presets.
 - OpenAI-compatible model discovery through `/v1/models` for LiteLLM,
-  OpenRouter, and local providers.
+  OpenRouter, Z.AI OpenAI, and local providers when the provider declares model
+  discovery support.
 - Loopback-only local gateway launch that injects `ANTHROPIC_BASE_URL`,
   `ANTHROPIC_AUTH_TOKEN`, and Claude gateway/simple-mode environment.
-- OpenAI-compatible text request routing for LiteLLM, OpenRouter, and local
-  providers, including Claude Code streaming response bridging for text-only
-  sessions. `ccr launch --model <alias>` sets the default route for Claude
-  Code's built-in model names; configured aliases requested by Claude Code are
-  honored. When omitted, launch auto-selects only if one routable alias exists.
-- Tool use and Anthropic-native routing are not silently translated. Tool
-  requests and unsupported request fields return explicit errors instead of
-  falling back silently. Claude Code launch disables tools for the current
-  OpenAI-compatible text route.
+- Anthropic-compatible pass-through routing and OpenAI-compatible translation.
+  `ccr launch --model <alias>` sets the default route for Claude Code's
+  built-in model names; configured aliases requested by Claude Code are honored.
+  When omitted, launch auto-selects only if one routable alias exists.
+- Tool use, streaming, thinking, model discovery, and token counting are gated
+  by visible provider capability metadata. Unsupported requests return explicit
+  errors instead of falling back silently. Claude Code launch disables tools
+  when the selected model or provider is chat-only.
 - Live Claude Code availability tests plus a tagged end-to-end smoke using the
   installed Claude binary and a fake OpenAI-compatible provider. Remote live
   provider E2E remains unverified until run against real credentials.
 
-Anthropic-native live routing remains deferred until it is separately
-researched and verified.
+Remote provider live E2E remains unverified until run against real credentials.
 
 ## CLI Examples
 
 ```bash
 ccr init
 ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
+ccr provider add zai --api-key-env ZAI_API_KEY
+ccr provider add glm --protocol anthropic-compatible --base-url https://example.invalid --api-key-env GLM_API_KEY
 ccr provider add litellm --base-url http://localhost:4000 --no-api-key
 ccr provider test litellm
 ccr provider update litellm --base-url http://localhost:5000

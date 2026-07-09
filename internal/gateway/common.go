@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 func (h *handler) httpClient() *http.Client {
@@ -33,4 +35,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func effectiveProviderCapabilities(provider store.Provider) providers.Capabilities {
+	return providers.NormalizeCapabilities(provider.Type, providers.Capabilities{
+		Protocol:               provider.Protocol,
+		SupportsTools:          provider.SupportsTools,
+		SupportsStreaming:      provider.SupportsStreaming,
+		SupportsThinking:       provider.SupportsThinking,
+		SupportsModelDiscovery: provider.SupportsModelDiscovery,
+		SupportsCountTokens:    provider.SupportsCountTokens,
+		Mode:                   provider.Mode,
+	})
 }

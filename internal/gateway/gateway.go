@@ -167,8 +167,8 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return
 	}
-	if route.model.Status == "chat-only" && anthropicRequestUsesTools(req) {
-		writeAnthropicError(w, http.StatusNotImplemented, fmt.Sprintf("model alias %q is chat-only and cannot be used with tools", route.model.Alias))
+	if capabilityErr := validateRouteMessageCapabilities(route, req); capabilityErr != nil {
+		writeAnthropicError(w, capabilityErr.status, capabilityErr.message)
 		return
 	}
 	if route.kind == routeAnthropic {
@@ -224,6 +224,10 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	route, validationErr := h.selectRoute(r.Context(), req.Model, r.Header)
 	if validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
+		return
+	}
+	if !route.capabilities.SupportsCountTokens {
+		writeAnthropicError(w, http.StatusNotImplemented, fmt.Sprintf("token counting is not supported for model %q with provider protocol %q", req.Model, route.capabilities.Protocol))
 		return
 	}
 	if route.kind != routeAnthropic {
@@ -300,7 +304,27 @@ type messageRoute struct {
 	model             store.Model
 	provider          store.Provider
 	anthropicProvider *store.Provider
+	capabilities      providers.Capabilities
 	responseModel     string
+}
+
+func validateRouteMessageCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {
+	if req.Stream && !route.capabilities.SupportsStreaming {
+		return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("streaming is not supported for model %q with provider protocol %q", req.Model, route.capabilities.Protocol)}
+	}
+	if rawJSONPresent(req.Thinking) && !route.capabilities.SupportsThinking {
+		return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("thinking is not supported for model %q with provider protocol %q", req.Model, route.capabilities.Protocol)}
+	}
+	if !anthropicRequestUsesTools(req) {
+		return nil
+	}
+	if route.model.Status == "chat-only" {
+		return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("model alias %q is chat-only and cannot be used with tools", route.model.Alias)}
+	}
+	if route.capabilities.Mode == providers.ModeChatOnly || !route.capabilities.SupportsTools {
+		return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider protocol %q for model %q does not support tools", route.capabilities.Protocol, req.Model)}
+	}
+	return nil
 }
 
 func (h *handler) selectRoute(ctx context.Context, requested string, incoming http.Header) (messageRoute, *requestValidationError) {
@@ -329,7 +353,7 @@ func (h *handler) selectRoute(ctx context.Context, requested string, incoming ht
 	if err != nil {
 		return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("model %q is not a configured ccr alias and no Anthropic pass-through provider is configured", requested)}
 	}
-	return messageRoute{kind: routeAnthropic, anthropicProvider: &anthropicProvider, responseModel: requested}, nil
+	return messageRoute{kind: routeAnthropic, anthropicProvider: &anthropicProvider, capabilities: effectiveProviderCapabilities(anthropicProvider), responseModel: requested}, nil
 }
 
 type configuredAliasLookup struct {
@@ -369,14 +393,15 @@ func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel
 	if providerErr != nil {
 		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("provider %q for model alias %q is not configured", model.ProviderName, alias)}
 	}
-	if providers.SupportsOpenAICompatibleRouting(provider.Type) {
-		return messageRoute{kind: routeOpenAI, model: model, provider: provider, responseModel: responseModel}, nil
+	caps := effectiveProviderCapabilities(provider)
+	if caps.Protocol == providers.ProtocolOpenAICompatible {
+		return messageRoute{kind: routeOpenAI, model: model, provider: provider, capabilities: caps, responseModel: responseModel}, nil
 	}
-	if provider.Type == "anthropic" {
+	if caps.Protocol == providers.ProtocolAnthropicCompatible {
 		rewrittenProvider := provider
-		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, responseModel: responseModel}, nil
+		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, capabilities: caps, responseModel: responseModel}, nil
 	}
-	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q is not supported by the gateway path", provider.Type)}
+	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q with protocol %q is not supported by the gateway path", provider.Type, caps.Protocol)}
 }
 
 func (h *handler) defaultAliasRoute(ctx context.Context) (messageRoute, error) {
@@ -395,14 +420,15 @@ func (h *handler) defaultAliasRoute(ctx context.Context) (messageRoute, error) {
 	if err != nil {
 		return messageRoute{}, err
 	}
-	if providers.SupportsOpenAICompatibleRouting(provider.Type) {
-		return messageRoute{kind: routeOpenAI, model: model, provider: provider, responseModel: alias}, nil
+	caps := effectiveProviderCapabilities(provider)
+	if caps.Protocol == providers.ProtocolOpenAICompatible {
+		return messageRoute{kind: routeOpenAI, model: model, provider: provider, capabilities: caps, responseModel: alias}, nil
 	}
-	if provider.Type == "anthropic" {
+	if caps.Protocol == providers.ProtocolAnthropicCompatible {
 		rewrittenProvider := provider
-		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, responseModel: alias}, nil
+		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, capabilities: caps, responseModel: alias}, nil
 	}
-	return messageRoute{}, fmt.Errorf("default model alias %q uses provider type %q", alias, provider.Type)
+	return messageRoute{}, fmt.Errorf("default model alias %q uses provider type %q with protocol %q", alias, provider.Type, caps.Protocol)
 }
 
 func aliasFromDiscoveryID(id string) (string, bool) {
@@ -431,6 +457,8 @@ func nativeAnthropicModelFromDiscoveryID(id string) (string, bool) {
 
 var errNoAnthropicPassThroughProvider = errors.New("no Anthropic provider configured for pass-through")
 
+var errAnthropicModelDiscoveryUnsupported = errors.New("anthropic-compatible provider does not support model discovery")
+
 func (h *handler) routeAdvertisedAnthropicModel(ctx context.Context, requested, nativeModel string, incoming http.Header) (messageRoute, *requestValidationError) {
 	advertised, err := h.anthropicModelAdvertised(ctx, nativeModel, incoming)
 	if err != nil {
@@ -447,6 +475,7 @@ func (h *handler) routeAdvertisedAnthropicModel(ctx context.Context, requested, 
 		kind:              routeAnthropic,
 		model:             store.Model{Alias: requested, ProviderModel: nativeModel},
 		anthropicProvider: &anthropicProvider,
+		capabilities:      effectiveProviderCapabilities(anthropicProvider),
 		responseModel:     requested,
 	}, nil
 }

@@ -15,6 +15,8 @@ import (
 
 func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	var providerType string
+	var protocol string
+	var mode string
 	var baseURL string
 	var apiKeyEnv string
 	var apiKeyStdin bool
@@ -33,6 +35,8 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := providerAddConfig{
 				providerType: providerType,
+				protocol:     protocol,
+				mode:         mode,
 				baseURL:      baseURL,
 				apiKeyEnv:    apiKeyEnv,
 				apiKeyStdin:  apiKeyStdin,
@@ -45,7 +49,9 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 			return runProviderUpdate(ctx, cmd, opts, deps, args[0], cfg)
 		},
 	}
-	cmd.Flags().StringVar(&providerType, "type", "", "Provider type: anthropic, openrouter, litellm, or local")
+	cmd.Flags().StringVar(&providerType, "type", "", "Provider type/preset: "+providers.SupportedProviderTypes())
+	cmd.Flags().StringVar(&protocol, "protocol", "", "Provider protocol: anthropic-compatible or openai-compatible")
+	cmd.Flags().StringVar(&mode, "mode", "", "Provider compatibility mode: full, degraded, or chat-only")
 	cmd.Flags().StringVar(&baseURL, "base-url", "", "Provider base URL")
 	cmd.Flags().StringVar(&apiKeyEnv, "api-key-env", "", "Environment variable containing the API key; stores only env:<name>")
 	cmd.Flags().BoolVar(&apiKeyStdin, "api-key-stdin", false, "Read API key from stdin and store it in the OS keychain")
@@ -88,24 +94,28 @@ func runProviderUpdate(ctx context.Context, cmd *cobra.Command, opts *options, d
 	if err := s.UpdateProvider(ctx, updated); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, %s, secret=%s)\n", name, updated.Type, updated.BaseURL, secret.RedactRef(updated.SecretRef))
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, protocol=%s, mode=%s, %s, secret=%s)\n", name, updated.Type, updated.Protocol, updated.Mode, updated.BaseURL, secret.RedactRef(updated.SecretRef))
 	return nil
 }
 
 type providerUpdateChanges struct {
 	providerType bool
+	protocol     bool
+	mode         bool
 	baseURL      bool
 	auth         bool
 }
 
 func (c providerUpdateChanges) any() bool {
-	return c.providerType || c.baseURL || c.auth
+	return c.providerType || c.protocol || c.mode || c.baseURL || c.auth
 }
 
 func providerUpdateChangesFromCommand(cmd *cobra.Command) providerUpdateChanges {
 	flags := cmd.Flags()
 	return providerUpdateChanges{
 		providerType: flags.Changed("type"),
+		protocol:     flags.Changed("protocol"),
+		mode:         flags.Changed("mode"),
 		baseURL:      flags.Changed("base-url"),
 		auth:         flags.Changed("api-key-env") || flags.Changed("api-key-stdin") || flags.Changed("no-api-key"),
 	}
@@ -113,26 +123,29 @@ func providerUpdateChangesFromCommand(cmd *cobra.Command) providerUpdateChanges 
 
 func buildProviderUpdateFromFlags(deps Dependencies, name string, cfg providerAddConfig, existing store.Provider, changes providerUpdateChanges) (store.Provider, secretPlan, error) {
 	updated := existing
-	var err error
-	if changes.providerType {
-		updated.Type, err = resolveProviderType(name, strings.TrimSpace(cfg.providerType))
+	if changes.providerType || changes.protocol {
+		var err error
+		updated, err = applyProviderTypeProtocolUpdate(name, cfg, updated, changes)
 		if err != nil {
 			return store.Provider{}, secretPlan{}, err
 		}
 	}
-	if changes.baseURL || changes.providerType {
-		baseURL := updated.BaseURL
-		if changes.baseURL {
-			baseURL = cfg.baseURL
-		}
-		updated.BaseURL, err = resolveBaseURL(updated.Type, strings.TrimSpace(baseURL))
+	if changes.baseURL || changes.providerType || changes.protocol {
+		var err error
+		updated, err = applyProviderBaseURLUpdate(cfg, updated, changes)
 		if err != nil {
 			return store.Provider{}, secretPlan{}, err
 		}
+	}
+	if changes.mode {
+		if modeErr := validateProviderMode(cfg.mode); modeErr != nil {
+			return store.Provider{}, secretPlan{}, modeErr
+		}
+		updated = applyProviderModeUpdate(updated, cfg.mode)
 	}
 	if !changes.auth {
-		if changes.providerType && providerTypeRequiresAPIKey(updated.Type) && existing.SecretRef == "" {
-			return store.Provider{}, secretPlan{}, fmt.Errorf("provider type %q requires an API key; pass --api-key-env, --api-key-stdin, or --no-api-key to confirm unauthenticated use", updated.Type)
+		if err := validateProviderUpdateAuthDecision(existing, updated, changes); err != nil {
+			return store.Provider{}, secretPlan{}, err
 		}
 		return updated, secretPlan{}, nil
 	}
@@ -144,9 +157,66 @@ func buildProviderUpdateFromFlags(deps Dependencies, name string, cfg providerAd
 	return updated, plan, nil
 }
 
+func applyProviderTypeProtocolUpdate(name string, cfg providerAddConfig, existing store.Provider, changes providerUpdateChanges) (store.Provider, error) {
+	providerType := strings.TrimSpace(cfg.providerType)
+	if !changes.providerType {
+		providerType = existing.Type
+	}
+	resolvedType, err := resolveProviderTypeWithProtocol(name, providerType, strings.TrimSpace(cfg.protocol))
+	if err != nil {
+		return store.Provider{}, err
+	}
+	capsMode := providerModeForTypeChange(existing.Type, existing.Mode, resolvedType, cfg.mode, changes.mode)
+	return providerWithCapabilities(name, resolvedType, existing.BaseURL, existing.SecretRef, capsMode), nil
+}
+
+func applyProviderBaseURLUpdate(cfg providerAddConfig, provider store.Provider, changes providerUpdateChanges) (store.Provider, error) {
+	baseURL := provider.BaseURL
+	if changes.baseURL {
+		baseURL = cfg.baseURL
+	}
+	resolvedURL, err := resolveBaseURL(provider.Type, strings.TrimSpace(baseURL))
+	if err != nil {
+		return store.Provider{}, err
+	}
+	provider.BaseURL = resolvedURL
+	return provider, nil
+}
+
+func applyProviderModeUpdate(provider store.Provider, mode string) store.Provider {
+	provider.Mode = mode
+	provider.SupportsTools = mode != providers.ModeChatOnly
+	return provider
+}
+
+func validateProviderUpdateAuthDecision(existing, updated store.Provider, changes providerUpdateChanges) error {
+	if !changes.providerType && !changes.protocol {
+		return nil
+	}
+	oldCaps := effectiveProviderCapabilities(existing)
+	newCaps := effectiveProviderCapabilities(updated)
+	if existing.Type == updated.Type && oldCaps.Protocol == newCaps.Protocol {
+		return nil
+	}
+	if !providerTypeRequiresAPIKey(updated.Type) || existing.SecretRef != "" {
+		return nil
+	}
+	return fmt.Errorf("provider type %q requires an API key; pass --api-key-env, --api-key-stdin, or --no-api-key to confirm unauthenticated use", updated.Type)
+}
+
 func validateProviderUpdateStaticFlags(name string, cfg providerAddConfig, changes providerUpdateChanges) error {
 	if changes.providerType {
-		if _, err := resolveProviderType(name, strings.TrimSpace(cfg.providerType)); err != nil {
+		if _, err := resolveProviderTypeWithProtocol(name, strings.TrimSpace(cfg.providerType), strings.TrimSpace(cfg.protocol)); err != nil {
+			return err
+		}
+	}
+	if changes.protocol {
+		if _, err := resolveProviderTypeWithProtocol(name, strings.TrimSpace(cfg.providerType), strings.TrimSpace(cfg.protocol)); err != nil {
+			return err
+		}
+	}
+	if changes.mode {
+		if err := validateProviderMode(cfg.mode); err != nil {
 			return err
 		}
 	}
@@ -206,7 +276,7 @@ func runProviderUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts 
 	if err := s.UpdateProvider(ctx, updated); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, %s, secret=%s)\n", name, updated.Type, updated.BaseURL, secret.RedactRef(updated.SecretRef))
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, protocol=%s, mode=%s, %s, secret=%s)\n", name, updated.Type, updated.Protocol, updated.Mode, updated.BaseURL, secret.RedactRef(updated.SecretRef))
 	return nil
 }
 
@@ -225,8 +295,9 @@ func runProviderTest(ctx context.Context, cmd *cobra.Command, opts *options, dep
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q: type=%s base=%s secret=%s\n", provider.Name, provider.Type, provider.BaseURL, secret.RedactRef(provider.SecretRef))
-	if !providers.SupportsOpenAIModelDiscovery(provider.Type) {
+	caps := effectiveProviderCapabilities(provider)
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q: type=%s protocol=%s mode=%s caps=%s base=%s secret=%s\n", provider.Name, provider.Type, caps.Protocol, caps.Mode, providerCapabilitySummary(provider), provider.BaseURL, secret.RedactRef(provider.SecretRef))
+	if caps.Protocol != providers.ProtocolOpenAICompatible || !caps.SupportsModelDiscovery {
 		fmt.Fprintln(cmd.OutOrStdout(), "Config and secret validation passed. Anthropic live routing is outside this pass.")
 		return nil
 	}

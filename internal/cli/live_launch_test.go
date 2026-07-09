@@ -92,6 +92,69 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 	}
 }
 
+func TestLiveLaunchRoutesThroughFakeAnthropicCompatibleAlias(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if _, err := liveclaude.Check(ctx); err != nil {
+		t.Skipf("live Claude Code unavailable: %v", err)
+	}
+
+	messageCalled := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/messages/count_tokens":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"input_tokens":3}`)
+		case "/v1/messages":
+			messageCalled = true
+			var payload struct {
+				Model  string `json:"model"`
+				Stream bool   `json:"stream"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("provider decode error = %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if payload.Model != "glm-4.7" {
+				t.Errorf("provider model = %q, want glm-4.7", payload.Model)
+				http.Error(w, "bad model", http.StatusBadRequest)
+				return
+			}
+			if payload.Stream {
+				writeLiveAnthropicStream(w, payload.Model, "anthropic-alias-ok")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"id":"msg_live","type":"message","role":"assistant","model":"glm-4.7","content":[{"type":"text","text":"anthropic-alias-ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":2,"output_tokens":2}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	for _, args := range [][]string{
+		{"--db", dbPath, "provider", "add", "zai", "--base-url", provider.URL, "--no-api-key"},
+		{"--db", dbPath, "model", "add", "glm", "--provider", "zai", "--model", "glm-4.7"},
+	} {
+		if out, errOut, err := runLiveCommand(ctx, Dependencies{}, args...); err != nil {
+			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
+		}
+	}
+
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "glm", "--print")
+	if err != nil {
+		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !messageCalled {
+		t.Fatalf("fake Anthropic-compatible alias endpoint was not called")
+	}
+	if !strings.Contains(out, "anthropic-alias-ok") {
+		t.Fatalf("launch output missing routed response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+}
+
 func TestLiveLaunchPassesThroughFakeAnthropicProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()

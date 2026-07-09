@@ -137,13 +137,29 @@ func launchClaudeEnv(gatewayURL, token, modelAlias string, disableTools bool) []
 
 func launchShouldDisableTools(ctx context.Context, s *store.Store, modelAlias string) (bool, error) {
 	if modelAlias == "" {
-		return false, nil
+		provider, err := launchAnthropicProvider(ctx, s)
+		if err != nil {
+			if errors.Is(err, errNoAnthropicProvider) {
+				return false, nil
+			}
+			return false, fmt.Errorf("checking Anthropic pass-through launch compatibility: %w", err)
+		}
+		return providerDisablesClaudeTools(provider), nil
 	}
 	model, err := s.GetModel(ctx, modelAlias)
 	if err != nil {
 		return false, fmt.Errorf("checking model alias %q launch compatibility: %w", modelAlias, err)
 	}
-	return model.Status == "chat-only", nil
+	provider, err := s.GetProvider(ctx, model.ProviderName)
+	if err != nil {
+		return false, fmt.Errorf("checking provider %q launch compatibility: %w", model.ProviderName, err)
+	}
+	return model.Status == "chat-only" || providerDisablesClaudeTools(provider), nil
+}
+
+func providerDisablesClaudeTools(provider store.Provider) bool {
+	caps := effectiveProviderCapabilities(provider)
+	return caps.Mode == providers.ModeChatOnly || !caps.SupportsTools
 }
 
 func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool) {
@@ -151,17 +167,58 @@ func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gate
 	if modelAlias != "" {
 		fmt.Fprintf(out, "Selected ccr model alias %q is exposed to Claude Code and used as the startup model.\n", modelAlias)
 		fmt.Fprintf(out, "Unmatched Claude model requests in this launch are routed through selected ccr alias %q.\n", modelAlias)
+		writeLaunchCompatibilitySummary(ctx, out, s, modelAlias)
 		if disableTools {
-			fmt.Fprintln(out, "Selected model alias is chat-only; Claude Code tools are disabled for this launch.")
+			fmt.Fprintln(out, "Selected route does not support tools; Claude Code tools are disabled for this launch.")
 		}
 		if hasAnthropic, err := hasAnthropicProvider(ctx, s); err == nil && !hasAnthropic {
 			fmt.Fprintln(out, "No Anthropic pass-through provider is configured; built-in Claude model pass-through is unavailable in this launch.")
 		}
 	} else {
 		fmt.Fprintln(out, "No ccr startup model selected; Claude Code will use its configured default model.")
+		writeLaunchAnthropicPassThroughSummary(ctx, out, s)
+		if disableTools {
+			fmt.Fprintln(out, "Anthropic pass-through route does not support tools; Claude Code tools are disabled for this launch.")
+		}
 	}
 	fmt.Fprintln(out, "Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN for this process.")
 	fmt.Fprintln(out, "Gateway model discovery is enabled; registered aliases are exposed through /v1/models.")
+}
+
+func writeLaunchCompatibilitySummary(ctx context.Context, out io.Writer, s *store.Store, modelAlias string) {
+	model, err := s.GetModel(ctx, modelAlias)
+	if err != nil {
+		fmt.Fprintf(out, "Compatibility metadata unavailable for %q: %v\n", modelAlias, err)
+		return
+	}
+	provider, err := s.GetProvider(ctx, model.ProviderName)
+	if err != nil {
+		fmt.Fprintf(out, "Compatibility metadata unavailable for provider %q: %v\n", model.ProviderName, err)
+		return
+	}
+	caps := effectiveProviderCapabilities(provider)
+	fmt.Fprintf(out, "Provider protocol=%s mode=%s capabilities=%s.\n", caps.Protocol, caps.Mode, providerCapabilitySummary(provider))
+	if !caps.SupportsModelDiscovery {
+		fmt.Fprintln(out, "Provider model discovery is unavailable; only configured CCR aliases are exposed.")
+	}
+	if !caps.SupportsCountTokens {
+		fmt.Fprintln(out, "Provider count_tokens support is unavailable; gateway count_tokens requests will be rejected visibly.")
+	}
+}
+
+func writeLaunchAnthropicPassThroughSummary(ctx context.Context, out io.Writer, s *store.Store) {
+	provider, err := launchAnthropicProvider(ctx, s)
+	if err != nil {
+		return
+	}
+	caps := effectiveProviderCapabilities(provider)
+	fmt.Fprintf(out, "Anthropic pass-through provider %q protocol=%s mode=%s capabilities=%s.\n", provider.Name, caps.Protocol, caps.Mode, providerCapabilitySummary(provider))
+	if !caps.SupportsModelDiscovery {
+		fmt.Fprintln(out, "Provider model discovery is unavailable; only configured CCR aliases are exposed.")
+	}
+	if !caps.SupportsCountTokens {
+		fmt.Fprintln(out, "Provider count_tokens support is unavailable; gateway count_tokens requests will be rejected visibly.")
+	}
 }
 
 func launchProcessWriter(writer io.Writer, lock *sync.Mutex) io.Writer {
@@ -184,7 +241,7 @@ func (w synchronizedWriter) Write(p []byte) (int, error) {
 
 func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.Store, requested string) (string, error) {
 	if requested != "" {
-		if _, _, _, validateErr := validateModelAliasTargetWithStore(ctx, deps, s, requested, true); validateErr != nil {
+		if _, _, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, requested, true); validateErr != nil {
 			return "", validateErr
 		}
 		return requested, nil
@@ -200,7 +257,7 @@ func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.St
 		} else if !errors.Is(err, errNoAnthropicProvider) {
 			return "", err
 		}
-		return "", fmt.Errorf("ccr launch requires a configured Anthropic provider for Claude pass-through or one routable OpenAI-compatible model alias; add one with ccr provider add/model add or pass --model <alias>")
+		return "", fmt.Errorf("ccr launch requires a configured Anthropic provider for Claude pass-through or one routable model alias; add one with ccr provider add/model add or pass --model <alias>")
 	case 1:
 		if _, _, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, aliases[0], true); validateErr != nil {
 			return "", validateErr
@@ -235,7 +292,8 @@ func launchAnthropicProvider(ctx context.Context, s *store.Store) (store.Provide
 		return store.Provider{}, err
 	}
 	var first store.Provider
-	for _, provider := range providerList {
+	for i := range providerList {
+		provider := providerList[i]
 		if provider.Type != "anthropic" {
 			continue
 		}
@@ -257,7 +315,8 @@ func hasAnthropicProvider(ctx context.Context, s *store.Store) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, provider := range providerList {
+	for i := range providerList {
+		provider := providerList[i]
 		if provider.Type == "anthropic" {
 			return true, nil
 		}
@@ -279,7 +338,8 @@ func routableModelAliases(ctx context.Context, s *store.Store) ([]string, error)
 		if err != nil {
 			return nil, err
 		}
-		if providers.SupportsOpenAICompatibleRouting(provider.Type) {
+		caps := effectiveProviderCapabilities(provider)
+		if caps.Protocol == providers.ProtocolOpenAICompatible || caps.Protocol == providers.ProtocolAnthropicCompatible {
 			aliases = append(aliases, model.Alias)
 		}
 	}
@@ -395,8 +455,9 @@ func runConformance(ctx context.Context, cmd *cobra.Command, opts *options, deps
 	if err != nil {
 		return err
 	}
-	details := fmt.Sprintf("provider=%s type=%s model=%s compat=%s", provider.Name, provider.Type, model.ProviderModel, model.Status)
-	if providers.SupportsOpenAIModelDiscovery(provider.Type) {
+	caps := effectiveProviderCapabilities(provider)
+	details := fmt.Sprintf("provider=%s type=%s protocol=%s model=%s compat=%s", provider.Name, provider.Type, caps.Protocol, model.ProviderModel, model.Status)
+	if caps.Protocol == providers.ProtocolOpenAICompatible && caps.SupportsModelDiscovery {
 		details = fmt.Sprintf("%s discovered_models=%d", details, discovered)
 	}
 	recordID, err := s.AddConformanceRecord(ctx, store.ConformanceRecord{
@@ -409,6 +470,7 @@ func runConformance(ctx context.Context, cmd *cobra.Command, opts *options, deps
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Conformance record %d for %q: local-verified\n", recordID, alias)
+	fmt.Fprintf(cmd.OutOrStdout(), "Compatibility: %s\n", details)
 	fmt.Fprintln(cmd.OutOrStdout(), "Live runtime status: unverified until live Claude Code E2E passes.")
 	return nil
 }

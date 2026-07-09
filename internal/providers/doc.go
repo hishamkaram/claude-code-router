@@ -1,3 +1,4 @@
-// Package providers will contain provider adapters for Anthropic-compatible
-// endpoints, OpenRouter, LiteLLM, and local model servers.
+// Package providers defines provider protocol profiles, endpoint builders, and
+// model discovery helpers for Anthropic-compatible and OpenAI-compatible
+// providers.
 package providers

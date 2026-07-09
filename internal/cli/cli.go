@@ -11,6 +11,7 @@ import (
 
 	"github.com/hishamkaram/claude-code-router/internal/buildinfo"
 	"github.com/hishamkaram/claude-code-router/internal/config"
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
@@ -35,6 +36,8 @@ type secretPlan struct {
 
 type providerAddConfig struct {
 	providerType string
+	protocol     string
+	mode         string
 	baseURL      string
 	apiKeyEnv    string
 	apiKeyValue  string
@@ -165,6 +168,8 @@ Examples:
 
 func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	var providerType string
+	var protocol string
+	var mode string
 	var baseURL string
 	var apiKeyEnv string
 	var apiKeyStdin bool
@@ -197,6 +202,8 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 				}
 				return runProviderAddInteractive(ctx, cmd, opts, deps, name, providerAddConfig{
 					providerType: providerType,
+					protocol:     protocol,
+					mode:         mode,
 					baseURL:      baseURL,
 					apiKeyEnv:    apiKeyEnv,
 					apiKeyStdin:  apiKeyStdin,
@@ -205,6 +212,8 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 			}
 			return runProviderAdd(ctx, cmd, opts, deps, args[0], providerAddConfig{
 				providerType: providerType,
+				protocol:     protocol,
+				mode:         mode,
 				baseURL:      baseURL,
 				apiKeyEnv:    apiKeyEnv,
 				apiKeyStdin:  apiKeyStdin,
@@ -212,7 +221,9 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 			})
 		},
 	}
-	cmd.Flags().StringVar(&providerType, "type", "", "Provider type: anthropic, openrouter, litellm, or local (defaults to provider name when recognized)")
+	cmd.Flags().StringVar(&providerType, "type", "", "Provider type/preset: "+providers.SupportedProviderTypes()+" (defaults to provider name when recognized)")
+	cmd.Flags().StringVar(&protocol, "protocol", "", "Provider protocol: anthropic-compatible or openai-compatible")
+	cmd.Flags().StringVar(&mode, "mode", "", "Provider compatibility mode: full, degraded, or chat-only (default comes from provider type)")
 	cmd.Flags().StringVar(&baseURL, "base-url", "", "Provider base URL")
 	cmd.Flags().StringVar(&apiKeyEnv, "api-key-env", "", "Environment variable containing the API key; stores only env:<name>")
 	cmd.Flags().BoolVar(&apiKeyStdin, "api-key-stdin", false, "Read API key from stdin and store it in the OS keychain")
@@ -222,9 +233,12 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 }
 
 func runProviderAdd(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, name string, cfg providerAddConfig) error {
-	resolvedType, err := resolveProviderType(name, cfg.providerType)
+	resolvedType, err := resolveProviderTypeWithProtocol(name, cfg.providerType, cfg.protocol)
 	if err != nil {
 		return err
+	}
+	if modeErr := validateProviderMode(cfg.mode); modeErr != nil {
+		return modeErr
 	}
 	resolvedURL, err := resolveBaseURL(resolvedType, cfg.baseURL)
 	if err != nil {
@@ -254,10 +268,11 @@ func runProviderAdd(ctx context.Context, cmd *cobra.Command, opts *options, deps
 			return fmt.Errorf("storing API key for provider %q: %w", name, err)
 		}
 	}
-	if err := s.AddProvider(ctx, store.Provider{Name: name, Type: resolvedType, BaseURL: resolvedURL, SecretRef: plan.ref}); err != nil {
+	provider := providerWithCapabilities(name, resolvedType, resolvedURL, plan.ref, cfg.mode)
+	if err := s.AddProvider(ctx, provider); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, %s, secret=%s)\n", name, resolvedType, resolvedURL, secret.RedactRef(plan.ref))
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, protocol=%s, mode=%s, %s, secret=%s)\n", name, resolvedType, provider.Protocol, provider.Mode, resolvedURL, secret.RedactRef(plan.ref))
 	fmt.Fprintf(cmd.OutOrStdout(), "Next: ccr model add <alias> --provider %s --model <provider-model>\n", name)
 	return nil
 }
@@ -273,16 +288,18 @@ func newProviderListCommand(ctx context.Context, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(s)
-			providers, err := s.ListProviders(ctx)
+			providerList, err := s.ListProviders(ctx)
 			if err != nil {
 				return err
 			}
-			if len(providers) == 0 {
+			if len(providerList) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No providers configured.")
 				return nil
 			}
-			for _, provider := range providers {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\tsecret=%s\n", provider.Name, provider.Type, provider.BaseURL, secret.RedactRef(provider.SecretRef))
+			for i := range providerList {
+				provider := providerList[i]
+				caps := effectiveProviderCapabilities(provider)
+				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\tprotocol=%s\tmode=%s\tcaps=%s\t%s\tsecret=%s\n", provider.Name, provider.Type, caps.Protocol, caps.Mode, providerCapabilitySummary(provider), provider.BaseURL, secret.RedactRef(provider.SecretRef))
 			}
 			return nil
 		},
@@ -462,7 +479,7 @@ func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(s)
-			providers, err := s.ListProviders(ctx)
+			providerList, err := s.ListProviders(ctx)
 			if err != nil {
 				return err
 			}
@@ -470,7 +487,15 @@ func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Database: %s\nProviders: %d\nModels: %d\n", dbPath, len(providers), len(models))
+			fmt.Fprintf(cmd.OutOrStdout(), "Database: %s\nProviders: %d\nModels: %d\n", dbPath, len(providerList), len(models))
+			for i := range providerList {
+				provider := providerList[i]
+				caps := effectiveProviderCapabilities(provider)
+				fmt.Fprintf(cmd.OutOrStdout(), "Provider %s: type=%s protocol=%s mode=%s caps=%s\n", provider.Name, provider.Type, caps.Protocol, caps.Mode, providerCapabilitySummary(provider))
+			}
+			for _, model := range models {
+				fmt.Fprintf(cmd.OutOrStdout(), "Model %s: provider=%s model=%s compat=%s\n", model.Alias, model.ProviderName, model.ProviderModel, model.Status)
+			}
 			return nil
 		},
 	}

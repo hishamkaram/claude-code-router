@@ -143,8 +143,9 @@ func discoverProviderModels(ctx context.Context, deps Dependencies, provider sto
 }
 
 func discoverProviderModelsWithPlan(ctx context.Context, deps Dependencies, provider store.Provider, plan secretPlan) ([]string, error) {
-	if !providers.SupportsOpenAIModelDiscovery(provider.Type) {
-		return nil, fmt.Errorf("provider type %q does not support OpenAI-compatible model discovery", provider.Type)
+	caps := effectiveProviderCapabilities(provider)
+	if caps.Protocol != providers.ProtocolOpenAICompatible || !caps.SupportsModelDiscovery {
+		return nil, fmt.Errorf("provider %q uses protocol %q and does not support OpenAI-compatible model discovery", provider.Name, caps.Protocol)
 	}
 	apiKey, err := resolveDiscoveryAPIKey(ctx, deps, plan)
 	if err != nil {

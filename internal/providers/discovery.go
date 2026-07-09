@@ -92,7 +92,7 @@ func endpointWithPath(baseURL, resource string) (string, error) {
 	}
 
 	path := strings.TrimRight(parsed.Path, "/")
-	if strings.HasSuffix(path, "/v1") {
+	if pathEndsWithVersion(path) {
 		parsed.Path = path + "/" + resource
 	} else {
 		parsed.Path = path + "/v1/" + resource
@@ -102,17 +102,18 @@ func endpointWithPath(baseURL, resource string) (string, error) {
 	return parsed.String(), nil
 }
 
-func SupportsOpenAICompatibleRouting(providerType string) bool {
-	switch providerType {
-	case "litellm", "local", "openrouter":
-		return true
-	default:
+func pathEndsWithVersion(path string) bool {
+	lastSlash := strings.LastIndex(path, "/")
+	last := path[lastSlash+1:]
+	if len(last) < 2 || last[0] != 'v' {
 		return false
 	}
-}
-
-func SupportsOpenAIModelDiscovery(providerType string) bool {
-	return SupportsOpenAICompatibleRouting(providerType)
+	for _, char := range last[1:] {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func discoveryHTTPError(statusCode int) error {

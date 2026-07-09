@@ -10,7 +10,6 @@ import (
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
-	"golang.org/x/term"
 
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
@@ -29,6 +28,8 @@ const (
 type providerSetupPrompt struct {
 	name         string
 	providerType string
+	protocol     string
+	mode         string
 	baseURL      string
 	authMode     string
 	apiKeyEnv    string
@@ -73,9 +74,17 @@ func runProviderAddInteractive(ctx context.Context, cmd *cobra.Command, opts *op
 
 func validateProviderAddInteractiveStaticFlags(initialName string, cfg providerAddConfig) error {
 	if cfg.providerType != "" {
-		if _, err := resolveProviderType(initialName, strings.TrimSpace(cfg.providerType)); err != nil {
+		if _, err := resolveProviderTypeWithProtocol(initialName, strings.TrimSpace(cfg.providerType), strings.TrimSpace(cfg.protocol)); err != nil {
 			return err
 		}
+	}
+	if cfg.protocol != "" {
+		if _, err := resolveProviderTypeWithProtocol(initialName, strings.TrimSpace(cfg.providerType), strings.TrimSpace(cfg.protocol)); err != nil {
+			return err
+		}
+	}
+	if err := validateProviderMode(cfg.mode); err != nil {
+		return err
 	}
 	if strings.TrimSpace(cfg.baseURL) != "" {
 		if err := validateBaseURLSyntax(cfg.baseURL); err != nil {
@@ -93,7 +102,9 @@ func validateProviderAddInteractiveStaticFlags(initialName string, cfg providerA
 func promptInteractiveProviderConfig(ctx context.Context, deps Dependencies, initialName string, cfg providerAddConfig) (store.Provider, secretPlan, error) {
 	setup, err := promptProviderSetup(ctx, deps, providerSetupPrompt{
 		name:         initialName,
-		providerType: interactiveProviderTypeDefault(initialName, cfg.providerType),
+		providerType: interactiveProviderTypeDefault(initialName, cfg.providerType, cfg.protocol),
+		protocol:     cfg.protocol,
+		mode:         cfg.mode,
 		baseURL:      cfg.baseURL,
 		authMode:     interactiveAuthModeDefault(cfg),
 		apiKeyEnv:    cfg.apiKeyEnv,
@@ -103,7 +114,7 @@ func promptInteractiveProviderConfig(ctx context.Context, deps Dependencies, ini
 		return store.Provider{}, secretPlan{}, err
 	}
 
-	resolvedType, err := resolveProviderType(setup.name, setup.providerType)
+	resolvedType, err := resolveProviderTypeWithProtocol(setup.name, setup.providerType, setup.protocol)
 	if err != nil {
 		return store.Provider{}, secretPlan{}, err
 	}
@@ -115,7 +126,7 @@ func promptInteractiveProviderConfig(ctx context.Context, deps Dependencies, ini
 	if err != nil {
 		return store.Provider{}, secretPlan{}, err
 	}
-	provider := store.Provider{Name: setup.name, Type: resolvedType, BaseURL: resolvedURL, SecretRef: plan.ref}
+	provider := providerWithCapabilities(setup.name, resolvedType, resolvedURL, plan.ref, setup.mode)
 	return provider, plan, nil
 }
 
@@ -132,9 +143,19 @@ func promptProviderUpdateConfig(ctx context.Context, deps Dependencies, existing
 }
 
 func initialProviderUpdatePrompt(existing store.Provider, cfg providerAddConfig) providerSetupPrompt {
+	providerType := interactiveProviderUpdateTypeDefault(existing, cfg)
+	mode := cfg.mode
+	if mode == "" {
+		mode = existing.Mode
+	}
+	if mode == "" {
+		mode = defaultProviderMode(providerType)
+	}
 	setup := providerSetupPrompt{
 		name:         existing.Name,
-		providerType: firstNonEmptyString(cfg.providerType, existing.Type),
+		providerType: providerType,
+		protocol:     cfg.protocol,
+		mode:         mode,
 		baseURL:      firstNonEmptyString(cfg.baseURL, existing.BaseURL),
 		authMode:     authModeKeep,
 		apiKeyEnv:    cfg.apiKeyEnv,
@@ -158,8 +179,20 @@ func runProviderUpdatePrompt(ctx context.Context, deps Dependencies, setup *prov
 				huh.NewOption("OpenRouter", "openrouter"),
 				huh.NewOption("Anthropic", "anthropic"),
 				huh.NewOption("Local OpenAI-compatible", "local"),
+				huh.NewOption("Z.AI Anthropic-compatible", "zai"),
+				huh.NewOption("Z.AI OpenAI-compatible", "zai-openai"),
+				huh.NewOption("Generic Anthropic-compatible", "anthropic-compatible"),
+				huh.NewOption("Generic OpenAI-compatible", "openai-compatible"),
 			).
 			Value(&setup.providerType),
+		huh.NewSelect[string]().
+			Title("Provider mode").
+			Options(
+				huh.NewOption("Full", providers.ModeFull),
+				huh.NewOption("Degraded", providers.ModeDegraded),
+				huh.NewOption("Chat only", providers.ModeChatOnly),
+			).
+			Value(&setup.mode),
 		huh.NewInput().
 			Title("Base URL").
 			Description("Leave empty for default provider URLs when available.").
@@ -183,7 +216,7 @@ func runProviderUpdatePrompt(ctx context.Context, deps Dependencies, setup *prov
 
 func resolveProviderUpdateBase(existing store.Provider, setup providerSetupPrompt) (store.Provider, error) {
 	updated := existing
-	resolvedType, err := resolveProviderType(existing.Name, setup.providerType)
+	resolvedType, err := resolveProviderTypeWithProtocol(existing.Name, setup.providerType, setup.protocol)
 	if err != nil {
 		return store.Provider{}, err
 	}
@@ -193,6 +226,15 @@ func resolveProviderUpdateBase(existing store.Provider, setup providerSetupPromp
 	}
 	updated.Type = resolvedType
 	updated.BaseURL = resolvedURL
+	mode := providerModeForTypeChange(existing.Type, existing.Mode, resolvedType, setup.mode, setup.mode != "" && setup.mode != existing.Mode)
+	caps := providerWithCapabilities(updated.Name, updated.Type, updated.BaseURL, updated.SecretRef, mode)
+	updated.Protocol = caps.Protocol
+	updated.SupportsTools = caps.SupportsTools
+	updated.SupportsStreaming = caps.SupportsStreaming
+	updated.SupportsThinking = caps.SupportsThinking
+	updated.SupportsModelDiscovery = caps.SupportsModelDiscovery
+	updated.SupportsCountTokens = caps.SupportsCountTokens
+	updated.Mode = caps.Mode
 	return updated, nil
 }
 
@@ -276,9 +318,10 @@ func saveInteractiveProviderAdd(ctx context.Context, cmd *cobra.Command, deps De
 	if err := s.AddProvider(ctx, provider); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, %s, secret=%s)\n", provider.Name, provider.Type, provider.BaseURL, secret.RedactRef(provider.SecretRef))
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, protocol=%s, mode=%s, %s, secret=%s)\n", provider.Name, provider.Type, provider.Protocol, provider.Mode, provider.BaseURL, secret.RedactRef(provider.SecretRef))
 	if len(planned) == 0 && summary.skipped == 0 {
-		if providers.SupportsOpenAIModelDiscovery(provider.Type) {
+		caps := effectiveProviderCapabilities(provider)
+		if caps.Protocol == providers.ProtocolOpenAICompatible && caps.SupportsModelDiscovery {
 			fmt.Fprintf(cmd.OutOrStdout(), "Next: ccr provider import-models %s\n", provider.Name)
 			return nil
 		}
@@ -335,14 +378,24 @@ func interactiveModelImportPlan(ctx context.Context, cmd *cobra.Command, deps De
 
 func promptProviderSetup(ctx context.Context, deps Dependencies, initial providerSetupPrompt) (providerSetupPrompt, error) {
 	setup := initial
+	modeDefaulted := strings.TrimSpace(setup.mode) == ""
 	if setup.providerType == "" {
 		setup.providerType = "litellm"
+	}
+	initialModeDefault := ""
+	if setup.mode == "" {
+		initialModeDefault = defaultProviderMode(setup.providerType)
+		setup.mode = initialModeDefault
 	}
 	if setup.authMode == "" {
 		setup.authMode = authModeKeychain
 	}
 	if !isTerminal(readerOrDefault(deps.In, os.Stdin)) {
-		return promptProviderSetupNonTerminal(ctx, deps, setup)
+		prompted, err := promptProviderSetupNonTerminal(ctx, deps, setup)
+		if err != nil {
+			return providerSetupPrompt{}, err
+		}
+		return applyProviderPromptModeDefault(prompted, modeDefaulted, initialModeDefault), nil
 	}
 
 	form := huh.NewForm(huh.NewGroup(
@@ -359,8 +412,20 @@ func promptProviderSetup(ctx context.Context, deps Dependencies, initial provide
 				huh.NewOption("OpenRouter", "openrouter"),
 				huh.NewOption("Anthropic", "anthropic"),
 				huh.NewOption("Local OpenAI-compatible", "local"),
+				huh.NewOption("Z.AI Anthropic-compatible", "zai"),
+				huh.NewOption("Z.AI OpenAI-compatible", "zai-openai"),
+				huh.NewOption("Generic Anthropic-compatible", "anthropic-compatible"),
+				huh.NewOption("Generic OpenAI-compatible", "openai-compatible"),
 			).
 			Value(&setup.providerType),
+		huh.NewSelect[string]().
+			Title("Provider mode").
+			Options(
+				huh.NewOption("Full", providers.ModeFull),
+				huh.NewOption("Degraded", providers.ModeDegraded),
+				huh.NewOption("Chat only", providers.ModeChatOnly),
+			).
+			Value(&setup.mode),
 		huh.NewInput().
 			Title("Base URL").
 			Description("Leave empty for default provider URLs when available.").
@@ -406,7 +471,14 @@ func promptProviderSetup(ctx context.Context, deps Dependencies, initial provide
 	default:
 		return providerSetupPrompt{}, fmt.Errorf("invalid authentication mode %q", setup.authMode)
 	}
-	return setup, nil
+	return applyProviderPromptModeDefault(setup, modeDefaulted, initialModeDefault), nil
+}
+
+func applyProviderPromptModeDefault(setup providerSetupPrompt, modeDefaulted bool, initialDefault string) providerSetupPrompt {
+	if modeDefaulted && setup.mode == initialDefault {
+		setup.mode = defaultProviderMode(setup.providerType)
+	}
+	return setup
 }
 
 func promptProviderSetupNonTerminal(ctx context.Context, deps Dependencies, setup providerSetupPrompt) (providerSetupPrompt, error) {
@@ -494,7 +566,29 @@ func providerTypeChoices() map[string]string {
 		"2": "openrouter",
 		"3": "anthropic",
 		"4": "local",
+		"5": "zai",
+		"6": "zai-openai",
+		"7": "anthropic-compatible",
+		"8": "openai-compatible",
 	}
+}
+
+func defaultProviderMode(providerType string) string {
+	mode := providers.DefaultCapabilities(providerType).Mode
+	if mode == "" {
+		return providers.ModeDegraded
+	}
+	return mode
+}
+
+func providerModeForTypeChange(existingType, existingMode, resolvedType, requestedMode string, modeChanged bool) string {
+	if modeChanged {
+		return requestedMode
+	}
+	if existingMode == "" || existingMode == defaultProviderMode(existingType) {
+		return defaultProviderMode(resolvedType)
+	}
+	return existingMode
 }
 
 func addAuthModeChoices() map[string]string {
@@ -511,300 +605,5 @@ func updateAuthModeChoices() map[string]string {
 		"2": authModeKeychain,
 		"3": authModeEnv,
 		"4": authModeNone,
-	}
-}
-
-func promptAPIKey(ctx context.Context, deps Dependencies) (string, error) {
-	in := readerOrDefault(deps.In, os.Stdin)
-	if !isTerminal(in) {
-		value, err := readNonTerminalAPIKey(ctx, in)
-		if err != nil {
-			return "", err
-		}
-		return value, nil
-	}
-
-	apiKey := ""
-	input := huh.NewInput().
-		Title("API key").
-		Value(&apiKey).
-		Validate(func(value string) error {
-			if strings.TrimSpace(value) == "" {
-				return fmt.Errorf("API key is required")
-			}
-			return nil
-		})
-	input = input.EchoMode(huh.EchoModeNone)
-	if err := runHuhForm(ctx, deps, huh.NewForm(huh.NewGroup(input))); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(apiKey), nil
-}
-
-func readNonTerminalPromptValue(ctx context.Context, in io.Reader, fallback string, required bool) (string, error) {
-	line, err := readLine(in)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return "", ctxErr
-	}
-	value := strings.TrimSpace(line)
-	if value == "" {
-		value = strings.TrimSpace(fallback)
-	}
-	if required && value == "" {
-		return "", fmt.Errorf("value is required")
-	}
-	return value, nil
-}
-
-func readNonTerminalChoice(ctx context.Context, in io.Reader, fallback string, choices map[string]string) (string, error) {
-	value, err := readNonTerminalPromptValue(ctx, in, fallback, true)
-	if err != nil {
-		return "", err
-	}
-	if selected, ok := choices[value]; ok {
-		return selected, nil
-	}
-	for _, selected := range choices {
-		if value == selected {
-			return selected, nil
-		}
-	}
-	return "", fmt.Errorf("invalid choice %q", value)
-}
-
-func readNonTerminalAPIKey(ctx context.Context, in io.Reader) (string, error) {
-	for {
-		line, err := readLine(in)
-		value := strings.TrimSpace(line)
-		if value != "" {
-			return value, nil
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return "", fmt.Errorf("API key is required")
-			}
-			return "", fmt.Errorf("reading API key: %w", err)
-		}
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", fmt.Errorf("reading API key: %w", ctxErr)
-		}
-	}
-}
-
-func readLine(in io.Reader) (string, error) {
-	var builder strings.Builder
-	var buf [1]byte
-	for {
-		n, err := in.Read(buf[:])
-		if n > 0 {
-			switch buf[0] {
-			case '\n':
-				return builder.String(), nil
-			case '\r':
-				continue
-			default:
-				_ = builder.WriteByte(buf[0])
-			}
-		}
-		if err != nil {
-			if builder.Len() > 0 && errors.Is(err, io.EOF) {
-				return builder.String(), nil
-			}
-			return builder.String(), err
-		}
-	}
-}
-
-func promptAPIKeyEnv(ctx context.Context, deps Dependencies, initial string) (string, error) {
-	apiKeyEnv := initial
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewInput().
-			Title("API key environment variable").
-			Value(&apiKeyEnv).
-			Validate(validateEnvName),
-	))
-	if err := runHuhForm(ctx, deps, form); err != nil {
-		return "", err
-	}
-	return apiKeyEnv, nil
-}
-
-func promptImportChoice(ctx context.Context, deps Dependencies, discovered int) (modelImportChoice, error) {
-	choice := modelImportSelect
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[modelImportChoice]().
-			Title(fmt.Sprintf("Import %d discovered models?", discovered)).
-			Options(
-				huh.NewOption("Select models", modelImportSelect),
-				huh.NewOption("Import all", modelImportAll),
-				huh.NewOption("Skip model import", modelImportSkip),
-			).
-			Value(&choice),
-	))
-	if err := runHuhForm(ctx, deps, form); err != nil {
-		return "", err
-	}
-	return choice, nil
-}
-
-func promptModelSelection(ctx context.Context, deps Dependencies, models []string) ([]string, error) {
-	selected := make([]string, 0, len(models))
-	options := make([]huh.Option[string], 0, len(models))
-	for _, model := range models {
-		options = append(options, huh.NewOption(model, model))
-	}
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewMultiSelect[string]().
-			Title("Select models to import").
-			Options(options...).
-			Filterable(true).
-			Height(12).
-			Value(&selected),
-	))
-	if err := runHuhForm(ctx, deps, form); err != nil {
-		return nil, err
-	}
-	return selected, nil
-}
-
-func promptAliasConflict(ctx context.Context, deps Dependencies, alias, modelID string, existing map[string]struct{}) (renamedAlias string, skip bool, err error) {
-	choice := "skip"
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewSelect[string]().
-			Title(fmt.Sprintf("Alias %q already exists for model %q", alias, modelID)).
-			Options(
-				huh.NewOption("Skip this model", "skip"),
-				huh.NewOption("Rename alias", "rename"),
-			).
-			Value(&choice),
-	))
-	if err := runHuhForm(ctx, deps, form); err != nil {
-		return "", false, err
-	}
-	if choice == "skip" {
-		return "", true, nil
-	}
-
-	renamed := alias
-	renameForm := huh.NewForm(huh.NewGroup(
-		huh.NewInput().
-			Title("New alias").
-			Value(&renamed).
-			Validate(func(value string) error {
-				if err := validateName("model alias", value); err != nil {
-					return err
-				}
-				if _, ok := existing[value]; ok {
-					return fmt.Errorf("model alias %q already exists", value)
-				}
-				return nil
-			}),
-	))
-	if err := runHuhForm(ctx, deps, renameForm); err != nil {
-		return "", false, err
-	}
-	return renamed, false, nil
-}
-
-func promptSaveProviderOnly(ctx context.Context, deps Dependencies) (bool, error) {
-	saveOnly := true
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().
-			Title("Save provider without importing models?").
-			Affirmative("Save provider").
-			Negative("Do not save").
-			Value(&saveOnly),
-	))
-	if err := runHuhForm(ctx, deps, form); err != nil {
-		return false, err
-	}
-	return saveOnly, nil
-}
-
-func confirmRemoval(ctx context.Context, deps Dependencies, yes, interactive bool, title string) (bool, error) {
-	if yes {
-		return true, nil
-	}
-	if !interactive && !isTerminal(readerOrDefault(deps.In, os.Stdin)) {
-		return false, fmt.Errorf("removal requires confirmation; rerun with --yes or --interactive")
-	}
-	confirmed := false
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().
-			Title(title).
-			Affirmative("Remove").
-			Negative("Cancel").
-			Value(&confirmed),
-	))
-	if err := runHuhForm(ctx, deps, form); err != nil {
-		return false, err
-	}
-	return confirmed, nil
-}
-
-func runHuhForm(ctx context.Context, deps Dependencies, form *huh.Form) error {
-	in := readerOrDefault(deps.In, os.Stdin)
-	out := writerOrDefault(deps.Err, os.Stderr)
-	form = form.WithInput(in).WithOutput(out)
-	if shouldUseAccessiblePrompts(Dependencies{In: in, Err: out}) {
-		form = form.WithAccessible(true)
-	}
-	if err := form.RunWithContext(ctx); err != nil {
-		return fmt.Errorf("running interactive prompt: %w", err)
-	}
-	return nil
-}
-
-func shouldUseAccessiblePrompts(deps Dependencies) bool {
-	return !isTerminal(deps.In) || !isTerminal(deps.Err)
-}
-
-func isTerminal(value any) bool {
-	fd, ok := value.(interface{ Fd() uintptr })
-	if !ok {
-		return false
-	}
-	return term.IsTerminal(int(fd.Fd()))
-}
-
-func readerOrDefault(value, fallback io.Reader) io.Reader {
-	if value == nil {
-		return fallback
-	}
-	return value
-}
-
-func writerOrDefault(value, fallback io.Writer) io.Writer {
-	if value == nil {
-		return fallback
-	}
-	return value
-}
-
-func interactiveProviderTypeDefault(providerName, explicit string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if providerName == "" {
-		return "litellm"
-	}
-	resolved, err := resolveProviderType(providerName, "")
-	if err != nil {
-		return "litellm"
-	}
-	return resolved
-}
-
-func interactiveAuthModeDefault(cfg providerAddConfig) string {
-	switch {
-	case cfg.apiKeyEnv != "":
-		return authModeEnv
-	case cfg.noAPIKey:
-		return authModeNone
-	default:
-		return authModeKeychain
 	}
 }

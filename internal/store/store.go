@@ -12,19 +12,26 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 type Store struct {
 	db *sql.DB
 }
 
 type Provider struct {
-	ID        int64
-	Name      string
-	Type      string
-	BaseURL   string
-	SecretRef string
-	CreatedAt string
+	ID                     int64
+	Name                   string
+	Type                   string
+	BaseURL                string
+	SecretRef              string
+	Protocol               string
+	SupportsTools          bool
+	SupportsStreaming      bool
+	SupportsThinking       bool
+	SupportsModelDiscovery bool
+	SupportsCountTokens    bool
+	Mode                   string
+	CreatedAt              string
 }
 
 type Model struct {
@@ -105,6 +112,13 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if _, err := s.db.ExecContext(ctx, migrateV1ToV2SQL); err != nil {
 			return fmt.Errorf("store.Migrate: migrating schema from version 1 to 2: %w", err)
 		}
+		if err := s.migrateV2ToV3(ctx); err != nil {
+			return fmt.Errorf("store.Migrate: migrating schema from version 1 to 3: %w", err)
+		}
+	case 2:
+		if err := s.migrateV2ToV3(ctx); err != nil {
+			return fmt.Errorf("store.Migrate: migrating schema from version 2 to 3: %w", err)
+		}
 	case CurrentSchemaVersion:
 		if _, err := s.db.ExecContext(ctx, currentSchemaSQL); err != nil {
 			return fmt.Errorf("store.Migrate: ensuring current schema: %w", err)
@@ -124,11 +138,17 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 }
 
 func (s *Store) AddProvider(ctx context.Context, provider Provider) error {
+	provider = providerWithMetadataDefaults(provider)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO providers (name, type, base_url, secret_ref, created_at)
-VALUES (?, ?, ?, ?, ?)
-`, provider.Name, provider.Type, provider.BaseURL, provider.SecretRef, now)
+INSERT INTO providers (
+  name, type, base_url, secret_ref, protocol, supports_tools, supports_streaming,
+  supports_thinking, supports_model_discovery, supports_count_tokens, mode, created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, provider.Name, provider.Type, provider.BaseURL, provider.SecretRef, provider.Protocol, boolToInt(provider.SupportsTools),
+		boolToInt(provider.SupportsStreaming), boolToInt(provider.SupportsThinking), boolToInt(provider.SupportsModelDiscovery),
+		boolToInt(provider.SupportsCountTokens), provider.Mode, now)
 	if err != nil {
 		return fmt.Errorf("store.AddProvider: inserting provider %q: %w", provider.Name, err)
 	}
@@ -136,11 +156,16 @@ VALUES (?, ?, ?, ?, ?)
 }
 
 func (s *Store) UpdateProvider(ctx context.Context, provider Provider) error {
+	provider = providerWithMetadataDefaults(provider)
 	result, err := s.db.ExecContext(ctx, `
 UPDATE providers
-SET type = ?, base_url = ?, secret_ref = ?
+SET type = ?, base_url = ?, secret_ref = ?, protocol = ?, supports_tools = ?,
+  supports_streaming = ?, supports_thinking = ?, supports_model_discovery = ?,
+  supports_count_tokens = ?, mode = ?
 WHERE name = ?
-`, provider.Type, provider.BaseURL, provider.SecretRef, provider.Name)
+`, provider.Type, provider.BaseURL, provider.SecretRef, provider.Protocol, boolToInt(provider.SupportsTools),
+		boolToInt(provider.SupportsStreaming), boolToInt(provider.SupportsThinking), boolToInt(provider.SupportsModelDiscovery),
+		boolToInt(provider.SupportsCountTokens), provider.Mode, provider.Name)
 	if err != nil {
 		return fmt.Errorf("store.UpdateProvider: updating provider %q: %w", provider.Name, err)
 	}
@@ -156,14 +181,24 @@ WHERE name = ?
 
 func (s *Store) GetProvider(ctx context.Context, name string) (Provider, error) {
 	var provider Provider
+	var supportsTools, supportsStreaming, supportsThinking, supportsModelDiscovery, supportsCountTokens int
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, name, type, base_url, secret_ref, created_at
+SELECT id, name, type, base_url, secret_ref, protocol, supports_tools,
+  supports_streaming, supports_thinking, supports_model_discovery,
+  supports_count_tokens, mode, created_at
 FROM providers
 WHERE name = ?
-`, name).Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &provider.SecretRef, &provider.CreatedAt)
+`, name).Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &provider.SecretRef, &provider.Protocol,
+		&supportsTools, &supportsStreaming, &supportsThinking, &supportsModelDiscovery, &supportsCountTokens,
+		&provider.Mode, &provider.CreatedAt)
 	if err != nil {
 		return Provider{}, fmt.Errorf("store.GetProvider: reading provider %q: %w", name, err)
 	}
+	provider.SupportsTools = intToBool(supportsTools)
+	provider.SupportsStreaming = intToBool(supportsStreaming)
+	provider.SupportsThinking = intToBool(supportsThinking)
+	provider.SupportsModelDiscovery = intToBool(supportsModelDiscovery)
+	provider.SupportsCountTokens = intToBool(supportsCountTokens)
 	return provider, nil
 }
 
@@ -185,7 +220,9 @@ WHERE name = ?
 
 func (s *Store) ListProviders(ctx context.Context) ([]Provider, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, name, type, base_url, secret_ref, created_at
+SELECT id, name, type, base_url, secret_ref, protocol, supports_tools,
+  supports_streaming, supports_thinking, supports_model_discovery,
+  supports_count_tokens, mode, created_at
 FROM providers
 ORDER BY name
 `)
@@ -199,9 +236,17 @@ ORDER BY name
 	var providers []Provider
 	for rows.Next() {
 		var provider Provider
-		if err := rows.Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &provider.SecretRef, &provider.CreatedAt); err != nil {
+		var supportsTools, supportsStreaming, supportsThinking, supportsModelDiscovery, supportsCountTokens int
+		if err := rows.Scan(&provider.ID, &provider.Name, &provider.Type, &provider.BaseURL, &provider.SecretRef,
+			&provider.Protocol, &supportsTools, &supportsStreaming, &supportsThinking, &supportsModelDiscovery,
+			&supportsCountTokens, &provider.Mode, &provider.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store.ListProviders: scanning provider: %w", err)
 		}
+		provider.SupportsTools = intToBool(supportsTools)
+		provider.SupportsStreaming = intToBool(supportsStreaming)
+		provider.SupportsThinking = intToBool(supportsThinking)
+		provider.SupportsModelDiscovery = intToBool(supportsModelDiscovery)
+		provider.SupportsCountTokens = intToBool(supportsCountTokens)
 		providers = append(providers, provider)
 	}
 	if err := rows.Err(); err != nil {
@@ -523,69 +568,3 @@ ORDER BY id DESC
 	}
 	return records, nil
 }
-
-const bootstrapSchemaSQL = `
-PRAGMA foreign_keys = ON;
-
-CREATE TABLE IF NOT EXISTS schema_version (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  version INTEGER NOT NULL
-);
-
-INSERT INTO schema_version (id, version)
-VALUES (1, 1)
-ON CONFLICT(id) DO NOTHING;
-`
-
-const migrateV1ToV2SQL = currentSchemaSQL + `
-UPDATE schema_version
-SET version = 2
-WHERE id = 1 AND version = 1;
-`
-
-const currentSchemaSQL = `
-CREATE TABLE IF NOT EXISTS providers (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL UNIQUE,
-  type TEXT NOT NULL,
-  base_url TEXT NOT NULL,
-  secret_ref TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS models (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  alias TEXT NOT NULL UNIQUE,
-  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-  provider_model TEXT NOT NULL,
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  gateway_url TEXT NOT NULL,
-  pid INTEGER NOT NULL,
-  model_alias TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS agents (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_id INTEGER NOT NULL DEFAULT 0,
-  name TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  model_alias TEXT NOT NULL DEFAULT '',
-  status TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS conformance_runs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  alias TEXT NOT NULL,
-  status TEXT NOT NULL,
-  live_verified INTEGER NOT NULL DEFAULT 0,
-  details TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-`

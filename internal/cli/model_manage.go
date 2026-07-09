@@ -231,11 +231,12 @@ func newModelTestCommand(ctx context.Context, opts *options, deps Dependencies) 
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Model alias %q: provider=%s model=%s compat=%s\n", model.Alias, provider.Name, model.ProviderModel, model.Status)
-			if providers.SupportsOpenAIModelDiscovery(provider.Type) {
+			caps := effectiveProviderCapabilities(provider)
+			if caps.Protocol == providers.ProtocolOpenAICompatible && caps.SupportsModelDiscovery {
 				fmt.Fprintf(cmd.OutOrStdout(), "Exact provider model verified via /v1/models (%d models discovered).\n", discovered)
 				return nil
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "Config and secret validation passed. Anthropic live routing is outside this pass.")
+			fmt.Fprintf(cmd.OutOrStdout(), "Config and secret validation passed for %s provider. Live routing is outside this pass.\n", caps.Protocol)
 			return nil
 		},
 	}
@@ -311,8 +312,9 @@ func validateRoutableModelAliasTargetWithStore(ctx context.Context, deps Depende
 	if err := rejectBlockedModelAlias(model); err != nil {
 		return store.Model{}, store.Provider{}, 0, err
 	}
-	if !providers.SupportsOpenAICompatibleRouting(provider.Type) {
-		return store.Model{}, store.Provider{}, 0, fmt.Errorf("model alias %q uses provider type %q, which is not supported by the OpenAI-compatible gateway path", alias, provider.Type)
+	caps := effectiveProviderCapabilities(provider)
+	if caps.Protocol != providers.ProtocolOpenAICompatible && caps.Protocol != providers.ProtocolAnthropicCompatible {
+		return store.Model{}, store.Provider{}, 0, fmt.Errorf("model alias %q uses provider type %q with protocol %q, which is not supported by the gateway path", alias, provider.Type, caps.Protocol)
 	}
 	return validateLoadedModelAliasTarget(ctx, deps, model, provider, requireExactProviderModel)
 }
@@ -341,7 +343,8 @@ func validateLoadedModelAliasTarget(ctx context.Context, deps Dependencies, mode
 	if err != nil {
 		return store.Model{}, store.Provider{}, 0, err
 	}
-	if !providers.SupportsOpenAIModelDiscovery(provider.Type) {
+	caps := effectiveProviderCapabilities(provider)
+	if caps.Protocol != providers.ProtocolOpenAICompatible || !caps.SupportsModelDiscovery {
 		return model, provider, 0, nil
 	}
 	models, err := discoverProviderModelsWithPlan(ctx, deps, provider, secretPlan{ref: provider.SecretRef, value: apiKey})
