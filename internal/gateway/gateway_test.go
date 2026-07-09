@@ -671,6 +671,40 @@ func TestOpenAIToolArgumentsKeepsUnsafeMalformedJSONVisible(t *testing.T) {
 	}
 }
 
+func TestOpenAIToolArgumentsNormalizesAgentInput(t *testing.T) {
+	raw := `{"prompt":"find latest chatgpt news","agent_type":"general-purpose","model":"glm","run_in_background":"false","extra":"ignored"}`
+	got, ok := openAIToolArgumentsForTool("Agent", raw).(map[string]any)
+	if !ok {
+		t.Fatalf("openAIToolArgumentsForTool() = %#v, want object", got)
+	}
+	if got["prompt"] != "find latest chatgpt news" ||
+		got["description"] != "find latest chatgpt news" ||
+		got["subagent_type"] != "general-purpose" ||
+		got["run_in_background"] != false {
+		t.Fatalf("openAIToolArgumentsForTool() = %#v", got)
+	}
+	if _, ok := got["model"]; ok {
+		t.Fatalf("openAIToolArgumentsForTool() kept invalid model: %#v", got)
+	}
+	if _, ok := got["extra"]; ok {
+		t.Fatalf("openAIToolArgumentsForTool() kept extra field: %#v", got)
+	}
+}
+
+func TestOpenAIToolArgumentsDoesNotNormalizeNonAgentInput(t *testing.T) {
+	raw := `{"prompt":"find latest chatgpt news","agent_type":"general-purpose","extra":"kept"}`
+	got, ok := openAIToolArgumentsForTool("Bash", raw).(map[string]any)
+	if !ok {
+		t.Fatalf("openAIToolArgumentsForTool() = %#v, want object", got)
+	}
+	if got["agent_type"] != "general-purpose" || got["extra"] != "kept" {
+		t.Fatalf("openAIToolArgumentsForTool() = %#v, want original non-Agent fields", got)
+	}
+	if _, ok := got["description"]; ok {
+		t.Fatalf("openAIToolArgumentsForTool() normalized non-Agent input: %#v", got)
+	}
+}
+
 func TestGatewayRejectsUnsupportedAnthropicFieldsOnOpenAIPath(t *testing.T) {
 	ctx := context.Background()
 	called := false

@@ -685,7 +685,7 @@ func anthropicContentBlocksFromOpenAI(resp openAIChatResponse) []map[string]any 
 			"type":  "tool_use",
 			"id":    firstNonEmpty(toolCall.ID, "toolu_ccr"),
 			"name":  toolCall.Function.Name,
-			"input": openAIToolArguments(toolCall.Function.Arguments),
+			"input": openAIToolArgumentsForTool(toolCall.Function.Name, toolCall.Function.Arguments),
 		})
 	}
 	return blocks
@@ -699,6 +699,10 @@ func streamStartBlock(block map[string]any) map[string]any {
 }
 
 func openAIToolArguments(raw string) any {
+	return openAIToolArgumentsForTool("", raw)
+}
+
+func openAIToolArgumentsForTool(toolName, raw string) any {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return map[string]any{}
@@ -710,10 +714,92 @@ func openAIToolArguments(raw string) any {
 	if decoded == nil {
 		return map[string]any{}
 	}
-	if _, ok := decoded.(map[string]any); !ok {
+	decodedObject, ok := decoded.(map[string]any)
+	if !ok {
 		return map[string]any{"value": decoded}
 	}
+	if strings.EqualFold(strings.TrimSpace(toolName), "Agent") {
+		return normalizeAgentToolInput(decodedObject)
+	}
 	return decoded
+}
+
+func normalizeAgentToolInput(input map[string]any) map[string]any {
+	normalized := make(map[string]any, 6)
+	prompt := trimmedStringField(input, "prompt")
+	if prompt != "" {
+		normalized["prompt"] = prompt
+	}
+	description := trimmedStringField(input, "description")
+	if description == "" {
+		description = agentDescriptionFromPrompt(prompt)
+	}
+	if description != "" {
+		normalized["description"] = description
+	}
+	if subagentType := firstTrimmedStringField(input, "subagent_type", "agent_type"); subagentType != "" {
+		normalized["subagent_type"] = subagentType
+	}
+	if isolation := allowedStringField(input, "isolation", "worktree", "remote"); isolation != "" {
+		normalized["isolation"] = isolation
+	}
+	if model := allowedStringField(input, "model", "sonnet", "opus", "haiku", "fable"); model != "" {
+		normalized["model"] = model
+	}
+	if runInBackground, ok := boolField(input, "run_in_background"); ok {
+		normalized["run_in_background"] = runInBackground
+	}
+	return normalized
+}
+
+func agentDescriptionFromPrompt(prompt string) string {
+	words := strings.Fields(prompt)
+	if len(words) == 0 {
+		return ""
+	}
+	if len(words) > 5 {
+		words = words[:5]
+	}
+	return strings.Join(words, " ")
+}
+
+func firstTrimmedStringField(input map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := trimmedStringField(input, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func trimmedStringField(input map[string]any, key string) string {
+	value, _ := input[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func allowedStringField(input map[string]any, key string, allowed ...string) string {
+	value := trimmedStringField(input, key)
+	for _, candidate := range allowed {
+		if value == candidate {
+			return value
+		}
+	}
+	return ""
+}
+
+func boolField(input map[string]any, key string) (value, ok bool) {
+	switch value := input[key].(type) {
+	case bool:
+		return value, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
 }
 
 func decodeOpenAIToolArguments(raw string) (any, bool) {
