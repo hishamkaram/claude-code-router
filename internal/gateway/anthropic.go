@@ -86,7 +86,8 @@ func (h *handler) defaultAnthropicProvider(ctx context.Context) (store.Provider,
 		return store.Provider{}, fmt.Errorf("listing providers for Anthropic pass-through: %w", err)
 	}
 	var first store.Provider
-	for _, provider := range providersList {
+	for i := range providersList {
+		provider := providersList[i]
 		if provider.Type != "anthropic" {
 			continue
 		}

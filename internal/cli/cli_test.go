@@ -187,6 +187,39 @@ func TestProviderAndModelAddRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProviderAddZAIAndGenericProtocol(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "add", "zai", "--api-key-env", "ZAI_API_KEY")
+	if err != nil {
+		t.Fatalf("zai provider add error = %v", err)
+	}
+	for _, want := range []string{"zai", "protocol=anthropic-compatible", "mode=full", "https://api.z.ai/api/anthropic", "env:ZAI_API_KEY"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("zai provider add output missing %q:\n%s", want, out)
+		}
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "add", "glm", "--protocol", "anthropic-compatible", "--base-url", "http://localhost:5000", "--no-api-key")
+	if err != nil {
+		t.Fatalf("generic protocol provider add error = %v", err)
+	}
+	if !strings.Contains(out, "anthropic-compatible") || !strings.Contains(out, "mode=degraded") {
+		t.Fatalf("generic protocol provider add output = %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "status")
+	if err != nil {
+		t.Fatalf("status error = %v", err)
+	}
+	for _, want := range []string{"Provider zai: type=zai protocol=anthropic-compatible mode=full", "Provider glm: type=anthropic-compatible protocol=anthropic-compatible mode=degraded"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestProviderAddInteractiveSavesSelectedModelsWithPrefixedAliases(t *testing.T) {
 	t.Parallel()
 
@@ -218,6 +251,81 @@ func TestProviderAddInteractiveSavesSelectedModelsWithPrefixedAliases(t *testing
 	}
 	if !strings.Contains(out, "litellm-glm-5-2-1m") || !strings.Contains(out, "model=glm-5.2[1m]") {
 		t.Fatalf("model list output = %q", out)
+	}
+}
+
+func TestProviderAddInteractiveProtocolDefaultForNonTerminal(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"",  // default provider name
+		"",  // default provider type from --protocol
+		"",  // default base URL from --base-url
+		"",  // default auth mode from --no-api-key
+		"y", // save after model discovery is rejected
+	}, "\n") + "\n"
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "glm", "--interactive", "--protocol", "anthropic-compatible", "--base-url", "http://localhost:5000", "--no-api-key")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	for _, want := range []string{`Provider "glm" added`, "protocol=anthropic-compatible", "mode=degraded"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("interactive provider add output missing %q:\n%s", want, out)
+		}
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "glm\tanthropic-compatible\tprotocol=anthropic-compatible") {
+		t.Fatalf("provider list output = %q", out)
+	}
+}
+
+func TestProviderAddInteractiveRecomputesDefaultModeAfterTypeSelection(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"foo", // provider name
+		"3",   // Anthropic
+		"",    // default base URL
+		"3",   // no API key
+		"y",   // save after unsupported discovery
+	}, "\n") + "\n"
+
+	_, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "--interactive")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstderr:\n%s", err, errOut)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "foo\tanthropic\tprotocol=anthropic-compatible\tmode=full") {
+		t.Fatalf("provider list output = %q", out)
+	}
+}
+
+func TestProviderPromptModeDefaultRecomputesOnlyUnchangedDefault(t *testing.T) {
+	t.Parallel()
+
+	unchanged := applyProviderPromptModeDefault(providerSetupPrompt{providerType: "zai", mode: "degraded"}, true, "degraded")
+	if unchanged.mode != "full" {
+		t.Fatalf("unchanged default mode = %q, want full", unchanged.mode)
+	}
+
+	selected := applyProviderPromptModeDefault(providerSetupPrompt{providerType: "zai", mode: "chat-only"}, true, "degraded")
+	if selected.mode != "chat-only" {
+		t.Fatalf("selected mode = %q, want chat-only", selected.mode)
 	}
 }
 

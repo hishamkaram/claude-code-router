@@ -698,10 +698,13 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"claude-sonnet-4-6", "gpt", "claude-ccr-gpt", "claude-custom"} {
+	for _, want := range []string{"claude-sonnet-4-6", "claude-ccr-gpt", "claude-custom"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}
+	}
+	if containsString(ids, "gpt") {
+		t.Fatalf("discovery ids = %#v, raw non-Claude alias should not duplicate shim", ids)
 	}
 }
 

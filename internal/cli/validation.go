@@ -7,7 +7,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv, apiKeyValue string, apiKeyStdin, noAPIKey bool) (secretPlan, error) {
@@ -41,12 +43,8 @@ func resolveProviderSecretPlan(deps Dependencies, name, providerType, apiKeyEnv,
 }
 
 func providerTypeRequiresAPIKey(providerType string) bool {
-	switch providerType {
-	case "local", "litellm":
-		return false
-	default:
-		return true
-	}
+	profile, ok := (providers.Registry{}).Profile(providerType)
+	return !ok || profile.RequiresAPIKey
 }
 
 func validateProviderAuthSourceFlags(cfg providerAddConfig) error {
@@ -67,30 +65,23 @@ func validateProviderAuthSources(sources ...bool) error {
 }
 
 func resolveProviderType(name, explicit string) (string, error) {
-	providerType := explicit
-	if providerType == "" {
-		providerType = name
-	}
-	switch providerType {
-	case "anthropic", "openrouter", "litellm", "local":
-		return providerType, nil
-	default:
-		return "", fmt.Errorf("invalid provider type %q; expected anthropic, openrouter, litellm, or local", providerType)
-	}
+	return resolveProviderTypeWithProtocol(name, explicit, "")
+}
+
+func resolveProviderTypeWithProtocol(name, explicit, protocol string) (string, error) {
+	return (providers.Registry{}).ResolveType(name, explicit, protocol)
 }
 
 func resolveBaseURL(providerType, explicit string) (string, error) {
 	baseURL := explicit
 	if baseURL == "" {
-		switch providerType {
-		case "anthropic":
-			baseURL = "https://api.anthropic.com"
-		case "openrouter":
-			baseURL = "https://openrouter.ai/api"
-		case "litellm", "local":
-			return "", fmt.Errorf("--base-url is required for provider type %q", providerType)
-		default:
+		profile, ok := (providers.Registry{}).Profile(providerType)
+		if !ok {
 			return "", fmt.Errorf("unsupported provider type %q", providerType)
+		}
+		baseURL = profile.DefaultBaseURL
+		if baseURL == "" {
+			return "", fmt.Errorf("--base-url is required for provider type %q", providerType)
 		}
 	}
 	parsed, err := url.ParseRequestURI(baseURL)
@@ -101,6 +92,10 @@ func resolveBaseURL(providerType, explicit string) (string, error) {
 		return "", fmt.Errorf("invalid --base-url %q: scheme must be http or https", baseURL)
 	}
 	return baseURL, nil
+}
+
+func resolveProviderCapabilities(providerType string) providers.Capabilities {
+	return providers.DefaultCapabilities(providerType)
 }
 
 func validateName(label, value string) error {
@@ -135,4 +130,72 @@ func validateCompatibilityStatus(value string) error {
 	default:
 		return fmt.Errorf("invalid compatibility status %q; expected full, degraded, chat-only, or blocked", value)
 	}
+}
+
+func validateProviderMode(value string) error {
+	switch value {
+	case "", providers.ModeFull, providers.ModeDegraded, providers.ModeChatOnly:
+		return nil
+	default:
+		return fmt.Errorf("invalid provider mode %q; expected full, degraded, or chat-only", value)
+	}
+}
+
+func providerWithCapabilities(name, providerType, baseURL, secretRef, mode string) store.Provider {
+	caps := resolveProviderCapabilities(providerType)
+	if mode != "" {
+		caps.Mode = mode
+		if mode == providers.ModeChatOnly {
+			caps.SupportsTools = false
+		}
+	}
+	return store.Provider{
+		Name:                   name,
+		Type:                   providerType,
+		BaseURL:                baseURL,
+		SecretRef:              secretRef,
+		Protocol:               caps.Protocol,
+		SupportsTools:          caps.SupportsTools,
+		SupportsStreaming:      caps.SupportsStreaming,
+		SupportsThinking:       caps.SupportsThinking,
+		SupportsModelDiscovery: caps.SupportsModelDiscovery,
+		SupportsCountTokens:    caps.SupportsCountTokens,
+		Mode:                   caps.Mode,
+	}
+}
+
+func providerCapabilitySummary(provider store.Provider) string {
+	caps := effectiveProviderCapabilities(provider)
+	enabled := make([]string, 0, 5)
+	if caps.SupportsTools {
+		enabled = append(enabled, "tools")
+	}
+	if caps.SupportsStreaming {
+		enabled = append(enabled, "streaming")
+	}
+	if caps.SupportsThinking {
+		enabled = append(enabled, "thinking")
+	}
+	if caps.SupportsModelDiscovery {
+		enabled = append(enabled, "models")
+	}
+	if caps.SupportsCountTokens {
+		enabled = append(enabled, "count-tokens")
+	}
+	if len(enabled) == 0 {
+		return "none"
+	}
+	return strings.Join(enabled, ",")
+}
+
+func effectiveProviderCapabilities(provider store.Provider) providers.Capabilities {
+	return providers.NormalizeCapabilities(provider.Type, providers.Capabilities{
+		Protocol:               provider.Protocol,
+		SupportsTools:          provider.SupportsTools,
+		SupportsStreaming:      provider.SupportsStreaming,
+		SupportsThinking:       provider.SupportsThinking,
+		SupportsModelDiscovery: provider.SupportsModelDiscovery,
+		SupportsCountTokens:    provider.SupportsCountTokens,
+		Mode:                   provider.Mode,
+	})
 }

@@ -61,7 +61,8 @@ func TestMigrateAndProviderModelRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetProvider(openrouter) error = %v", err)
 	}
-	if provider.BaseURL != "https://openrouter.ai/api/v1" || provider.SecretRef != "env:OPENROUTER_UPDATED" {
+	if provider.BaseURL != "https://openrouter.ai/api/v1" || provider.SecretRef != "env:OPENROUTER_UPDATED" ||
+		provider.Protocol != "openai-compatible" || !provider.SupportsModelDiscovery || provider.SupportsCountTokens {
 		t.Fatalf("GetProvider(openrouter) after update = %#v", provider)
 	}
 	if updateModelErr := s.UpdateModel(ctx, Model{Alias: "qwen", ProviderName: "openrouter", ProviderModel: "qwen/qwen3-coder-plus", Status: "full"}); updateModelErr != nil {
@@ -161,6 +162,249 @@ func TestMigrateAndProviderModelRoundTrip(t *testing.T) {
 	}
 	if modelExists {
 		t.Fatalf("ModelExists(qwen) after provider remove = true, want false")
+	}
+}
+
+func TestMigrateV2AddsProviderCapabilities(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, seedErr := db.ExecContext(ctx, `
+CREATE TABLE schema_version (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL
+);
+INSERT INTO schema_version (id, version) VALUES (1, 2);
+CREATE TABLE providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  secret_ref TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alias TEXT NOT NULL UNIQUE,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  provider_model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  gateway_url TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  model_alias TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE agents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL DEFAULT 0,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  model_alias TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE conformance_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alias TEXT NOT NULL,
+  status TEXT NOT NULL,
+  live_verified INTEGER NOT NULL DEFAULT 0,
+  details TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+INSERT INTO providers (name, type, base_url, secret_ref, created_at)
+VALUES
+  ('anthropic', 'anthropic', 'https://api.anthropic.com', 'env:ANTHROPIC_API_KEY', 'now'),
+  ('litellm', 'litellm', 'http://localhost:4000', '', 'now'),
+  ('unsupported', 'unsupported', 'http://localhost:5000', '', 'now');
+`); seedErr != nil {
+		t.Fatalf("seed v2 schema error = %v", seedErr)
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("seed db Close() error = %v", closeErr)
+	}
+
+	s, openErr := Open(ctx, dbPath)
+	if openErr != nil {
+		t.Fatalf("Open() error = %v", openErr)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("Close() error = %v", closeErr)
+		}
+	}()
+	if migrateErr := s.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("Migrate() error = %v", migrateErr)
+	}
+	version, err := s.SchemaVersion(ctx)
+	if err != nil {
+		t.Fatalf("SchemaVersion() error = %v", err)
+	}
+	if version != CurrentSchemaVersion {
+		t.Fatalf("SchemaVersion() = %d, want %d", version, CurrentSchemaVersion)
+	}
+	anthropic, err := s.GetProvider(ctx, "anthropic")
+	if err != nil {
+		t.Fatalf("GetProvider(anthropic) error = %v", err)
+	}
+	if anthropic.Protocol != "anthropic-compatible" || anthropic.Mode != "full" || !anthropic.SupportsCountTokens {
+		t.Fatalf("migrated anthropic provider = %#v", anthropic)
+	}
+	litellm, err := s.GetProvider(ctx, "litellm")
+	if err != nil {
+		t.Fatalf("GetProvider(litellm) error = %v", err)
+	}
+	if litellm.Protocol != "openai-compatible" || litellm.Mode != "degraded" || litellm.SupportsCountTokens || !litellm.SupportsModelDiscovery {
+		t.Fatalf("migrated litellm provider = %#v", litellm)
+	}
+	unsupported, err := s.GetProvider(ctx, "unsupported")
+	if err != nil {
+		t.Fatalf("GetProvider(unsupported) error = %v", err)
+	}
+	if unsupported.Protocol != "" || unsupported.SupportsTools || unsupported.Mode != "degraded" {
+		t.Fatalf("migrated unsupported provider = %#v", unsupported)
+	}
+}
+
+func TestMigrateV2ProviderCapabilitiesCanResumeAfterPartialColumnAdds(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, seedErr := db.ExecContext(ctx, `
+CREATE TABLE schema_version (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL
+);
+INSERT INTO schema_version (id, version) VALUES (1, 2);
+CREATE TABLE providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  secret_ref TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  protocol TEXT NOT NULL DEFAULT '',
+  supports_tools INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO providers (name, type, base_url, secret_ref, created_at)
+VALUES ('zai', 'zai', 'https://api.z.ai/api/anthropic', 'env:ZAI_API_KEY', 'now');
+`); seedErr != nil {
+		t.Fatalf("seed partial v2 schema error = %v", seedErr)
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("seed db Close() error = %v", closeErr)
+	}
+
+	s, openErr := Open(ctx, dbPath)
+	if openErr != nil {
+		t.Fatalf("Open() error = %v", openErr)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("Close() error = %v", closeErr)
+		}
+	}()
+	if migrateErr := s.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("Migrate() error = %v", migrateErr)
+	}
+	provider, err := s.GetProvider(ctx, "zai")
+	if err != nil {
+		t.Fatalf("GetProvider(zai) error = %v", err)
+	}
+	if provider.Protocol != "anthropic-compatible" || provider.Mode != "full" || !provider.SupportsCountTokens {
+		t.Fatalf("migrated partially-updated provider = %#v", provider)
+	}
+}
+
+func TestMigrateV1AddsProviderCapabilities(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, seedErr := db.ExecContext(ctx, `
+CREATE TABLE schema_version (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL
+);
+INSERT INTO schema_version (id, version) VALUES (1, 1);
+CREATE TABLE providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  secret_ref TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alias TEXT NOT NULL UNIQUE,
+  provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+  provider_model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+INSERT INTO providers (name, type, base_url, secret_ref, created_at)
+VALUES ('litellm', 'litellm', 'http://localhost:4000', '', 'now');
+INSERT INTO models (alias, provider_id, provider_model, status, created_at)
+SELECT 'qwen', id, 'qwen/qwen3-coder', 'degraded', 'now'
+FROM providers
+WHERE name = 'litellm';
+`); seedErr != nil {
+		t.Fatalf("seed v1 schema error = %v", seedErr)
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("seed db Close() error = %v", closeErr)
+	}
+
+	s, openErr := Open(ctx, dbPath)
+	if openErr != nil {
+		t.Fatalf("Open() error = %v", openErr)
+	}
+	defer func() {
+		if closeErr := s.Close(); closeErr != nil {
+			t.Fatalf("Close() error = %v", closeErr)
+		}
+	}()
+	if migrateErr := s.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("Migrate() error = %v", migrateErr)
+	}
+	version, err := s.SchemaVersion(ctx)
+	if err != nil {
+		t.Fatalf("SchemaVersion() error = %v", err)
+	}
+	if version != CurrentSchemaVersion {
+		t.Fatalf("SchemaVersion() = %d, want %d", version, CurrentSchemaVersion)
+	}
+	provider, err := s.GetProvider(ctx, "litellm")
+	if err != nil {
+		t.Fatalf("GetProvider(litellm) error = %v", err)
+	}
+	if provider.Protocol != "openai-compatible" || provider.Mode != "degraded" || !provider.SupportsModelDiscovery {
+		t.Fatalf("migrated litellm provider = %#v", provider)
+	}
+	model, err := s.GetModel(ctx, "qwen")
+	if err != nil {
+		t.Fatalf("GetModel(qwen) error = %v", err)
+	}
+	if model.ProviderName != "litellm" || model.ProviderModel != "qwen/qwen3-coder" {
+		t.Fatalf("migrated model = %#v", model)
 	}
 }
 

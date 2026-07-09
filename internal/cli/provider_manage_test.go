@@ -164,6 +164,110 @@ func TestProviderUpdateTypeRequiresExplicitAuthDecision(t *testing.T) {
 	}
 }
 
+func TestProviderUpdateProtocolOnlyPreservesExistingType(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "foo", "--type", "litellm", "--base-url", "http://localhost:4000", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "update", "foo", "--protocol", "openai-compatible")
+	if err != nil {
+		t.Fatalf("provider update error = %v", err)
+	}
+	if !strings.Contains(out, `Provider "foo" updated (litellm, protocol=openai-compatible, mode=degraded`) {
+		t.Fatalf("provider update output = %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "foo\tlitellm\tprotocol=openai-compatible\tmode=degraded") {
+		t.Fatalf("provider list output = %q", out)
+	}
+}
+
+func TestProviderUpdateTypeRecomputesOldDefaultMode(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "update", "anthropic", "--type", "litellm", "--base-url", "http://localhost:4000", "--no-api-key")
+	if err != nil {
+		t.Fatalf("provider update error = %v", err)
+	}
+	if !strings.Contains(out, "mode=degraded") {
+		t.Fatalf("provider update output = %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "anthropic\tlitellm\tprotocol=openai-compatible\tmode=degraded\tcaps=tools,streaming,thinking,models") {
+		t.Fatalf("provider list output = %q", out)
+	}
+}
+
+func TestProviderUpdateTypePreservesExistingChatOnlyMode(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", "http://localhost:4000", "--mode", "chat-only", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "update", "litellm", "--type", "anthropic-compatible", "--base-url", "http://localhost:5000", "--no-api-key")
+	if err != nil {
+		t.Fatalf("provider update error = %v", err)
+	}
+	if !strings.Contains(out, "mode=chat-only") {
+		t.Fatalf("provider update output = %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "litellm\tanthropic-compatible\tprotocol=anthropic-compatible\tmode=chat-only\tcaps=streaming,thinking") {
+		t.Fatalf("provider list output = %q", out)
+	}
+}
+
+func TestProviderUpdateInteractiveTypeRecomputesOldDefaultMode(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	input := strings.Join([]string{
+		"",                      // default provider type from --type
+		"http://localhost:4000", // base URL
+		"",                      // default auth mode from --no-api-key
+	}, "\n") + "\n"
+
+	_, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "update", "anthropic", "--interactive", "--type", "litellm", "--no-api-key")
+	if err != nil {
+		t.Fatalf("interactive provider update error = %v\nstderr:\n%s", err, errOut)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "anthropic\tlitellm\tprotocol=openai-compatible\tmode=degraded\tcaps=tools,streaming,thinking,models") {
+		t.Fatalf("provider list output = %q", out)
+	}
+}
+
 func TestProviderUpdateInvalidStaticFlagsFailBeforeDatabaseOpen(t *testing.T) {
 	t.Parallel()
 
@@ -220,6 +324,35 @@ func TestProviderUpdateInteractive(t *testing.T) {
 	}
 	if !strings.Contains(out, "http://localhost:5000") {
 		t.Fatalf("interactive provider update output = %q", out)
+	}
+}
+
+func TestProviderUpdateInteractivePreservesExistingChatOnlyMode(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", "http://localhost:4000", "--mode", "chat-only", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	input := strings.Join([]string{
+		"",                      // default provider type from --type
+		"http://localhost:5000", // base URL
+		"",                      // default auth mode from --no-api-key
+	}, "\n") + "\n"
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "update", "litellm", "--interactive", "--type", "anthropic-compatible", "--no-api-key")
+	if err != nil {
+		t.Fatalf("interactive provider update error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "litellm\tanthropic-compatible\tprotocol=anthropic-compatible\tmode=chat-only\tcaps=streaming,thinking") {
+		t.Fatalf("provider list output = %q", out)
 	}
 }
 

@@ -17,7 +17,7 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	entries := make([]gatewayModelEntry, 0)
 	seen := map[string]struct{}{}
 	anthropicEntries, err := h.discoverAnthropicModels(r.Context(), r.Header)
-	if err != nil && !errors.Is(err, errNoAnthropicPassThroughProvider) {
+	if err != nil && !errors.Is(err, errNoAnthropicPassThroughProvider) && !errors.Is(err, errAnthropicModelDiscoveryUnsupported) {
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("discovering Anthropic models: %v", err))
 		return
 	}
@@ -37,10 +37,7 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		display := fmt.Sprintf("CCR %s (%s)", model.Alias, model.ProviderModel)
-		appendGatewayModelEntry(&entries, seen, gatewayModelEntry{ID: model.Alias, DisplayName: display})
-		if shimID := discoveryIDForAlias(model.Alias); shimID != model.Alias {
-			appendGatewayModelEntry(&entries, seen, gatewayModelEntry{ID: shimID, DisplayName: display})
-		}
+		appendGatewayModelEntry(&entries, seen, gatewayModelEntry{ID: discoveryIDForAlias(model.Alias), DisplayName: display})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": entries})
 }
@@ -89,6 +86,9 @@ func (h *handler) discoverAnthropicModels(ctx context.Context, incoming http.Hea
 	provider, err := h.defaultAnthropicProvider(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if !effectiveProviderCapabilities(provider).SupportsModelDiscovery {
+		return nil, errAnthropicModelDiscoveryUnsupported
 	}
 	endpoint, err := providers.ModelsEndpoint(provider.BaseURL)
 	if err != nil {
