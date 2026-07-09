@@ -650,6 +650,27 @@ func TestGatewayTranslatesLegacyFunctionCallResponse(t *testing.T) {
 	}
 }
 
+func TestOpenAIToolArgumentsRepairsTruncatedJSONObject(t *testing.T) {
+	got, ok := openAIToolArguments(`{"description":"latest news","prompt":"find latest chatgpt news","subagent_type":"general-purpose"`).(map[string]any)
+	if !ok {
+		t.Fatalf("openAIToolArguments() = %#v, want object", got)
+	}
+	if got["description"] != "latest news" || got["prompt"] != "find latest chatgpt news" || got["subagent_type"] != "general-purpose" {
+		t.Fatalf("openAIToolArguments() = %#v", got)
+	}
+}
+
+func TestOpenAIToolArgumentsKeepsUnsafeMalformedJSONVisible(t *testing.T) {
+	raw := `{"prompt":"unterminated}`
+	got, ok := openAIToolArguments(raw).(map[string]any)
+	if !ok {
+		t.Fatalf("openAIToolArguments() = %#v, want object", got)
+	}
+	if got["arguments"] != raw {
+		t.Fatalf("openAIToolArguments() = %#v, want raw arguments fallback", got)
+	}
+}
+
 func TestGatewayRejectsUnsupportedAnthropicFieldsOnOpenAIPath(t *testing.T) {
 	ctx := context.Background()
 	called := false
