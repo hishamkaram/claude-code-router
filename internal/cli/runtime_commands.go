@@ -175,11 +175,23 @@ func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, pe
 }
 
 func launchClaudeEnv(gatewayURL, token, modelAlias, modelID string, disableTools bool, authMode string) []string {
-	env := make([]string, 0, 8)
+	env := make([]string, 0, 10)
 	env = append(env,
 		"ANTHROPIC_BASE_URL="+gatewayURL,
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+		// This enables auto mode when the user selects it through --permission-mode
+		// or their Claude Code settings. It does not select auto mode itself.
+		// Third-party gateways require the explicit opt-in before they can classify
+		// tool actions.
+		"CLAUDE_CODE_ENABLE_AUTO_MODE=1",
 	)
+	if disableTools {
+		env = append(env, "ENABLE_TOOL_SEARCH=")
+	} else {
+		// Claude Code disables deferred MCP tool search behind non-first-party gateways
+		// unless this is enabled. CCR translates the resulting tool_reference blocks.
+		env = append(env, "ENABLE_TOOL_SEARCH=true")
+	}
 	if authMode == launchAuthModeGatewayToken {
 		env = append(env,
 			"CLAUDE_CODE_USE_GATEWAY=1",

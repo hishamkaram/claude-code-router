@@ -450,7 +450,8 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 		launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
 		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") ||
 		launcher.hasEnv("CLAUDE_CODE_USE_GATEWAY=1") || !launcher.hasEnv("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1") ||
-		!launcher.hasEnv("ANTHROPIC_CUSTOM_MODEL_OPTION=claude-ccr-gpt") {
+		!launcher.hasEnv("ANTHROPIC_CUSTOM_MODEL_OPTION=claude-ccr-gpt") ||
+		!launcher.hasEnv("ENABLE_TOOL_SEARCH=true") || !launcher.hasEnv("CLAUDE_CODE_ENABLE_AUTO_MODE=1") {
 		t.Fatalf("launch env = %#v", launcher.env)
 	}
 	assertPreserveAuthEnv(t, launcher)
@@ -592,6 +593,12 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	}
 	if !launcher.hasEnv("CLAUDE_CODE_USE_GATEWAY=1") {
 		t.Fatalf("gateway-token launch env missing CLAUDE_CODE_USE_GATEWAY: %#v", launcher.env)
+	}
+	if !launcher.hasEnv("ENABLE_TOOL_SEARCH=true") {
+		t.Fatalf("gateway-token launch env missing ENABLE_TOOL_SEARCH: %#v", launcher.env)
+	}
+	if !launcher.hasEnv("CLAUDE_CODE_ENABLE_AUTO_MODE=1") {
+		t.Fatalf("gateway-token launch env missing auto mode capability opt-in: %#v", launcher.env)
 	}
 	if launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=") {
 		t.Fatalf("gateway-token launch env should not set custom headers: %#v", launcher.env)
@@ -854,7 +861,7 @@ func TestLaunchChatOnlyAliasDisablesClaudeTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
-	if !launcher.hasArg("--tools") || !launcher.hasArg("") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") {
+	if !launcher.hasArg("--tools") || !launcher.hasArg("") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") || !launcher.hasEnv("ENABLE_TOOL_SEARCH=") {
 		t.Fatalf("chat-only launch args=%#v env=%#v", launcher.args, launcher.env)
 	}
 	if !strings.Contains(out, "Selected route does not support tools; Claude Code tools are disabled for this launch.") {
@@ -881,7 +888,7 @@ func TestLaunchChatOnlyProviderDisablesClaudeTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
-	if !launcher.hasArg("--tools") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") {
+	if !launcher.hasArg("--tools") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") || !launcher.hasEnv("ENABLE_TOOL_SEARCH=") {
 		t.Fatalf("chat-only provider launch args=%#v env=%#v", launcher.args, launcher.env)
 	}
 	if !strings.Contains(out, "Provider protocol=openai-compatible mode=chat-only token-count=provider") || !strings.Contains(out, "tools are disabled") {
