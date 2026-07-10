@@ -22,23 +22,53 @@ import (
 )
 
 func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
-	var modelAlias string
-	var printMode bool
-	var authMode string
-	var permissionMode string
 	cmd := &cobra.Command{
-		Use:   "launch",
+		Use:   "launch [Claude Code options and prompt]",
 		Short: "Launch Claude Code through the local router",
-		Args:  cobra.NoArgs,
+		Long: `Launch Claude Code through the local router.
+
+CCR owns --model, --auth-mode, --permission-mode, --print/-p, and --db. All
+other options and positional arguments are passed to Claude Code unchanged
+unless they would override CCR's selected model, generated model allowlist, or
+tool-safety restrictions. For example ccr launch --chrome starts Claude Code
+with its Chrome integration.
+
+Fallback and detached background modes are rejected because they cannot preserve
+CCR's selected route and local gateway ownership.
+
+Use ccr launch --help for router-specific help. To ask Claude Code for its own
+help, use ccr launch -- --help.`,
+		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLaunch(ctx, cmd, opts, deps, modelAlias, printMode, authMode, permissionMode)
+			invocation, err := parseLaunchInvocation(args)
+			if err != nil {
+				return err
+			}
+			if invocation.help {
+				return cmd.Help()
+			}
+			if metadataArgs, ok := invocation.claudeMetadataArgs(); ok {
+				return runClaudeMetadata(ctx, cmd, deps, metadataArgs)
+			}
+			if invocation.dbPathSet {
+				opts.dbPath = invocation.dbPath
+			}
+			return runLaunch(ctx, cmd, opts, deps, invocation.modelAlias, invocation.printMode, invocation.authMode, invocation.permissionMode, invocation.claudeArgs)
 		},
 	}
-	cmd.Flags().StringVar(&modelAlias, "model", "", "Optional model alias to validate before launch")
-	cmd.Flags().StringVar(&authMode, "auth-mode", launchAuthModePreserve, "Gateway auth mode: preserve or gateway-token")
-	cmd.Flags().StringVar(&permissionMode, "permission-mode", "", "Optional Claude Code permission mode to pass through")
-	cmd.Flags().BoolVarP(&printMode, "print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
+	cmd.Flags().String("model", "", "Optional model alias to validate before launch")
+	cmd.Flags().String("auth-mode", launchAuthModePreserve, "Gateway auth mode: preserve or gateway-token")
+	cmd.Flags().String("permission-mode", "", "Optional Claude Code permission mode to pass through")
+	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
 	return cmd
+}
+
+func runClaudeMetadata(ctx context.Context, cmd *cobra.Command, deps Dependencies, args []string) error {
+	process, err := deps.Launcher.Start(ctx, args, nil, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+	if err != nil {
+		return fmt.Errorf("running Claude Code metadata command: %w", err)
+	}
+	return process.Wait()
 }
 
 const (
@@ -46,8 +76,11 @@ const (
 	launchAuthModeGatewayToken = "gateway-token"
 )
 
-func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, modelAlias string, printMode bool, authMode, permissionMode string) error {
+func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, modelAlias string, printMode bool, authMode, permissionMode string, passthroughArgs []string) error {
 	if err := validateLaunchInputs(modelAlias, authMode, permissionMode); err != nil {
+		return err
+	}
+	if err := validateLaunchPassthroughArgs(passthroughArgs); err != nil {
 		return err
 	}
 
@@ -68,6 +101,14 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	if err != nil {
 		return err
 	}
+	claudeModelID := launchClaudeModelID(resolvedModelAlias)
+	claudeSettings, err := launchClaudeSettingsArg(ctx, s, claudeModelID != "")
+	if err != nil {
+		return err
+	}
+	if passthroughErr := validateDynamicLaunchPassthroughArgs(passthroughArgs, disableTools, claudeSettings != ""); passthroughErr != nil {
+		return passthroughErr
+	}
 
 	token, err := gateway.NewToken()
 	if err != nil {
@@ -84,12 +125,7 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	}
 	defer shutdownGateway(ctx, server)
 
-	claudeModelID := launchClaudeModelID(resolvedModelAlias)
-	claudeSettings, err := launchClaudeSettingsArg(ctx, s, claudeModelID != "")
-	if err != nil {
-		return err
-	}
-	claudeArgs := launchClaudeArgs(claudeModelID, printMode, disableTools, claudeSettings, permissionMode)
+	claudeArgs := launchClaudeArgs(claudeModelID, printMode, disableTools, claudeSettings, permissionMode, passthroughArgs)
 	env := launchClaudeEnv(server.URL(), token, resolvedModelAlias, claudeModelID, disableTools, authMode)
 	outputLock := &sync.Mutex{}
 	out := launchProcessWriter(cmd.OutOrStdout(), outputLock)
@@ -152,26 +188,6 @@ func validateClaudePermissionMode(mode string) error {
 	default:
 		return fmt.Errorf("invalid Claude Code permission mode %q", mode)
 	}
-}
-
-func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, permissionMode string) []string {
-	args := []string{}
-	if printMode {
-		args = append(args, "--print")
-	}
-	if permissionMode != "" {
-		args = append(args, "--permission-mode", permissionMode)
-	}
-	if disableTools {
-		args = append(args, "--tools", "")
-	}
-	if settings != "" {
-		args = append(args, "--settings", settings)
-	}
-	if modelID != "" {
-		args = append(args, "--model", modelID)
-	}
-	return args
 }
 
 func launchClaudeEnv(gatewayURL, token, modelAlias, modelID string, disableTools bool, authMode string) []string {

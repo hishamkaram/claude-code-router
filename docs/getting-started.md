@@ -51,6 +51,22 @@ Start on a known alias:
 ccr launch --model coding-model
 ```
 
+CCR passes ordinary Claude Code options and prompts through unchanged. For
+example, enable Claude in Chrome while starting on a CCR model:
+
+```bash
+ccr launch --model coding-model --chrome
+```
+
+CCR reserves `--model`, `--auth-mode`, `--permission-mode`, `--print`/`-p`, and
+`--db`. Use `ccr launch --help` for CCR help, or `ccr launch -- --help` for
+underlying Claude Code help without starting CCR. CCR also rejects options that
+would override its selected model, generated model allowlist, or tool-safety
+restrictions. It also rejects `--fallback-model` and `--bg`/`--background`,
+which would bypass the selected route or outlive CCR's local gateway.
+For a tool-disabled route, CCR also rejects `--tools`, `--mcp-config`,
+`--plugin-dir`, and `--plugin-url`.
+
 If exactly one routable alias exists, `ccr launch` selects it automatically.
 With zero or multiple aliases, Claude Code starts on its configured default model
 until you select another option.
