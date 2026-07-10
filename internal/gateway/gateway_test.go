@@ -721,7 +721,7 @@ func TestGatewayRejectsUnsupportedAnthropicFieldsOnOpenAIPath(t *testing.T) {
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","temperature":0.2,"messages":[{"role":"user","content":"hello"}]}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","top_p":0.2,"messages":[{"role":"user","content":"hello"}]}`))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}

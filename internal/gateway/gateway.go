@@ -266,7 +266,7 @@ func (h *handler) validateOpenAIMessageRequest(req *anthropicRequest) *requestVa
 
 func openAIPathSupportsAnthropicField(field string) bool {
 	switch field {
-	case "model", "system", "messages", "max_tokens", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config", "context_management":
+	case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config", "context_management":
 		return true
 	default:
 		return false

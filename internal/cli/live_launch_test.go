@@ -355,8 +355,11 @@ type liveOpenAIChatMessage struct {
 }
 
 type liveOpenAIChatPayload struct {
-	Model string `json:"model"`
-	Tools []struct {
+	Model       string   `json:"model"`
+	MaxTokens   int      `json:"max_tokens"`
+	Temperature *float64 `json:"temperature"`
+	Stop        []string `json:"stop"`
+	Tools       []struct {
 		Function struct {
 			Name string `json:"name"`
 		} `json:"function"`
@@ -417,6 +420,9 @@ func (s *liveWorkflowProviderState) handle(t *testing.T, w http.ResponseWriter, 
 	case "/v1/models":
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
+	case "/v1/messages/count_tokens":
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"input_tokens":3}`)
 	case "/v1/chat/completions":
 		s.handleChat(t, w, r)
 	default:
@@ -523,14 +529,14 @@ func liveWorkflowScript() string {
   phases: [{ title: 'Run' }],
 }
 phase('Run')
-const result = await agent('Return exactly CCR_LIVE_WORKFLOW_CHILD_OK and nothing else.', {label: 'sentinel', phase: 'Run'})
+const result = await agent('Find latest ChatGPT news using web research, then return exactly CCR_LIVE_WORKFLOW_CHILD_OK.', {label: 'investigating-researcher', phase: 'Run'})
 return result
 `
 }
 
 func isWorkflowSubagentRequest(messages []liveOpenAIChatMessage) bool {
 	return openAIMessagesContain(messages, "subagent spawned by a workflow orchestration script") &&
-		openAIMessagesContain(messages, "Return exactly CCR_LIVE_WORKFLOW_CHILD_OK")
+		openAIMessagesContain(messages, "Find latest ChatGPT news")
 }
 
 func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.ResponseWriter, messages []liveOpenAIChatMessage) {
