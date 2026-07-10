@@ -73,6 +73,12 @@ ccr model list
 ccr launch --model <alias>
 ```
 
+Pass standard Claude Code options directly after `launch`, for example:
+
+```bash
+ccr launch --model <alias> --chrome
+```
+
 Within Claude Code, open `/model` and select a CCR model option to switch future
 work in that session. Your organization may restrict which Claude Code model
 options are available; CCR reports that limitation instead of bypassing it.

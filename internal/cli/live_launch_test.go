@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +18,46 @@ import (
 
 	"github.com/hishamkaram/claude-code-router/internal/liveclaude"
 )
+
+func TestLiveLaunchForwardsChromeOption(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if _, err := liveclaude.Check(ctx); err != nil {
+		t.Skipf("live Claude Code unavailable: %v", err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--chrome", "--version")
+	if err != nil {
+		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !strings.Contains(out+errOut, "(Claude Code)") {
+		t.Fatalf("launch output missing Claude Code version:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+}
+
+func TestLiveLaunchMetadataCommandSkipsRouter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	if _, err := liveclaude.Check(ctx); err != nil {
+		t.Skipf("live Claude Code unavailable: %v", err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--", "--version")
+	if err != nil {
+		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !strings.Contains(out+errOut, "(Claude Code)") {
+		t.Fatalf("launch output missing Claude Code version:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if strings.Contains(out+errOut, "Claude Code launched through") {
+		t.Fatalf("launch output contains CCR summary:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("database exists after Claude metadata command: stat err=%v", statErr)
+	}
+}
 
 func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -28,6 +69,7 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 	chatCalled := false
 	modelsCalled := false
 	toolsSeen := false
+	promptSeen := false
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
@@ -37,8 +79,9 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 		case "/v1/chat/completions":
 			chatCalled = true
 			var payload struct {
-				Model string `json:"model"`
-				Tools []any  `json:"tools"`
+				Model    string                  `json:"model"`
+				Tools    []any                   `json:"tools"`
+				Messages []liveOpenAIChatMessage `json:"messages"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Errorf("provider decode error = %v", err)
@@ -51,6 +94,7 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 				return
 			}
 			toolsSeen = len(payload.Tools) > 0
+			promptSeen = openAIMessagesContain(payload.Messages, "--dangerously-skip-permissions explain this option")
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"id":"chatcmpl-live-smoke","choices":[{"message":{"content":"live-smoke-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
 		default:
@@ -69,7 +113,7 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 		}
 	}
 
-	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--", "--dangerously-skip-permissions explain this option")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
@@ -81,6 +125,9 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 	}
 	if !toolsSeen {
 		t.Fatalf("fake OpenAI-compatible chat endpoint did not receive Claude Code tools\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !promptSeen {
+		t.Fatalf("fake OpenAI-compatible chat endpoint did not receive dash-prefixed prompt text\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(out, "live-smoke-ok") {
 		t.Fatalf("launch output missing routed response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
