@@ -81,6 +81,10 @@ func ChatCompletionsEndpoint(baseURL string) (string, error) {
 	return endpointWithPath(baseURL, "chat/completions")
 }
 
+func MessagesCountTokensEndpoint(baseURL string) (string, error) {
+	return endpointWithPath(baseURL, "messages/count_tokens")
+}
+
 func endpointWithPath(baseURL, resource string) (string, error) {
 	cleanBase := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.ParseRequestURI(cleanBase)

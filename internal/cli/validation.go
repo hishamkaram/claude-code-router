@@ -173,7 +173,7 @@ func providerWithCapabilities(name, providerType, baseURL, secretRef, mode strin
 
 func providerCapabilitySummary(provider store.Provider) string {
 	caps := effectiveProviderCapabilities(provider)
-	enabled := make([]string, 0, 5)
+	enabled := make([]string, 0, 6)
 	if caps.SupportsTools {
 		enabled = append(enabled, "tools")
 	}
@@ -186,13 +186,16 @@ func providerCapabilitySummary(provider store.Provider) string {
 	if caps.SupportsModelDiscovery {
 		enabled = append(enabled, "models")
 	}
-	if caps.SupportsCountTokens {
-		enabled = append(enabled, "count-tokens")
-	}
-	if len(enabled) == 0 {
-		return "none"
-	}
+	enabled = append(enabled, "token-count="+providerTokenCountMode(provider))
 	return strings.Join(enabled, ",")
+}
+
+func providerTokenCountMode(provider store.Provider) string {
+	caps := effectiveProviderCapabilities(provider)
+	if caps.SupportsCountTokens {
+		return "provider"
+	}
+	return "estimated"
 }
 
 func effectiveProviderCapabilities(provider store.Provider) providers.Capabilities {

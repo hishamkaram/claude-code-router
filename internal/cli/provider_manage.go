@@ -97,7 +97,7 @@ func runProviderUpdate(ctx context.Context, cmd *cobra.Command, opts *options, d
 	if err := s.UpdateProvider(ctx, updated); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, protocol=%s, mode=%s, %s, secret=%s)\n", name, updated.Type, updated.Protocol, updated.Mode, updated.BaseURL, secret.RedactRef(updated.SecretRef))
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, protocol=%s, mode=%s, token-count=%s, %s, secret=%s)\n", name, updated.Type, updated.Protocol, updated.Mode, providerTokenCountMode(updated), updated.BaseURL, secret.RedactRef(updated.SecretRef))
 	return nil
 }
 

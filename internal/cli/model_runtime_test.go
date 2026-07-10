@@ -884,8 +884,11 @@ func TestLaunchChatOnlyProviderDisablesClaudeTools(t *testing.T) {
 	if !launcher.hasArg("--tools") || !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") {
 		t.Fatalf("chat-only provider launch args=%#v env=%#v", launcher.args, launcher.env)
 	}
-	if !strings.Contains(out, "Provider protocol=openai-compatible mode=chat-only") || !strings.Contains(out, "tools are disabled") {
+	if !strings.Contains(out, "Provider protocol=openai-compatible mode=chat-only token-count=provider") || !strings.Contains(out, "tools are disabled") {
 		t.Fatalf("launch output missing provider degradation:\n%s", out)
+	}
+	if strings.Contains(out, "count_tokens requests will be rejected") {
+		t.Fatalf("launch output contains stale count_tokens rejection warning:\n%s", out)
 	}
 }
 

@@ -404,12 +404,9 @@ func writeLaunchCompatibilitySummary(ctx context.Context, out io.Writer, s *stor
 		return
 	}
 	caps := effectiveProviderCapabilities(provider)
-	fmt.Fprintf(out, "Provider protocol=%s mode=%s capabilities=%s.\n", caps.Protocol, caps.Mode, providerCapabilitySummary(provider))
+	fmt.Fprintf(out, "Provider protocol=%s mode=%s token-count=%s capabilities=%s.\n", caps.Protocol, caps.Mode, providerTokenCountMode(provider), providerCapabilitySummary(provider))
 	if !caps.SupportsModelDiscovery {
 		fmt.Fprintln(out, "Provider model discovery is unavailable; only configured CCR aliases are exposed.")
-	}
-	if !caps.SupportsCountTokens {
-		fmt.Fprintln(out, "Provider count_tokens support is unavailable; gateway count_tokens requests will be rejected visibly.")
 	}
 }
 
