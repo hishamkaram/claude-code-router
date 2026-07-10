@@ -214,7 +214,10 @@ func TestProviderAddZAIAndGenericProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status error = %v", err)
 	}
-	for _, want := range []string{"Provider zai: type=zai protocol=anthropic-compatible mode=full", "Provider glm: type=anthropic-compatible protocol=anthropic-compatible mode=degraded"} {
+	for _, want := range []string{
+		"Provider zai: type=zai protocol=anthropic-compatible mode=full token-count=provider",
+		"Provider glm: type=anthropic-compatible protocol=anthropic-compatible mode=degraded token-count=estimated",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output missing %q:\n%s", want, out)
 		}
@@ -273,7 +276,7 @@ func TestProviderAddInteractiveProtocolDefaultForNonTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
-	for _, want := range []string{`Provider "glm" added`, "protocol=anthropic-compatible", "mode=degraded"} {
+	for _, want := range []string{`Provider "glm" added`, "protocol=anthropic-compatible", "mode=degraded", "token-count=estimated"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("interactive provider add output missing %q:\n%s", want, out)
 		}
@@ -786,11 +789,14 @@ func TestDoctorUsesDatabaseAndReportsClaudeCode(t *testing.T) {
 	t.Parallel()
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", "http://localhost:4000", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
 	out, _, err := runCommand(t, "--db", dbPath, "doctor")
 	if err != nil {
 		t.Fatalf("doctor error = %v", err)
 	}
-	for _, want := range []string{"SQLite: ok", "Secrets: ok", "Claude Code:"} {
+	for _, want := range []string{"SQLite: ok", "Secrets: ok", "Claude Code:", "Providers: 1", "Provider litellm: protocol=openai-compatible mode=degraded token-count=provider"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("doctor output missing %q:\n%s", want, out)
 		}

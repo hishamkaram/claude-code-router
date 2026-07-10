@@ -176,7 +176,7 @@ func TestGatewayFirstPartyClaudeRouteIgnoresConfiguredAnthropicProviders(t *test
 	}
 }
 
-func TestGatewayRejectsCountTokensWhenProviderCapabilityMissing(t *testing.T) {
+func TestGatewayEstimatesCountTokensWhenProviderCapabilityMissing(t *testing.T) {
 	ctx := context.Background()
 	called := false
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +193,8 @@ func TestGatewayRejectsCountTokensWhenProviderCapabilityMissing(t *testing.T) {
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages/count_tokens", strings.NewReader(`{"model":"glm","messages":[{"role":"user","content":"hello"}]}`))
+	body := `{"model":"glm","messages":[{"role":"user","content":"hello"}]}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages/count_tokens", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
@@ -203,10 +204,11 @@ func TestGatewayRejectsCountTokensWhenProviderCapabilityMissing(t *testing.T) {
 		t.Fatalf("gateway count_tokens request error = %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("gateway status = %d, want 501", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
 	}
+	assertCountTokensResponse(t, resp, len(body), tokenCountModeEstimated, "")
 	if called {
-		t.Fatalf("provider was called for unsupported count_tokens")
+		t.Fatalf("provider was called for estimated count_tokens")
 	}
 }

@@ -229,36 +229,6 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toAnthropicResponse(route.responseModel, resp, finishReason))
 }
 
-func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
-	req, body, ok := decodeAnthropicRequest(w, r)
-	if !ok {
-		return
-	}
-	route, validationErr := h.selectRoute(r.Context(), req.Model)
-	if validationErr != nil {
-		writeAnthropicError(w, validationErr.status, validationErr.message)
-		return
-	}
-	if !route.capabilities.SupportsCountTokens {
-		writeAnthropicError(w, http.StatusNotImplemented, fmt.Sprintf("token counting is not supported for model %q with provider protocol %q", req.Model, route.capabilities.Protocol))
-		return
-	}
-	if route.kind != routeAnthropic {
-		writeAnthropicError(w, http.StatusNotImplemented, fmt.Sprintf("token counting is not supported for OpenAI-compatible model %q", req.Model))
-		return
-	}
-	passBody := body
-	if route.model.Alias != "" && route.model.ProviderModel != "" {
-		rewritten, err := rewriteAnthropicRequestModel(body, route.model.ProviderModel)
-		if err != nil {
-			writeAnthropicError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		passBody = rewritten
-	}
-	h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
-}
-
 type requestValidationError struct {
 	status  int
 	message string

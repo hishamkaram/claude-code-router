@@ -28,7 +28,15 @@ func providerWithMetadataDefaults(provider Provider) Provider {
 		provider.SupportsStreaming = true
 		provider.SupportsThinking = true
 		provider.Mode = "degraded"
-	case "litellm", "local", "openrouter", "zai-openai", "openai-compatible":
+	case "litellm":
+		provider.Protocol = "openai-compatible"
+		provider.SupportsTools = true
+		provider.SupportsStreaming = true
+		provider.SupportsThinking = true
+		provider.SupportsModelDiscovery = true
+		provider.SupportsCountTokens = true
+		provider.Mode = "degraded"
+	case "local", "openrouter", "zai-openai", "openai-compatible":
 		provider.Protocol = "openai-compatible"
 		provider.SupportsTools = true
 		provider.SupportsStreaming = true

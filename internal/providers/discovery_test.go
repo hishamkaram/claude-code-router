@@ -86,6 +86,18 @@ func TestChatCompletionsEndpointKeepsVersionedBaseURL(t *testing.T) {
 	}
 }
 
+func TestMessagesCountTokensEndpointNormalizesBaseURL(t *testing.T) {
+	t.Parallel()
+
+	got, err := MessagesCountTokensEndpoint("http://localhost:4000/v1/")
+	if err != nil {
+		t.Fatalf("MessagesCountTokensEndpoint() error = %v", err)
+	}
+	if got != "http://localhost:4000/v1/messages/count_tokens" {
+		t.Fatalf("MessagesCountTokensEndpoint() = %q", got)
+	}
+}
+
 func TestRegistryProfilesIncludeZAIProtocols(t *testing.T) {
 	t.Parallel()
 
@@ -103,6 +115,13 @@ func TestRegistryProfilesIncludeZAIProtocols(t *testing.T) {
 	}
 	if zaiOpenAI.Protocol != ProtocolOpenAICompatible || zaiOpenAI.DefaultBaseURL != "https://api.z.ai/api/coding/paas/v4" || !zaiOpenAI.Capabilities.SupportsModelDiscovery {
 		t.Fatalf("zai-openai profile = %#v", zaiOpenAI)
+	}
+	litellm, ok := registry.Profile("litellm")
+	if !ok {
+		t.Fatalf("litellm profile missing")
+	}
+	if litellm.Protocol != ProtocolOpenAICompatible || !litellm.Capabilities.SupportsCountTokens {
+		t.Fatalf("litellm profile = %#v", litellm)
 	}
 }
 

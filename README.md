@@ -32,10 +32,11 @@ Local CLI foundation:
   alias fallback. Exact configured aliases and `claude-ccr-<alias>` discovery
   IDs route to their configured providers. When `--model` is omitted, launch
   auto-selects only if one routable alias exists.
-- Tool use, streaming, thinking, model discovery, and token counting are gated
-  by visible provider capability metadata. Unsupported requests return explicit
-  errors instead of falling back silently. Claude Code launch disables tools
-  when the selected model or provider is chat-only.
+- Tool use, streaming, thinking, and model discovery are gated by visible
+  provider capability metadata. Token counting uses provider-backed exact counts
+  where available and visible conservative estimates elsewhere. Unsupported
+  unsafe requests return explicit errors instead of falling back silently. Claude
+  Code launch disables tools when the selected model or provider is chat-only.
 - Live Claude Code availability tests plus a tagged end-to-end smoke using the
   installed Claude binary and a fake OpenAI-compatible provider. Remote live
   provider E2E remains unverified until run against real credentials.

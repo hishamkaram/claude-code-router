@@ -188,7 +188,7 @@ func TestLiveLaunchPreserveAuthRoutesThroughFakeAnthropicCompatibleProvider(t *t
 
 	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "glm", "--print")
 	if err != nil {
-		if strings.Contains(out+errOut, "Not logged in") {
+		if liveAnthropicAuthUnavailable(out + errOut) {
 			t.Skipf("live Claude Code Anthropic auth unavailable:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 		}
 		t.Fatalf("launch error = %v (chatCalled=%v)\nstdout:\n%s\nstderr:\n%s", err, chatCalled, out, errOut)
@@ -343,6 +343,12 @@ func writeLiveAnthropicStream(w http.ResponseWriter, model string, text string) 
 	}
 }
 
+func liveAnthropicAuthUnavailable(output string) bool {
+	return strings.Contains(output, "Not logged in") ||
+		strings.Contains(output, "Failed to authenticate") ||
+		strings.Contains(output, "OAuth session expired")
+}
+
 type liveOpenAIChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -434,7 +440,7 @@ func (s *liveAgentToolProviderState) handleChat(t *testing.T, w http.ResponseWri
 		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-tool","choices":[{"message":{"content":"","tool_calls":[{"id":"toolu_agent_live","type":"function","function":{"name":"Agent","arguments":"{\"description\":\"return child sentinel\",\"prompt\":\"Return exactly CCR_LIVE_CHILD_OK and nothing else.\",\"subagent_type\":\"general-purpose\",\"run_in_background\":false}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":3}}`)
 	case s.chatCalls == 2:
 		s.handleChildRequest(t, w, payload.Messages)
-	case openAIMessagesContainRole(payload.Messages, "tool", "CCR_LIVE_CHILD_OK"):
+	case openAIMessagesContainToolRole(payload.Messages, "CCR_LIVE_CHILD_OK"):
 		s.parentToolResultSeen = true
 		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-parent","choices":[{"message":{"content":"CCR_LIVE_PARENT_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
 	default:
@@ -460,7 +466,7 @@ func (s *liveWorkflowProviderState) handleChat(t *testing.T, w http.ResponseWrit
 	case isWorkflowSubagentRequest(payload.Messages):
 		s.workflowChildPromptSeen = true
 		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-child","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
-	case openAIMessagesContainRole(payload.Messages, "tool", "Workflow launched in background"):
+	case openAIMessagesContainToolRole(payload.Messages, "Workflow launched in background"):
 		s.workflowLaunchResultSeen = true
 		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-started","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_LAUNCHED_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
 	case openAIMessagesContain(payload.Messages, "<task-notification>"):
@@ -529,7 +535,7 @@ func isWorkflowSubagentRequest(messages []liveOpenAIChatMessage) bool {
 
 func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.ResponseWriter, messages []liveOpenAIChatMessage) {
 	t.Helper()
-	if openAIMessagesContainRole(messages, "tool", "") || !openAIMessagesContain(messages, "Return exactly CCR_LIVE_CHILD_OK") {
+	if openAIMessagesContainToolRole(messages, "") || !openAIMessagesContain(messages, "Return exactly CCR_LIVE_CHILD_OK") {
 		t.Errorf("second provider request is not the child request: %#v", messages)
 		http.Error(w, "bad child request", http.StatusBadRequest)
 		return
@@ -560,7 +566,8 @@ func liveToolsContainAgent(tools []struct {
 	Function struct {
 		Name string `json:"name"`
 	} `json:"function"`
-}) bool {
+},
+) bool {
 	return liveToolsContain(tools, "Agent")
 }
 
@@ -568,7 +575,8 @@ func liveToolsContain(tools []struct {
 	Function struct {
 		Name string `json:"name"`
 	} `json:"function"`
-}, name string) bool {
+}, name string,
+) bool {
 	for _, tool := range tools {
 		if tool.Function.Name == name {
 			return true
@@ -598,9 +606,9 @@ func openAIMessagesContain(messages []liveOpenAIChatMessage, needle string) bool
 	return false
 }
 
-func openAIMessagesContainRole(messages []liveOpenAIChatMessage, role, needle string) bool {
+func openAIMessagesContainToolRole(messages []liveOpenAIChatMessage, needle string) bool {
 	for _, message := range messages {
-		if message.Role == role && strings.Contains(message.Content, needle) {
+		if message.Role == "tool" && strings.Contains(message.Content, needle) {
 			return true
 		}
 	}

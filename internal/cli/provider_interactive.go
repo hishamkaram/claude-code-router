@@ -372,7 +372,7 @@ func saveInteractiveProviderAdd(ctx context.Context, cmd *cobra.Command, deps De
 	if err := s.AddProvider(ctx, provider); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, protocol=%s, mode=%s, %s, secret=%s)\n", provider.Name, provider.Type, provider.Protocol, provider.Mode, provider.BaseURL, secret.RedactRef(provider.SecretRef))
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, protocol=%s, mode=%s, token-count=%s, %s, secret=%s)\n", provider.Name, provider.Type, provider.Protocol, provider.Mode, providerTokenCountMode(provider), provider.BaseURL, secret.RedactRef(provider.SecretRef))
 	if len(planned) == 0 && summary.skipped == 0 {
 		caps := effectiveProviderCapabilities(provider)
 		if caps.Protocol == providers.ProtocolOpenAICompatible && caps.SupportsModelDiscovery {

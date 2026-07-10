@@ -86,7 +86,9 @@ func (Registry) Profile(providerType string) (Profile, bool) {
 	case "zai-openai":
 		return openAIProfile(providerType, "https://api.z.ai/api/coding/paas/v4", true), true
 	case "litellm":
-		return openAIProfile(providerType, "", false), true
+		profile := openAIProfile(providerType, "", false)
+		profile.Capabilities.SupportsCountTokens = true
+		return profile, true
 	case "local":
 		return openAIProfile(providerType, "", false), true
 	case "openai-compatible":
@@ -128,6 +130,9 @@ func NormalizeCapabilities(providerType string, caps Capabilities) Capabilities 
 	}
 	if caps.Mode == "" {
 		caps.Mode = defaults.Mode
+	}
+	if providerType == "litellm" {
+		caps.SupportsCountTokens = true
 	}
 	return caps
 }

@@ -280,7 +280,7 @@ func runProviderAdd(ctx context.Context, cmd *cobra.Command, opts *options, deps
 	if err := s.AddProvider(ctx, provider); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, protocol=%s, mode=%s, %s, secret=%s)\n", name, resolvedType, provider.Protocol, provider.Mode, resolvedURL, secret.RedactRef(plan.ref))
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q added (%s, protocol=%s, mode=%s, token-count=%s, %s, secret=%s)\n", name, resolvedType, provider.Protocol, provider.Mode, providerTokenCountMode(provider), resolvedURL, secret.RedactRef(plan.ref))
 	fmt.Fprintf(cmd.OutOrStdout(), "Next: ccr model add <alias> --provider %s --model <provider-model>\n", name)
 	return nil
 }
@@ -499,7 +499,7 @@ func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 			for i := range providerList {
 				provider := providerList[i]
 				caps := effectiveProviderCapabilities(provider)
-				fmt.Fprintf(cmd.OutOrStdout(), "Provider %s: type=%s protocol=%s mode=%s caps=%s\n", provider.Name, provider.Type, caps.Protocol, caps.Mode, providerCapabilitySummary(provider))
+				fmt.Fprintf(cmd.OutOrStdout(), "Provider %s: type=%s protocol=%s mode=%s token-count=%s caps=%s\n", provider.Name, provider.Type, caps.Protocol, caps.Mode, providerTokenCountMode(provider), providerCapabilitySummary(provider))
 			}
 			for _, model := range models {
 				fmt.Fprintf(cmd.OutOrStdout(), "Model %s: provider=%s model=%s compat=%s\n", model.Alias, model.ProviderName, model.ProviderModel, model.Status)
@@ -525,6 +525,16 @@ func newDoctorCommand(ctx context.Context, opts *options, deps Dependencies) *co
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "SQLite: ok (%s, schema=%d)\n", dbPath, version)
+			providerList, err := s.ListProviders(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Providers: %d\n", len(providerList))
+			for i := range providerList {
+				provider := providerList[i]
+				caps := effectiveProviderCapabilities(provider)
+				fmt.Fprintf(cmd.OutOrStdout(), "Provider %s: protocol=%s mode=%s token-count=%s\n", provider.Name, caps.Protocol, caps.Mode, providerTokenCountMode(provider))
+			}
 			if err := deps.Secrets.Available(ctx); err != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Secrets: unavailable (%v)\n", err)
 			} else {
