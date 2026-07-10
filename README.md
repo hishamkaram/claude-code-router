@@ -1,93 +1,130 @@
-# claude-code-router
+# Claude Code Router
 
-Private Go implementation of a local Claude Code router.
+[![CI](https://github.com/hishamkaram/claude-code-router/actions/workflows/ci.yml/badge.svg)](https://github.com/hishamkaram/claude-code-router/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-`ccr` launches Claude Code through a fixed local gateway and routes each turn
-to first-party Anthropic or a configured model alias selected with Claude Code's
-`/model` picker.
+`ccr` is a local gateway for using Claude Code with first-party Anthropic models
+and configured third-party model providers in one session. It keeps Claude Code
+connected to one loopback-only gateway while routing each request to the selected
+model safely and visibly.
 
-## Current Status
+CCR is built for users who want to keep Claude Code's normal workflow while
+adding providers such as OpenRouter, Z.AI, LiteLLM, or a local OpenAI-compatible
+endpoint. It never silently falls back to a different model or provider.
 
-Local CLI foundation:
+## Install
 
-- Strict provider/model management, including add, update, test, remove, and
-  interactive guided flows.
-- SQLite local state for providers, model aliases, launch sessions, observed
-  agents, and conformance records.
-- API keys stored as environment, file, or OS keychain references, never raw
-  SQLite values.
-- Protocol-based provider profiles for Anthropic-compatible and
-  OpenAI-compatible providers, including separate Z.AI Anthropic and Z.AI
-  OpenAI presets.
-- OpenAI-compatible model discovery through `/v1/models` for LiteLLM,
-  OpenRouter, Z.AI OpenAI, and local providers when the provider declares model
-  discovery support.
-- Loopback-only local gateway launch that injects `ANTHROPIC_BASE_URL`, enables
-  gateway model discovery, and adds a CCR-local `X-CCR-Session-Token` through
-  `ANTHROPIC_CUSTOM_HEADERS` without overwriting Anthropic subscription or API
-  key auth. Legacy `ANTHROPIC_AUTH_TOKEN` gateway auth remains available with
-  `ccr launch --auth-mode gateway-token`.
-- Anthropic-compatible pass-through routing and OpenAI-compatible translation.
-  First-party Claude Code model names route to Anthropic before any default CCR
-  alias fallback. Exact configured aliases and `claude-ccr-<alias>` discovery
-  IDs route to their configured providers. When `--model` is omitted, launch
-  auto-selects only if one routable alias exists.
-- Tool use, streaming, thinking, and model discovery are gated by visible
-  provider capability metadata. Token counting uses provider-backed exact counts
-  where available and visible conservative estimates elsewhere. Unsupported
-  unsafe requests return explicit errors instead of falling back silently. Claude
-  Code launch disables tools when the selected model or provider is chat-only.
-- Live Claude Code availability tests plus a tagged end-to-end smoke using the
-  installed Claude binary and a fake OpenAI-compatible provider. Remote live
-  provider E2E remains unverified until run against real credentials.
-
-Remote provider live E2E remains unverified until run against real credentials.
-
-## CLI Examples
+### Homebrew (macOS)
 
 ```bash
-ccr init
-ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
-ccr provider add zai --api-key-env ZAI_API_KEY
-ccr provider add glm --protocol anthropic-compatible --base-url https://example.invalid --api-key-env GLM_API_KEY
-ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
-ccr provider add litellm --base-url http://localhost:4000 --no-api-key
-ccr provider test litellm
-ccr provider update litellm --base-url http://localhost:5000
-ccr provider remove litellm --yes
-ccr model add qwen --provider openrouter --model qwen/qwen3-coder
-ccr model test qwen
-ccr conformance run qwen
-ccr launch --model qwen
-ccr launch --auth-mode gateway-token --model qwen
-ccr sessions
-ccr model list
+brew install hishamkaram/tap/claude-code-router
+```
+
+### GitHub Releases (macOS and Linux)
+
+Download the archive for your operating system and CPU from the
+[latest release](https://github.com/hishamkaram/claude-code-router/releases/latest),
+verify it against `checksums.txt`, then place `ccr` on your `PATH`.
+
+```bash
+tar -xzf <downloaded-archive>.tar.gz
+mkdir -p ~/.local/bin
+install -m 755 ccr ~/.local/bin/ccr
+ccr version
+```
+
+### Go
+
+Install from source with Go 1.25 or newer:
+
+```bash
+go install github.com/hishamkaram/claude-code-router/cmd/ccr@latest
+ccr version
+```
+
+## Requirements
+
+- [Claude Code](https://code.claude.com/docs/en/overview) must be installed and
+  available as `claude`.
+- Sign in to Claude Code when you want to use first-party Anthropic routes.
+- Set any external-provider credentials in environment variables, a `0600` key
+  file, or the OS keychain. CCR never stores raw API keys in SQLite.
+
+Run this after installation to check the local setup:
+
+```bash
 ccr doctor
 ```
 
-Direct API-key entry is supported through stdin and OS keychain storage:
+## Quick Start
+
+This example adds OpenRouter, imports its discoverable models, and launches
+Claude Code with one selected alias.
 
 ```bash
-printf '%s' "$ANTHROPIC_API_KEY" | ccr provider add anthropic --api-key-stdin
+export OPENROUTER_API_KEY='replace-with-your-key'
+
+ccr init
+ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
+ccr provider test openrouter
+ccr provider discover-models openrouter
+ccr provider import-models openrouter --all
+ccr model list
+ccr launch --model <alias>
 ```
 
-Headless machines without OS keychain support can store only a file reference in
-SQLite:
+Within Claude Code, open `/model` and select a CCR model option to switch future
+work in that session. Your organization may restrict which Claude Code model
+options are available; CCR reports that limitation instead of bypassing it.
+
+## How Routing Works
+
+1. CCR launches Claude Code through a loopback-only local gateway.
+2. Registered model aliases appear as `CCR <alias>` in Claude Code's model
+   picker and route to the configured provider.
+3. Standard first-party model names route to Anthropic. The default
+   `--auth-mode preserve` keeps an existing Claude Code subscription login or
+   Anthropic API-key authentication available for those routes.
+4. CCR checks provider capabilities before a request is sent. Unsupported or
+   unsafe behavior is rejected with an explanation; it is never redirected to
+   Claude or another configured provider.
+
+Use `ccr launch --auth-mode gateway-token --model <alias>` when you want a
+third-party-only session. That mode intentionally disables the original
+Anthropic subscription and API-key authentication.
+
+## Common Commands
 
 ```bash
-mkdir -p ~/.config/ccr
-install -m 600 /dev/null ~/.config/ccr/litellm.key
-read -rsp 'LiteLLM key: ' key; printf '\n'; printf '%s\n' "$key" > ~/.config/ccr/litellm.key; unset key
-ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
+ccr provider list                 # show configured providers
+ccr model list                    # show model aliases
+ccr model test <alias>            # validate a route against its provider
+ccr conformance run <alias>       # record compatibility checks
+ccr launch --model <alias>        # start Claude Code through CCR
+ccr status                        # inspect local router state
+ccr sessions                      # list launched sessions
+ccr agents                        # list observed agents and workers
 ```
 
-## Safety Rules
+## Documentation
 
-- No silent fallback to Claude.
-- No raw API keys in SQLite, logs, errors, tests, or docs.
-- Degrade external-model compatibility visibly when safe.
-- Reject unsafe requests clearly.
-- Significant router behavior must be proven with live Claude Code E2E tests.
+- [Getting started](docs/getting-started.md)
+- [Providers and model aliases](docs/providers.md)
+- [Routing, authentication, and compatibility](docs/routing.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Maintainer release process](docs/releasing.md)
+
+## Security and Local State
+
+CCR stores provider configuration, model aliases, sessions, and compatibility
+metadata in a local SQLite database. By default it uses
+`$XDG_DATA_HOME/claude-code-router/ccr.db`, or
+`~/.local/share/claude-code-router/ccr.db` when `XDG_DATA_HOME` is unset. Use
+`--db <path>` to keep state elsewhere.
+
+SQLite contains only secret references such as `env:OPENROUTER_API_KEY`, never
+the API-key value. See [provider credential handling](docs/providers.md#credentials)
+for the supported secret sources.
 
 ## Development
 
@@ -97,3 +134,16 @@ make test
 make check
 make test-live
 ```
+
+Live tests require a working, authenticated Claude Code installation. They may
+skip when it is unavailable; skipped live tests are not equivalent to a verified
+runtime route.
+
+## Contributing and Security
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Report
+security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1,4 +1,5 @@
 bin/
+dist/
 coverage.out
 coverage.html
 *.db
