@@ -380,6 +380,78 @@ func TestGatewayRejectsUnsupportedProviderFinishReason(t *testing.T) {
 	}
 }
 
+func TestGatewayPreservesOpenAICompatibleProviderErrorDetail(t *testing.T) {
+	ctx := context.Background()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"GLM rejected tool_choice for workflow","x-api-key":"provider-secret","authorization":"Bearer provider-secret"}}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: "env:PROVIDER_KEY"}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "glm-5-2", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{"env:PROVIDER_KEY": "provider-secret"})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("gateway status = %d, want 429", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading error body: %v", err)
+	}
+	errorBody := string(raw)
+	if !strings.Contains(errorBody, "GLM rejected tool_choice for workflow") {
+		t.Fatalf("gateway error body missing provider detail: %q", errorBody)
+	}
+	if strings.Contains(errorBody, "provider-secret") {
+		t.Fatalf("gateway error body leaked provider secret: %q", errorBody)
+	}
+	if !strings.Contains(errorBody, "[redacted]") {
+		t.Fatalf("gateway error body = %q, want redaction marker", errorBody)
+	}
+}
+
+func TestSanitizeProviderErrorDetailBoundsAndRedacts(t *testing.T) {
+	raw := []byte(`{"error":{"message":"` + strings.Repeat("x", providerErrorDetailLimit+64) + `","authorization":"Bearer provider-secret","api_key":"provider-secret"}}`)
+	got := sanitizeProviderErrorDetail(raw, "provider-secret")
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("sanitizeProviderErrorDetail() = %q, want truncated marker", got)
+	}
+	if len(got) > providerErrorDetailLimit+len("...") {
+		t.Fatalf("sanitizeProviderErrorDetail() length = %d, want bounded", len(got))
+	}
+	if strings.Contains(got, "provider-secret") {
+		t.Fatalf("sanitizeProviderErrorDetail() leaked provider secret: %q", got)
+	}
+}
+
+func TestSanitizeProviderErrorDetailRedactsSecretAcrossVisibleBoundary(t *testing.T) {
+	secretValue := "provider-secret-crossing-boundary"
+	raw := []byte(strings.Repeat("x", providerErrorDetailLimit-4) + secretValue + " tail")
+	got := sanitizeProviderErrorDetail(raw, secretValue)
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("sanitizeProviderErrorDetail() = %q, want truncated marker", got)
+	}
+	if strings.Contains(got, secretValue) || strings.Contains(got, secretValue[:len(secretValue)-4]) {
+		t.Fatalf("sanitizeProviderErrorDetail() leaked partial provider secret: %q", got)
+	}
+}
+
 func TestGatewayRejectsMissingLocalToken(t *testing.T) {
 	ctx := context.Background()
 	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})

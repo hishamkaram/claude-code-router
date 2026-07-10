@@ -214,7 +214,12 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := h.callOpenAICompatible(r.Context(), route.provider, apiKey, openAIReq)
 	if err != nil {
-		writeAnthropicError(w, http.StatusBadGateway, err.Error())
+		var statusErr *openAIProviderStatusError
+		status := http.StatusBadGateway
+		if errors.As(err, &statusErr) {
+			status = statusErr.SafeStatusCode()
+		}
+		writeAnthropicError(w, status, err.Error())
 		return
 	}
 	finishReason, err := anthropicStopReasonFromOpenAI(resp)

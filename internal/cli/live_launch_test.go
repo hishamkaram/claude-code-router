@@ -172,7 +172,7 @@ func TestLiveLaunchOpenAIProviderRunsDynamicWorkflow(t *testing.T) {
 	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
 
 	prompt := `Use a workflow now. The workflow should run one worker that returns exactly CCR_LIVE_WORKFLOW_CHILD_OK. After the workflow starts, reply exactly CCR_LIVE_WORKFLOW_LAUNCHED_OK. Do not use shell or web.`
-	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader(prompt + "\n")}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--permission-mode", "bypassPermissions")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader(prompt + "\n")}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--permission-mode", "auto")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
@@ -426,6 +426,7 @@ type liveWorkflowProviderState struct {
 	mu                          sync.Mutex
 	chatCalls                   int
 	firstRequestHadWorkflowTool bool
+	workflowClassifierSeen      bool
 	workflowChildPromptSeen     bool
 	workflowLaunchResultSeen    bool
 }
@@ -513,7 +514,10 @@ func (s *liveWorkflowProviderState) handleChat(t *testing.T, w http.ResponseWrit
 	s.chatCalls++
 	w.Header().Set("Content-Type", "application/json")
 	switch {
-	case s.chatCalls == 1:
+	case isLiveAutoClassifierRequest(payload):
+		s.workflowClassifierSeen = true
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-classifier","choices":[{"message":{"content":"<block>no</block>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}`)
+	case !s.firstRequestHadWorkflowTool:
 		s.firstRequestHadWorkflowTool = liveToolsContain(payload.Tools, "Workflow")
 		writeOpenAIWorkflowToolCall(w)
 	case isWorkflowSubagentRequest(payload.Messages):
@@ -601,8 +605,8 @@ func (s *liveWorkflowProviderState) assertComplete(t *testing.T, out, errOut str
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadWorkflowTool || !s.workflowChildPromptSeen || !s.workflowLaunchResultSeen {
-		t.Fatalf("Workflow live route incomplete: firstRequestHadWorkflowTool=%v workflowChildPromptSeen=%v workflowLaunchResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWorkflowTool, s.workflowChildPromptSeen, s.workflowLaunchResultSeen, s.chatCalls, out, errOut)
+	if !s.firstRequestHadWorkflowTool || !s.workflowClassifierSeen || !s.workflowChildPromptSeen || !s.workflowLaunchResultSeen {
+		t.Fatalf("Workflow live route incomplete: firstRequestHadWorkflowTool=%v workflowClassifierSeen=%v workflowChildPromptSeen=%v workflowLaunchResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWorkflowTool, s.workflowClassifierSeen, s.workflowChildPromptSeen, s.workflowLaunchResultSeen, s.chatCalls, out, errOut)
 	}
 }
 
