@@ -59,7 +59,7 @@ func TestRootHelpExplainsRouterConcepts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("help error = %v", err)
 	}
-	for _, want := range []string{"fixed local gateway", "launch --model <alias>", "SQLite", "never silently fall back"} {
+	for _, want := range []string{"fixed local gateway", "normal startup", "launch --model <alias>", "SQLite", "never silently fall back"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help output missing %q:\n%s", want, out)
 		}
@@ -230,13 +230,14 @@ func TestProviderAddInteractiveSavesSelectedModelsWithPrefixedAliases(t *testing
 	server := newModelsServer(t, []string{"glm-5.2[1m]", "qwen/qwen3-coder"})
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	input := strings.Join([]string{
-		"litellm",  // provider name
-		"1",        // LiteLLM/OpenAI-compatible
+		"5",        // LiteLLM/OpenAI-compatible
+		"",         // default provider name
 		server.URL, // base URL
 		"3",        // no API key
 		"1",        // select models
 		"1",        // select first discovered model
 		"0",        // finish multiselect
+		"1",        // save reviewed aliases
 	}, "\n") + "\n"
 
 	out, errOut, err := runCommandWithDeps(t, Dependencies{
@@ -263,11 +264,11 @@ func TestProviderAddInteractiveProtocolDefaultForNonTerminal(t *testing.T) {
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	input := strings.Join([]string{
-		"",  // default provider name
 		"",  // default provider type from --protocol
+		"",  // default provider name
 		"",  // default base URL from --base-url
 		"",  // default auth mode from --no-api-key
-		"y", // save after model discovery is rejected
+		"2", // save provider only after manual model prompt
 	}, "\n") + "\n"
 
 	out, errOut, err := runCommandWithDeps(t, Dependencies{
@@ -296,11 +297,11 @@ func TestProviderAddInteractiveRecomputesDefaultModeAfterTypeSelection(t *testin
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	input := strings.Join([]string{
+		"1",   // Anthropic
 		"foo", // provider name
-		"3",   // Anthropic
 		"",    // default base URL
 		"3",   // no API key
-		"y",   // save after unsupported discovery
+		"2",   // save provider only after manual model prompt
 	}, "\n") + "\n"
 
 	_, errOut, err := runCommandWithDeps(t, Dependencies{
@@ -339,8 +340,8 @@ func TestProviderAddInteractiveTrimsBaseURLBeforeSave(t *testing.T) {
 	server := newModelsServer(t, []string{"gpt-5"})
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	input := strings.Join([]string{
-		"litellm",                // provider name
-		"1",                      // LiteLLM/OpenAI-compatible
+		"5",                      // LiteLLM/OpenAI-compatible
+		"",                       // default provider name
 		"  " + server.URL + "  ", // base URL with pasted whitespace
 		"3",                      // no API key
 		"3",                      // skip model import
@@ -371,12 +372,12 @@ func TestProviderAddInteractiveStoresKeychainAPIKeyFromNonTerminal(t *testing.T)
 	defer server.Close()
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	input := strings.Join([]string{
-		"openrouter", // provider name
-		"2",          // OpenRouter
-		server.URL,   // custom base URL to avoid external network
-		"1",          // store API key in keychain
-		"sk-test",    // API key
-		"y",          // save after discovery failure
+		"4",        // OpenRouter
+		"",         // default provider name
+		server.URL, // custom base URL to avoid external network
+		"1",        // store API key in keychain
+		"sk-test",  // API key
+		"2",        // save after discovery failure
 	}, "\n") + "\n"
 	fake := &fakeSecrets{}
 
@@ -409,11 +410,11 @@ func TestProviderAddInteractiveDoesNotSaveWhenDiscoveryFailsAndUserDeclines(t *t
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	input := strings.Join([]string{
-		"litellm",  // provider name
-		"1",        // LiteLLM/OpenAI-compatible
+		"5",        // LiteLLM/OpenAI-compatible
+		"",         // default provider name
 		server.URL, // base URL
 		"3",        // no API key
-		"n",        // do not save after discovery failure
+		"3",        // do not save after discovery failure
 	}, "\n") + "\n"
 
 	out, errOut, err := runCommandWithDeps(t, Dependencies{
@@ -469,11 +470,11 @@ func TestProviderAddInteractiveShowsManualNextStepForUnsupportedDiscovery(t *tes
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	input := strings.Join([]string{
-		"anthropic", // provider name
-		"3",         // Anthropic
-		"",          // default base URL
-		"3",         // no API key
-		"y",         // save after unsupported discovery
+		"1", // Anthropic
+		"",  // default provider name
+		"",  // default base URL
+		"3", // no API key
+		"2", // save provider only after manual model prompt
 	}, "\n") + "\n"
 
 	out, errOut, err := runCommandWithDeps(t, Dependencies{

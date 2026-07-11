@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -26,11 +27,13 @@ const (
 type plannedModelImport struct {
 	alias         string
 	providerModel string
+	status        string
 }
 
 type modelImportSummary struct {
 	imported       int
 	skipped        int
+	removed        int
 	skippedAliases []string
 }
 
@@ -76,10 +79,15 @@ func newProviderImportModelsCommand(ctx context.Context, opts *options, deps Dep
 	var importAll bool
 	cmd := &cobra.Command{
 		Use:   "import-models <name>",
-		Short: "Import discovered provider models as conflict-safe aliases",
+		Short: "Select, review, and import discovered provider models as aliases",
+		Long: `Select, review, and import discovered provider models as aliases.
+
+	By default this runs a guided searchable multi-select and review flow. Use
+	--all for deterministic automation that imports every discovered model and skips
+	aliases that already exist.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return fmt.Errorf("provider name is required; example: ccr provider import-models litellm --all")
+				return fmt.Errorf("provider name is required; example: ccr provider import-models litellm")
 			}
 			return validateName("provider name", args[0])
 		},
@@ -131,10 +139,22 @@ func runProviderImportModels(ctx context.Context, cmd *cobra.Command, opts *opti
 	if err != nil {
 		return err
 	}
+	if !importAll {
+		planned, summary, err = reviewPlannedModelImports(ctx, cmd, deps, s, planned, summary)
+		if errors.Is(err, errModelImportAborted) {
+			fmt.Fprintln(cmd.OutOrStdout(), "No model aliases saved.")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 	if err := addPlannedModelImports(ctx, s, provider.Name, planned, &summary); err != nil {
 		return err
 	}
 	printModelImportSummary(cmd.OutOrStdout(), provider.Name, summary)
+	printModelImportDetails(cmd.OutOrStdout(), planned)
+	printModelLaunchGuidance(cmd.OutOrStdout(), planned, providerDisablesClaudeTools(provider))
 	return nil
 }
 
@@ -207,7 +227,7 @@ func planModelImports(ctx context.Context, deps Dependencies, s *store.Store, pr
 			alias = renamedAlias
 		}
 		existing[alias] = struct{}{}
-		planned = append(planned, plannedModelImport{alias: alias, providerModel: modelID})
+		planned = append(planned, plannedModelImport{alias: alias, providerModel: modelID, status: "degraded"})
 	}
 	return planned, summary, nil
 }
@@ -218,7 +238,7 @@ func addPlannedModelImports(ctx context.Context, s *store.Store, providerName st
 			Alias:         item.alias,
 			ProviderName:  providerName,
 			ProviderModel: item.providerModel,
-			Status:        "degraded",
+			Status:        plannedModelStatus(item),
 		})
 		if err != nil {
 			return err
@@ -241,9 +261,12 @@ func existingModelAliases(ctx context.Context, s *store.Store) (map[string]struc
 }
 
 func printModelImportSummary(out io.Writer, providerName string, summary modelImportSummary) {
-	fmt.Fprintf(out, "Imported %d model aliases for provider %q (compat=degraded).", summary.imported, providerName)
+	fmt.Fprintf(out, "Imported %d model aliases for provider %q.", summary.imported, providerName)
 	if summary.skipped > 0 {
 		fmt.Fprintf(out, " Skipped %d existing aliases.", summary.skipped)
+	}
+	if summary.removed > 0 {
+		fmt.Fprintf(out, " Removed %d aliases during review.", summary.removed)
 	}
 	fmt.Fprintln(out)
 }

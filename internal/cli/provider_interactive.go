@@ -16,7 +16,10 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-var errProviderAddAborted = errors.New("provider add aborted")
+var (
+	errProviderAddAborted = errors.New("provider add aborted")
+	errProviderSetupEdit  = errors.New("provider setup edit requested")
+)
 
 const (
 	authModeKeep     = "keep"
@@ -49,6 +52,21 @@ func runProviderAddInteractive(ctx context.Context, cmd *cobra.Command, opts *op
 	if err := validateProviderAddInteractiveStaticFlags(initialName, cfg); err != nil {
 		return err
 	}
+	for {
+		err := runProviderAddInteractiveAttempt(ctx, cmd, opts, deps, initialName, cfg)
+		switch {
+		case errors.Is(err, errProviderSetupEdit):
+			initialName = ""
+			continue
+		case errors.Is(err, errProviderAddAborted), errors.Is(err, errModelImportAborted):
+			return nil
+		default:
+			return err
+		}
+	}
+}
+
+func runProviderAddInteractiveAttempt(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, initialName string, cfg providerAddConfig) error {
 	provider, plan, err := promptInteractiveProviderConfig(ctx, deps, initialName, cfg)
 	if err != nil {
 		return err
@@ -66,9 +84,6 @@ func runProviderAddInteractive(ctx context.Context, cmd *cobra.Command, opts *op
 
 	planned, summary, err := interactiveModelImportPlan(ctx, cmd, deps, s, provider, plan)
 	if err != nil {
-		if errors.Is(err, errProviderAddAborted) {
-			return nil
-		}
 		return err
 	}
 	return saveInteractiveProviderAdd(ctx, cmd, deps, s, provider, plan, planned, summary)
@@ -182,17 +197,11 @@ func runProviderUpdatePrompt(ctx context.Context, deps Dependencies, setup *prov
 	}
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().
-			Title("Provider type").
-			Options(
-				huh.NewOption("LiteLLM/OpenAI-compatible", "litellm"),
-				huh.NewOption("OpenRouter", "openrouter"),
-				huh.NewOption("Anthropic", "anthropic"),
-				huh.NewOption("Local OpenAI-compatible", "local"),
-				huh.NewOption("Z.AI Anthropic-compatible", "zai"),
-				huh.NewOption("Z.AI OpenAI-compatible", "zai-openai"),
-				huh.NewOption("Generic Anthropic-compatible", "anthropic-compatible"),
-				huh.NewOption("Generic OpenAI-compatible", "openai-compatible"),
-			).
+			Title("Provider profile").
+			Description(providerProfilePromptDescription()).
+			Options(providerProfileOptions()...).
+			Filtering(true).
+			Height(8).
 			Value(&setup.providerType),
 		huh.NewSelect[string]().
 			Title("Provider mode").
@@ -386,23 +395,34 @@ func saveInteractiveProviderAdd(ctx context.Context, cmd *cobra.Command, deps De
 		return err
 	}
 	printModelImportSummary(cmd.OutOrStdout(), provider.Name, summary)
+	printModelImportDetails(cmd.OutOrStdout(), planned)
+	printModelLaunchGuidance(cmd.OutOrStdout(), planned, providerDisablesClaudeTools(provider))
 	return nil
 }
 
 func interactiveModelImportPlan(ctx context.Context, cmd *cobra.Command, deps Dependencies, s *store.Store, provider store.Provider, plan secretPlan) ([]plannedModelImport, modelImportSummary, error) {
+	if !supportsInteractiveModelDiscovery(provider) {
+		return manualModelImportPlan(ctx, cmd, deps, s, provider, plan)
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Discovering models for provider %q (%s)\n", provider.Name, provider.BaseURL)
 	models, err := discoverProviderModelsWithPlan(ctx, deps, provider, plan)
 	if err != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "Model discovery failed for provider %q: %v\n", provider.Name, err)
-		saveOnly, promptErr := promptSaveProviderOnly(ctx, deps)
+		action, promptErr := promptDiscoveryFailureAction(ctx, deps)
 		if promptErr != nil {
 			return nil, modelImportSummary{}, promptErr
 		}
-		if !saveOnly {
+		switch action {
+		case discoveryFailureEdit:
+			return nil, modelImportSummary{}, errProviderSetupEdit
+		case discoveryFailureSaveProvider:
+			return nil, modelImportSummary{}, nil
+		case discoveryFailureCancel:
 			fmt.Fprintf(cmd.OutOrStdout(), "Provider %q was not saved.\n", provider.Name)
 			return nil, modelImportSummary{}, errProviderAddAborted
+		default:
+			return nil, modelImportSummary{}, fmt.Errorf("invalid discovery failure action %q", action)
 		}
-		return nil, modelImportSummary{}, nil
 	}
 	if len(models) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "No models discovered for provider %q.\n", provider.Name)
@@ -427,7 +447,11 @@ func interactiveModelImportPlan(ctx context.Context, cmd *cobra.Command, deps De
 			return nil, modelImportSummary{}, nil
 		}
 	}
-	return planModelImports(ctx, deps, s, provider.Name, selected, choice)
+	planned, summary, err := planModelImports(ctx, deps, s, provider.Name, selected, choice)
+	if err != nil {
+		return nil, modelImportSummary{}, err
+	}
+	return reviewPlannedModelImports(ctx, cmd, deps, s, planned, summary)
 }
 
 func promptProviderSetup(ctx context.Context, deps Dependencies, initial providerSetupPrompt) (providerSetupPrompt, error) {
@@ -453,25 +477,19 @@ func promptProviderSetup(ctx context.Context, deps Dependencies, initial provide
 	}
 
 	form := huh.NewForm(huh.NewGroup(
+		huh.NewSelect[string]().
+			Title("Provider profile").
+			Description(providerProfilePromptDescription()).
+			Options(providerProfileOptions()...).
+			Filtering(true).
+			Height(8).
+			Value(&setup.providerType),
 		huh.NewInput().
-			Title("Provider name").
+			Title("Connection name").
 			Value(&setup.name).
 			Validate(func(value string) error {
 				return validateName("provider name", value)
 			}),
-		huh.NewSelect[string]().
-			Title("Provider type").
-			Options(
-				huh.NewOption("LiteLLM/OpenAI-compatible", "litellm"),
-				huh.NewOption("OpenRouter", "openrouter"),
-				huh.NewOption("Anthropic", "anthropic"),
-				huh.NewOption("Local OpenAI-compatible", "local"),
-				huh.NewOption("Z.AI Anthropic-compatible", "zai"),
-				huh.NewOption("Z.AI OpenAI-compatible", "zai-openai"),
-				huh.NewOption("Generic Anthropic-compatible", "anthropic-compatible"),
-				huh.NewOption("Generic OpenAI-compatible", "openai-compatible"),
-			).
-			Value(&setup.providerType),
 		huh.NewSelect[string]().
 			Title("Provider mode").
 			Options(
@@ -550,16 +568,16 @@ func applyProviderPromptModeDefault(setup providerSetupPrompt, modeDefaulted boo
 
 func promptProviderSetupNonTerminal(ctx context.Context, deps Dependencies, setup providerSetupPrompt) (providerSetupPrompt, error) {
 	in := readerOrDefault(deps.In, os.Stdin)
+	providerType, err := readNonTerminalChoice(ctx, in, setup.providerType, providerTypeChoices())
+	if err != nil {
+		return providerSetupPrompt{}, fmt.Errorf("provider profile: %w", err)
+	}
 	name, err := readNonTerminalPromptValue(ctx, in, setup.name, true)
 	if err != nil {
 		return providerSetupPrompt{}, fmt.Errorf("provider name: %w", err)
 	}
 	if validateErr := validateName("provider name", name); validateErr != nil {
 		return providerSetupPrompt{}, validateErr
-	}
-	providerType, err := readNonTerminalChoice(ctx, in, setup.providerType, providerTypeChoices())
-	if err != nil {
-		return providerSetupPrompt{}, fmt.Errorf("provider type: %w", err)
 	}
 	baseURL, err := readNonTerminalPromptValue(ctx, in, setup.baseURL, false)
 	if err != nil {
@@ -637,19 +655,6 @@ func completeNonTerminalProviderAuth(ctx context.Context, in io.Reader, setup pr
 		return providerSetupPrompt{}, fmt.Errorf("invalid authentication mode %q", setup.authMode)
 	}
 	return setup, nil
-}
-
-func providerTypeChoices() map[string]string {
-	return map[string]string{
-		"1": "litellm",
-		"2": "openrouter",
-		"3": "anthropic",
-		"4": "local",
-		"5": "zai",
-		"6": "zai-openai",
-		"7": "anthropic-compatible",
-		"8": "openai-compatible",
-	}
 }
 
 func defaultProviderMode(providerType string) string {

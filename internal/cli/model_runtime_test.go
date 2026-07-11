@@ -3,10 +3,8 @@ package cli
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -443,14 +441,14 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 	if !strings.Contains(out, "Claude Code launched through http://127.0.0.1:") {
 		t.Fatalf("launch output = %q", out)
 	}
-	if !strings.Contains(out, `Selected ccr model alias "gpt" is exposed to Claude Code and used as the startup model.`) {
-		t.Fatalf("launch output missing selected model: %q", out)
+	if !strings.Contains(out, "No ccr startup model selected") {
+		t.Fatalf("launch output missing default model summary: %q", out)
 	}
 	if !launcher.hasEnvPrefix("ANTHROPIC_BASE_URL=http://127.0.0.1:") ||
 		launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
 		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") ||
 		launcher.hasEnv("CLAUDE_CODE_USE_GATEWAY=1") || !launcher.hasEnv("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1") ||
-		!launcher.hasEnv("ANTHROPIC_CUSTOM_MODEL_OPTION=claude-ccr-gpt") ||
+		launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_MODEL_OPTION=") ||
 		!launcher.hasEnv("ENABLE_TOOL_SEARCH=true") || !launcher.hasEnv("CLAUDE_CODE_ENABLE_AUTO_MODE=1") {
 		t.Fatalf("launch env = %#v", launcher.env)
 	}
@@ -458,15 +456,19 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 	if launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") {
 		t.Fatalf("launch env still enables simple mode: %#v", launcher.env)
 	}
-	if launcher.hasArg("--tools") || !launcher.hasArg("--model") || !launcher.hasArg("claude-ccr-gpt") {
+	if launcher.hasArg("--tools") || launcher.hasArg("--model") {
 		t.Fatalf("launch args = %#v", launcher.args)
+	}
+	settings, ok := launcher.settingsArgValue()
+	if !ok || !strings.Contains(settings, "claude-ccr-gpt") {
+		t.Fatalf("launch settings = %q ok=%v args=%#v", settings, ok, launcher.args)
 	}
 
 	out, _, err = runCommand(t, "--db", dbPath, "sessions")
 	if err != nil {
 		t.Fatalf("sessions after launch error = %v", err)
 	}
-	if !strings.Contains(out, "status=running") || !strings.Contains(out, "model=gpt") {
+	if !strings.Contains(out, "status=running") || !strings.Contains(out, "model=(request-selected)") {
 		t.Fatalf("sessions after launch output = %q", out)
 	}
 }
@@ -624,169 +626,6 @@ func TestLaunchGatewayTokenAuthModeRequiresCCRStartupModel(t *testing.T) {
 	}
 	if launcher.starts != 0 {
 		t.Fatalf("launcher starts = %d, want 0", launcher.starts)
-	}
-}
-
-func TestLaunchExtendsExistingClaudeAvailableModelsForCCRAliases(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	claudeDir := filepath.Join(home, ".claude")
-	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{"availableModels":["sonnet"]}`), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	server := newModelsServer(t, []string{"gpt-5", "blocked-model"})
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
-		t.Fatalf("provider add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
-		t.Fatalf("model add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "blocked", "--provider", "litellm", "--model", "blocked-model", "--compat", "blocked"); err != nil {
-		t.Fatalf("blocked model add error = %v", err)
-	}
-
-	launcher := &fakeLauncher{pid: os.Getpid()}
-	if _, _, err := runCommandWithDeps(t, Dependencies{
-		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
-		t.Fatalf("launch error = %v", err)
-	}
-	settings, ok := launcher.settingsArgValue()
-	if !ok {
-		t.Fatalf("launch args missing --settings: %#v", launcher.args)
-	}
-	var payload struct {
-		AvailableModels []string `json:"availableModels"`
-	}
-	if err := json.Unmarshal([]byte(settings), &payload); err != nil {
-		t.Fatalf("settings JSON %q did not parse: %v", settings, err)
-	}
-	if !slices.Contains(payload.AvailableModels, "claude-ccr-gpt") {
-		t.Fatalf("availableModels = %#v, want claude-ccr-gpt", payload.AvailableModels)
-	}
-	if !slices.Contains(payload.AvailableModels, "sonnet") {
-		t.Fatalf("availableModels = %#v, want existing sonnet entry preserved", payload.AvailableModels)
-	}
-	if slices.Contains(payload.AvailableModels, "claude-ccr-blocked") {
-		t.Fatalf("availableModels includes blocked alias: %#v", payload.AvailableModels)
-	}
-}
-
-func TestLaunchExtendsClaudeAvailableModelsWithoutStartupModel(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	claudeDir := filepath.Join(home, ".claude")
-	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(`{"availableModels":["sonnet"]}`), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	server := newModelsServer(t, []string{"gpt-5", "qwen3"})
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
-		t.Fatalf("provider add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
-		t.Fatalf("model add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "qwen", "--provider", "litellm", "--model", "qwen3"); err != nil {
-		t.Fatalf("model add error = %v", err)
-	}
-
-	launcher := &fakeLauncher{pid: os.Getpid()}
-	if _, _, err := runCommandWithDeps(t, Dependencies{
-		Launcher: launcher,
-	}, "--db", dbPath, "launch"); err != nil {
-		t.Fatalf("launch error = %v", err)
-	}
-	if launcher.hasArg("--model") {
-		t.Fatalf("launch args = %#v, want Claude Code default startup model", launcher.args)
-	}
-	settings, ok := launcher.settingsArgValue()
-	if !ok {
-		t.Fatalf("launch args missing --settings: %#v", launcher.args)
-	}
-	var payload struct {
-		AvailableModels []string `json:"availableModels"`
-	}
-	if err := json.Unmarshal([]byte(settings), &payload); err != nil {
-		t.Fatalf("settings JSON %q did not parse: %v", settings, err)
-	}
-	for _, want := range []string{"sonnet", "claude-ccr-gpt", "claude-ccr-qwen"} {
-		if !slices.Contains(payload.AvailableModels, want) {
-			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
-		}
-	}
-}
-
-func TestLaunchRegistersStartupModelWhenClaudeAvailableModelsUnset(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	server := newModelsServer(t, []string{"gpt-5"})
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
-		t.Fatalf("provider add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
-		t.Fatalf("model add error = %v", err)
-	}
-
-	launcher := &fakeLauncher{pid: os.Getpid()}
-	if _, _, err := runCommandWithDeps(t, Dependencies{
-		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
-		t.Fatalf("launch error = %v", err)
-	}
-	settings, ok := launcher.settingsArgValue()
-	if !ok {
-		t.Fatalf("launch args missing --settings startup allowlist: %#v", launcher.args)
-	}
-	var payload struct {
-		AvailableModels []string `json:"availableModels"`
-	}
-	if err := json.Unmarshal([]byte(settings), &payload); err != nil {
-		t.Fatalf("settings JSON %q did not parse: %v", settings, err)
-	}
-	for _, want := range []string{"sonnet", "opus", "claude-ccr-gpt"} {
-		if !slices.Contains(payload.AvailableModels, want) {
-			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
-		}
-	}
-}
-
-func TestLaunchDoesNotCreateClaudeAvailableModelsAllowlistWithoutStartupModel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-
-	server := newModelsServer(t, []string{"gpt-5", "qwen3"})
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
-		t.Fatalf("provider add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
-		t.Fatalf("model add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "qwen", "--provider", "litellm", "--model", "qwen3"); err != nil {
-		t.Fatalf("model add error = %v", err)
-	}
-
-	launcher := &fakeLauncher{pid: os.Getpid()}
-	if _, _, err := runCommandWithDeps(t, Dependencies{
-		Launcher: launcher,
-	}, "--db", dbPath, "launch"); err != nil {
-		t.Fatalf("launch error = %v", err)
-	}
-	if launcher.hasArg("--model") {
-		t.Fatalf("launch args = %#v, want Claude Code default startup model", launcher.args)
-	}
-	if _, ok := launcher.settingsArgValue(); ok {
-		t.Fatalf("launch args unexpectedly created --settings allowlist: %#v", launcher.args)
 	}
 }
 

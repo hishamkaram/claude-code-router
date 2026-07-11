@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Start with the local diagnostics:
+Start with local diagnostics:
 
 ```bash
 ccr doctor
@@ -29,22 +29,37 @@ print the key while debugging.
 
 ## The Desired Model Is Missing from `/model`
 
-Run `ccr model list` and launch with a known alias:
+Run:
+
+```bash
+ccr model list
+ccr status
+ccr launch
+```
+
+A normal no-model launch should expose configured, non-blocked aliases that are
+safe for a tools-enabled session in `/model` as `CCR <alias>` while preserving
+Claude Code's normal startup model. If an alias is missing, check that it is not
+`blocked`, that its provider still exists, and that the provider protocol is
+Anthropic-compatible or OpenAI-compatible. If the alias is `chat-only` or its
+provider mode disables tools, start directly with `ccr launch --model <alias>`.
+
+Claude Code organization policy can still restrict the model picker. CCR cannot
+bypass that policy; use an allowed default model or ask the organization
+administrator to permit the needed model option.
+
+`--auth-mode gateway-token` requires `--model <alias>`, so it is not the right
+mode for checking alias visibility on a default-startup launch.
+
+## CCR Starts on an Unexpected Model
+
+Without `--model`, CCR intentionally leaves Claude Code on its configured
+startup model. Use `/model` to switch after launch, or pass an explicit startup
+alias:
 
 ```bash
 ccr launch --model <alias>
 ```
-
-CCR exposes configured aliases through gateway model discovery. If your Claude
-Code organization restricts model selection, CCR cannot bypass that policy. Use
-an allowed default model or ask the organization administrator to permit the
-needed model option.
-
-## CCR Starts on an Unexpected Model
-
-Without `--model`, CCR auto-selects only when exactly one routable alias exists.
-With zero or multiple aliases, Claude Code uses its configured default. Pass
-`--model <alias>` when you need a deterministic starting route.
 
 ## First-Party Subscription Authentication Fails
 
