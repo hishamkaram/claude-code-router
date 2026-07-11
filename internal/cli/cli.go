@@ -72,10 +72,10 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 		SilenceErrors: true,
 		Long: `ccr manages a local Claude Code router.
 
-Claude Code is launched once through a fixed local gateway. First-party Claude
-model names route to Anthropic, and configured CCR aliases can be selected at
-launch time with ccr launch --model <alias> or later through Claude Code's
-/model picker.
+	Claude Code is launched once through a fixed local gateway. First-party Claude
+	model names route to Anthropic, and configured CCR aliases are exposed in
+	Claude Code's /model picker. ccr launch keeps Claude Code's normal startup
+	model unless you explicitly pass ccr launch --model <alias>.
 
 ccr stores providers, model aliases, compatibility metadata, sessions, and
 usage metadata in a local SQLite database. API keys are never stored raw in
@@ -145,18 +145,20 @@ func newProviderCommand(ctx context.Context, opts *options, deps Dependencies) *
 		Short: "Manage provider connections",
 		Long: `Manage provider connections.
 
-Examples:
-  ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
-  ccr provider add --interactive litellm
-  ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
-  ccr provider add litellm --base-url http://localhost:4000 --no-api-key
-  ccr provider add anthropic --api-key-stdin
-  ccr provider discover-models litellm
-  ccr provider import-models litellm --all
-  ccr provider test litellm
-  ccr provider update litellm --base-url http://localhost:5000
-  ccr provider remove litellm --yes
-  ccr provider list`,
+	Examples:
+	  ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
+	  ccr provider add --interactive
+	  ccr provider add --interactive litellm
+	  ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
+	  ccr provider add litellm --base-url http://localhost:4000 --no-api-key
+	  ccr provider add anthropic --api-key-stdin
+	  ccr provider discover-models litellm
+	  ccr provider import-models litellm
+	  ccr provider import-models litellm --all
+	  ccr provider test litellm
+	  ccr provider update litellm --base-url http://localhost:5000
+	  ccr provider remove litellm --yes
+	  ccr provider list`,
 	}
 	cmd.AddCommand(
 		newProviderAddCommand(ctx, opts, deps),
@@ -184,6 +186,17 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 	cmd := &cobra.Command{
 		Use:   "add [name]",
 		Short: "Add a provider and secret reference",
+		Long: `Add a provider and secret reference.
+
+	Use --interactive for the guided provider profile picker, credential setup, and
+	model import flow. The optional name becomes an editable connection-name default.
+
+	Examples:
+	  ccr provider add --interactive
+	  ccr provider add --interactive openrouter
+	  ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
+	  ccr provider add litellm --base-url http://localhost:4000 --api-key-file ~/.config/ccr/litellm.key
+	  ccr provider add local --base-url http://localhost:4000 --no-api-key`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if interactive {
 				if len(args) > 1 {

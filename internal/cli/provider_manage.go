@@ -341,18 +341,22 @@ func runProviderTest(ctx context.Context, cmd *cobra.Command, opts *options, dep
 }
 
 func validateProviderConfigAndSecret(ctx context.Context, deps Dependencies, provider store.Provider) (string, error) {
+	return validateProviderConfigAndSecretWithPlan(ctx, deps, provider, secretPlan{ref: provider.SecretRef})
+}
+
+func validateProviderConfigAndSecretWithPlan(ctx context.Context, deps Dependencies, provider store.Provider, plan secretPlan) (string, error) {
 	if _, err := resolveProviderType(provider.Name, provider.Type); err != nil {
 		return "", err
 	}
 	if _, err := resolveBaseURL(provider.Type, provider.BaseURL); err != nil {
 		return "", err
 	}
-	apiKey, err := resolveDiscoveryAPIKey(ctx, deps, secretPlan{ref: provider.SecretRef})
+	apiKey, err := resolveDiscoveryAPIKey(ctx, deps, plan)
 	if err != nil {
-		return "", fmt.Errorf("resolving API key for provider %q (secret=%s): %w", provider.Name, secret.RedactRef(provider.SecretRef), err)
+		return "", fmt.Errorf("resolving API key for provider %q (secret=%s): %w", provider.Name, secret.RedactRef(plan.ref), err)
 	}
-	if strings.TrimSpace(provider.SecretRef) != "" && strings.TrimSpace(apiKey) == "" {
-		return "", fmt.Errorf("resolving API key for provider %q (secret=%s): resolved secret is empty", provider.Name, secret.RedactRef(provider.SecretRef))
+	if strings.TrimSpace(plan.ref) != "" && strings.TrimSpace(apiKey) == "" {
+		return "", fmt.Errorf("resolving API key for provider %q (secret=%s): resolved secret is empty", provider.Name, secret.RedactRef(plan.ref))
 	}
 	return apiKey, nil
 }

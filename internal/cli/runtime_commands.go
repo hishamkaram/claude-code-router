@@ -33,11 +33,15 @@ unless they would override CCR's selected model, generated model allowlist, or
 tool-safety restrictions. For example ccr launch --chrome starts Claude Code
 with its Chrome integration.
 
-Fallback and detached background modes are rejected because they cannot preserve
-CCR's selected route and local gateway ownership.
+	Fallback and detached background modes are rejected because they cannot preserve
+	CCR's selected route and local gateway ownership.
 
-Use ccr launch --help for router-specific help. To ask Claude Code for its own
-help, use ccr launch -- --help.`,
+	Without --model, Claude Code starts on its normal configured model while CCR
+	exposes every configured, non-blocked routable alias in /model. Pass --model
+	<alias> only when you want that CCR alias to be the startup model.
+
+	Use ccr launch --help for router-specific help. To ask Claude Code for its own
+	help, use ccr launch -- --help.`,
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			invocation, err := parseLaunchInvocation(args)
@@ -56,7 +60,7 @@ help, use ccr launch -- --help.`,
 			return runLaunch(ctx, cmd, opts, deps, invocation.modelAlias, invocation.printMode, invocation.authMode, invocation.permissionMode, invocation.claudeArgs)
 		},
 	}
-	cmd.Flags().String("model", "", "Optional model alias to validate before launch")
+	cmd.Flags().String("model", "", "Optional CCR model alias to use as the startup model")
 	cmd.Flags().String("auth-mode", launchAuthModePreserve, "Gateway auth mode: preserve or gateway-token")
 	cmd.Flags().String("permission-mode", "", "Optional Claude Code permission mode to pass through")
 	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
@@ -102,7 +106,7 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 		return err
 	}
 	claudeModelID := launchClaudeModelID(resolvedModelAlias)
-	claudeSettings, err := launchClaudeSettingsArg(ctx, s, claudeModelID != "")
+	claudeSettings, err := launchClaudeSettingsArg(ctx, s, disableTools)
 	if err != nil {
 		return err
 	}
@@ -176,7 +180,7 @@ func validateLaunchAuthMode(value string) error {
 
 func validateResolvedLaunchAuthMode(authMode, modelAlias string) error {
 	if authMode == launchAuthModeGatewayToken && modelAlias == "" {
-		return fmt.Errorf("--auth-mode gateway-token requires --model <alias> or exactly one routable ccr alias; use preserve auth mode for Claude Code default first-party routing")
+		return fmt.Errorf("--auth-mode gateway-token requires --model <alias>; use preserve auth mode for Claude Code default first-party routing")
 	}
 	return nil
 }
@@ -240,20 +244,20 @@ func launchClaudeModelID(modelAlias string) string {
 	return gateway.DiscoveryIDForAlias(modelAlias)
 }
 
-func launchClaudeSettingsArg(ctx context.Context, s *store.Store, force bool) (string, error) {
+func launchClaudeSettingsArg(ctx context.Context, s *store.Store, includeToolDisabled bool) (string, error) {
 	existing, configured, err := claudeAvailableModels()
 	if err != nil {
 		return "", err
 	}
-	if !configured && !force {
-		return "", nil
-	}
-	models, err := s.ListModels(ctx)
+	aliases, hasRoutable, err := routableModelAliases(ctx, s, includeToolDisabled)
 	if err != nil {
 		return "", fmt.Errorf("building Claude Code model allowlist extension: %w", err)
 	}
-	ids := make([]string, 0, len(existing)+len(models))
-	seen := make(map[string]struct{}, len(existing)+len(models))
+	if !hasRoutable {
+		return "", nil
+	}
+	ids := make([]string, 0, len(existing)+len(aliases))
+	seen := make(map[string]struct{}, len(existing)+len(aliases))
 	baseIDs := existing
 	if !configured {
 		baseIDs = gateway.FirstPartyAnthropicModelIDs()
@@ -269,21 +273,13 @@ func launchClaudeSettingsArg(ctx context.Context, s *store.Store, force bool) (s
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
-	addedCCR := false
-	for _, model := range models {
-		if model.Status == "blocked" {
-			continue
-		}
-		id := gateway.DiscoveryIDForAlias(model.Alias)
+	for _, alias := range aliases {
+		id := gateway.DiscoveryIDForAlias(alias)
 		if _, ok := seen[id]; ok {
 			continue
 		}
 		seen[id] = struct{}{}
 		ids = append(ids, id)
-		addedCCR = true
-	}
-	if !addedCCR {
-		return "", nil
 	}
 	payload := struct {
 		AvailableModels []string `json:"availableModels"`
@@ -463,44 +459,35 @@ func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.St
 		}
 		return requested, nil
 	}
-	aliases, err := routableModelAliases(ctx, s)
-	if err != nil {
-		return "", err
-	}
-	switch len(aliases) {
-	case 0:
-		return "", nil
-	case 1:
-		if _, _, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, aliases[0], true); validateErr != nil {
-			return "", validateErr
-		}
-		return aliases[0], nil
-	default:
-		return "", nil
-	}
+	return "", nil
 }
 
-func routableModelAliases(ctx context.Context, s *store.Store) ([]string, error) {
+func routableModelAliases(ctx context.Context, s *store.Store, includeToolDisabled bool) (aliases []string, hasRoutable bool, err error) {
 	models, err := s.ListModels(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	aliases := make([]string, 0, len(models))
+	aliases = make([]string, 0, len(models))
 	for _, model := range models {
 		if model.Status == "blocked" {
 			continue
 		}
 		provider, err := s.GetProvider(ctx, model.ProviderName)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		caps := effectiveProviderCapabilities(provider)
-		if caps.Protocol == providers.ProtocolOpenAICompatible || caps.Protocol == providers.ProtocolAnthropicCompatible {
-			aliases = append(aliases, model.Alias)
+		if caps.Protocol != providers.ProtocolOpenAICompatible && caps.Protocol != providers.ProtocolAnthropicCompatible {
+			continue
 		}
+		hasRoutable = true
+		if !includeToolDisabled && (model.Status == "chat-only" || providerDisablesClaudeTools(provider)) {
+			continue
+		}
+		aliases = append(aliases, model.Alias)
 	}
 	slices.Sort(aliases)
-	return aliases, nil
+	return aliases, hasRoutable, nil
 }
 
 func cleanupStartedClaudeProcess(process ClaudeProcess) error {

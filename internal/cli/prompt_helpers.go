@@ -228,21 +228,6 @@ func promptAliasConflict(ctx context.Context, deps Dependencies, alias, modelID 
 	return renamed, false, nil
 }
 
-func promptSaveProviderOnly(ctx context.Context, deps Dependencies) (bool, error) {
-	saveOnly := true
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewConfirm().
-			Title("Save provider without importing models?").
-			Affirmative("Save provider").
-			Negative("Do not save").
-			Value(&saveOnly),
-	))
-	if err := runHuhForm(ctx, deps, form); err != nil {
-		return false, err
-	}
-	return saveOnly, nil
-}
-
 func confirmRemoval(ctx context.Context, deps Dependencies, yes, interactive bool, title string) (bool, error) {
 	if yes {
 		return true, nil

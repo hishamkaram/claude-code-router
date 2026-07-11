@@ -58,36 +58,60 @@ ccr doctor
 
 ## Quick Start
 
-This example adds OpenRouter, imports its discoverable models, and launches
-Claude Code with one selected alias.
+The guided path is the shortest way to add a provider, choose credentials, import
+models, and review aliases before anything is saved.
 
 ```bash
-export OPENROUTER_API_KEY='replace-with-your-key'
-
 ccr init
-ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
-ccr provider test openrouter
-ccr provider discover-models openrouter
-ccr provider import-models openrouter --all
+ccr provider add --interactive
 ccr model list
-ccr launch --model <alias>
+ccr launch
 ```
 
-Pass standard Claude Code options directly after `launch`, for example:
+`ccr launch` keeps Claude Code's normal startup model and exposes configured,
+non-blocked CCR aliases that are safe for that tools-enabled session in
+`/model`. Choose `CCR <alias>` there to route future work in the same session.
+To start directly on one alias, including a `chat-only` alias that disables
+tools for the launch, pass it explicitly:
 
 ```bash
 ccr launch --model <alias> --chrome
 ```
 
-Within Claude Code, open `/model` and select a CCR model option to switch future
-work in that session. Your organization may restrict which Claude Code model
-options are available; CCR reports that limitation instead of bypassing it.
+### Scripted Setup
+
+For automation, add providers and models without prompts:
+
+```bash
+export OPENROUTER_API_KEY='replace-with-your-key'
+
+ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
+ccr provider test openrouter
+ccr provider import-models openrouter --all
+```
+
+Or import with the searchable review flow:
+
+```bash
+ccr provider import-models openrouter
+```
+
+For providers without model discovery, add aliases explicitly:
+
+```bash
+ccr model add coding-model --provider openrouter --model <provider-model-id>
+ccr model test coding-model
+```
+
+Your organization may restrict which Claude Code model options are available;
+CCR reports that limitation instead of bypassing it.
 
 ## How Routing Works
 
 1. CCR launches Claude Code through a loopback-only local gateway.
-2. Registered model aliases appear as `CCR <alias>` in Claude Code's model
-   picker and route to the configured provider.
+2. Registered, non-blocked tool-compatible aliases appear as `CCR <alias>` in
+   Claude Code's model picker during default launches. Tool-disabled aliases are
+   available by starting directly with `ccr launch --model <alias>`.
 3. Standard first-party model names route to Anthropic. The default
    `--auth-mode preserve` keeps an existing Claude Code subscription login or
    Anthropic API-key authentication available for those routes.
@@ -106,7 +130,8 @@ ccr provider list                 # show configured providers
 ccr model list                    # show model aliases
 ccr model test <alias>            # validate a route against its provider
 ccr conformance run <alias>       # record compatibility checks
-ccr launch --model <alias>        # start Claude Code through CCR
+ccr launch                        # expose CCR aliases in /model
+ccr launch --model <alias>        # start directly on one CCR alias
 ccr status                        # inspect local router state
 ccr sessions                      # list launched sessions
 ccr agents                        # list observed agents and workers

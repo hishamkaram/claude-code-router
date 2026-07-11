@@ -14,73 +14,102 @@ ccr version
 ccr doctor
 ```
 
-`ccr doctor` checks the local SQLite state, secret backend, and the installed
-Claude Code binary. Install and sign in to Claude Code before launching a
-first-party route.
+`ccr doctor` checks the local SQLite state, secret backend, and installed Claude
+Code binary. Install and sign in to Claude Code before launching a first-party
+Anthropic route.
 
-## First External Provider
+## First Provider
 
-This example uses OpenRouter. It stores only the environment-variable reference
-in CCR's database, not the value of `OPENROUTER_API_KEY`.
+Use the guided wizard first:
+
+```bash
+ccr init
+ccr provider add --interactive
+```
+
+The wizard starts with a searchable provider profile picker. It then asks for an
+editable connection name, base URL when needed, and one credential choice:
+hidden OS keychain entry, environment-variable reference, `0600` key file, or
+explicit no-key mode.
+
+For OpenAI-compatible profiles that support discovery, CCR verifies connectivity
+with `/v1/models`, shows a searchable model multi-select, and lets you review
+aliases before saving. For non-discoverable profiles, CCR validates the provider
+config and credential resolution, then offers a manual repeating model form.
+
+New imported aliases default to `degraded`. CCR never promotes compatibility
+automatically.
+
+## Launch Claude Code
+
+Launch once through CCR:
+
+```bash
+ccr launch
+```
+
+Without `--model`, Claude Code starts on its normal configured model. CCR still
+passes an ephemeral allowlist so configured, non-blocked aliases that are safe
+for a tools-enabled session appear in `/model` as `CCR <alias>`. Selecting one
+routes future work in that session through the configured provider.
+
+Pass ordinary Claude Code options after `launch`:
+
+```bash
+ccr launch --chrome
+```
+
+Start directly on one CCR alias only when you want that alias to be the startup
+model:
+
+```bash
+ccr launch --model coding-model
+```
+
+CCR reserves `--model`, `--auth-mode`, `--permission-mode`, `--print`/`-p`, and
+`--db`. Use `ccr launch --help` for CCR help, or `ccr launch -- --help` for
+underlying Claude Code help without starting CCR. CCR rejects options that would
+override its selected model, generated model allowlist, or tool-safety
+restrictions.
+
+## Scripted Alternatives
+
+For automation, add a provider and import all discoverable models without
+prompts:
 
 ```bash
 export OPENROUTER_API_KEY='replace-with-your-key'
 
-ccr init
 ccr provider add openrouter --api-key-env OPENROUTER_API_KEY
 ccr provider test openrouter
-ccr provider discover-models openrouter
 ccr provider import-models openrouter --all
-ccr model list
 ```
 
-`discover-models` shows what the provider currently exposes. `import-models
---all` creates conflict-safe CCR aliases for every discovered model. You can
-instead add one explicit alias:
+For a guided model import on an existing provider:
+
+```bash
+ccr provider import-models openrouter
+```
+
+For manual aliases:
 
 ```bash
 ccr model add coding-model --provider openrouter --model <provider-model-id>
 ccr model test coding-model
 ```
 
-## Launch Claude Code
+## Multiple Providers
 
-Start on a known alias:
+You can configure several providers and many aliases before launching. A normal
+`ccr launch` exposes non-blocked tool-compatible aliases in `/model` while
+preserving Claude Code's default startup model. Use `/model` to switch between
+providers in the same session. Start directly with `--model <alias>` when an
+alias is `chat-only` or otherwise requires tools to be disabled for the launch.
 
-```bash
-ccr launch --model coding-model
-```
+New agents and workflows use the active route where Claude Code permits it.
+Existing workers can remain on their spawn-time model.
 
-CCR passes ordinary Claude Code options and prompts through unchanged. For
-example, enable Claude in Chrome while starting on a CCR model:
-
-```bash
-ccr launch --model coding-model --chrome
-```
-
-CCR reserves `--model`, `--auth-mode`, `--permission-mode`, `--print`/`-p`, and
-`--db`. Use `ccr launch --help` for CCR help, or `ccr launch -- --help` for
-underlying Claude Code help without starting CCR. CCR also rejects options that
-would override its selected model, generated model allowlist, or tool-safety
-restrictions. It also rejects `--fallback-model` and `--bg`/`--background`,
-which would bypass the selected route or outlive CCR's local gateway.
-For a tool-disabled route, CCR also rejects `--tools`, `--mcp-config`,
-`--plugin-dir`, and `--plugin-url`.
-
-If exactly one routable alias exists, `ccr launch` selects it automatically.
-With zero or multiple aliases, Claude Code starts on its configured default model
-until you select another option.
-
-Inside the running Claude Code session, use `/model` and choose a `CCR <alias>`
-entry to route future work in that session. New agents and workflows use the
-active route where it is safe; existing workers can remain on their spawn-time
-model.
-
-Some organizations restrict the Claude Code model picker. CCR cannot override
-that policy. Use a permitted default model or launch with a configured CCR alias
-when the policy allows it.
-
-## First-Party Anthropic Routes
+## Authentication
 
 Use the default authentication mode to preserve a Claude Code subscription login
 or Anthropic API-key authentication for ordinary first-party Claude model names:
@@ -89,10 +118,12 @@ or Anthropic API-key authentication for ordinary first-party Claude model names:
 ccr launch --auth-mode preserve
 ```
 
-The local gateway adds a temporary CCR session header but does not replace the
-original first-party credentials in this mode. See
-[routing and authentication](routing.md#authentication-modes) for the
-third-party-only `gateway-token` mode.
+`--auth-mode gateway-token` disables the original Anthropic credentials and
+requires an explicit startup CCR alias:
+
+```bash
+ccr launch --auth-mode gateway-token --model coding-model
+```
 
 ## Inspect Local State
 

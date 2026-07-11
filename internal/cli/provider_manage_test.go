@@ -337,7 +337,7 @@ func TestProviderUpdateInteractive(t *testing.T) {
 		t.Fatalf("provider add error = %v", err)
 	}
 	input := strings.Join([]string{
-		"1",                     // LiteLLM/OpenAI-compatible
+		"5",                     // LiteLLM/OpenAI-compatible
 		"http://localhost:5000", // base URL
 		"4",                     // no API key
 	}, "\n") + "\n"
@@ -390,7 +390,7 @@ func TestProviderUpdateInteractiveRequiresAuthDecisionWhenTypeStartsRequiringKey
 		t.Fatalf("provider add error = %v", err)
 	}
 	input := strings.Join([]string{
-		"2", // OpenRouter
+		"4", // OpenRouter
 		"",  // keep existing base URL
 		"1", // keep current empty secret reference
 	}, "\n") + "\n"
