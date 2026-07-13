@@ -37,19 +37,31 @@ ccr status
 ccr launch
 ```
 
-A normal no-model launch should expose configured, non-blocked aliases that are
-safe for a tools-enabled session in `/model` as `CCR <alias>` while preserving
-Claude Code's normal startup model. If an alias is missing, check that it is not
-`blocked`, that its provider still exists, and that the provider protocol is
-Anthropic-compatible or OpenAI-compatible. If the alias is `chat-only` or its
-provider mode disables tools, start directly with `ccr launch --model <alias>`.
+A normal no-model launch preserves Claude Code's startup model and subscription
+authentication, then prints direct commands for configured, non-blocked aliases
+that are safe for a tools-enabled session:
+
+```text
+/model claude-ccr-<alias>
+```
+
+Current Claude Code does not auto-populate gateway aliases in the visual picker
+while the saved claude.ai login remains active. Direct selection still works and
+you can switch back to `opus`, `sonnet`, or another subscription model in the
+same session. If a direct alias fails, check that it is not `blocked`, that its
+provider still exists, and that the provider protocol is Anthropic-compatible or
+OpenAI-compatible. If it is `chat-only` or its provider mode disables tools,
+start directly with `ccr launch --model <alias>`.
 
 Claude Code organization policy can still restrict the model picker. CCR cannot
 bypass that policy; use an allowed default model or ask the organization
 administrator to permit the needed model option.
 
-`--auth-mode gateway-token` requires `--model <alias>`, so it is not the right
-mode for checking alias visibility on a default-startup launch.
+`--auth-mode gateway-token` requires `--model <alias>` and lets Claude Code
+authenticate to CCR's `/v1/models` endpoint, so aliases can appear in the visual
+picker. That mode intentionally disables the original subscription and API-key
+authentication; do not use it when first-party subscription routes must remain
+available.
 
 ## CCR Starts on an Unexpected Model
 

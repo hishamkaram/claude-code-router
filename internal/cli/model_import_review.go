@@ -157,7 +157,7 @@ func promptManualModelImport(ctx context.Context, deps Dependencies, planned []p
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewInput().
 			Title("Model alias").
-			Description("Lowercase CCR alias shown in /model as CCR <alias>.").
+			Description("Lowercase CCR alias used by --model and direct /model selection.").
 			Value(&item.alias).
 			Validate(func(value string) error {
 				return validatePlannedModelAlias(value, planned, -1, existing)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -76,9 +77,10 @@ func TestLaunchExtendsClaudeAvailableModelsWithoutStartupModel(t *testing.T) {
 	}
 
 	launcher := &fakeLauncher{pid: os.Getpid()}
-	if _, _, err := runCommandWithDeps(t, Dependencies{
+	out, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher: launcher,
-	}, "--db", dbPath, "launch"); err != nil {
+	}, "--db", dbPath, "launch")
+	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
 	if launcher.hasArg("--model") {
@@ -92,6 +94,14 @@ func TestLaunchExtendsClaudeAvailableModelsWithoutStartupModel(t *testing.T) {
 	}
 	if slices.Contains(payload.AvailableModels, "claude-ccr-chat") {
 		t.Fatalf("availableModels includes tool-disabled alias in tools-enabled launch: %#v", payload.AvailableModels)
+	}
+	for _, want := range []string{"/model claude-ccr-gpt", "/model claude-ccr-qwen"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("launch output = %q, missing %q", out, want)
+		}
+	}
+	if strings.Contains(out, "/model claude-ccr-chat") {
+		t.Fatalf("launch output includes tool-disabled alias guidance: %q", out)
 	}
 }
 

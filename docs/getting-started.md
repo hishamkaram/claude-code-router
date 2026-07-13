@@ -48,10 +48,12 @@ Launch once through CCR:
 ccr launch
 ```
 
-Without `--model`, Claude Code starts on its normal configured model. CCR still
-passes an ephemeral allowlist so configured, non-blocked aliases that are safe
-for a tools-enabled session appear in `/model` as `CCR <alias>`. Selecting one
-routes future work in that session through the configured provider.
+Without `--model`, Claude Code starts on its normal configured model. CCR passes
+an ephemeral allowlist so configured, non-blocked aliases remain directly
+selectable. Current Claude Code does not populate gateway aliases in the visual
+`/model` picker while subscription authentication is preserved, so launch output
+prints one `/model claude-ccr-<alias>` command per safe alias. Typing one routes
+future work in that session through the configured provider.
 
 Pass ordinary Claude Code options after `launch`:
 
@@ -101,10 +103,11 @@ ccr model test coding-model
 ## Multiple Providers
 
 You can configure several providers and many aliases before launching. A normal
-`ccr launch` exposes non-blocked tool-compatible aliases in `/model` while
-preserving Claude Code's default startup model. Use `/model` to switch between
-providers in the same session. Start directly with `--model <alias>` when an
-alias is `chat-only` or otherwise requires tools to be disabled for the launch.
+`ccr launch` preserves Claude Code's default startup model and prints direct
+switch commands for every non-blocked, tool-compatible alias. Use those
+`/model claude-ccr-<alias>` commands to switch between providers in the same
+session. Start directly with `--model <alias>` when an alias is `chat-only` or
+otherwise requires tools to be disabled for the launch.
 
 New agents and workflows use the active route where Claude Code permits it.
 Existing workers can remain on their spawn-time model.
@@ -118,8 +121,9 @@ or Anthropic API-key authentication for ordinary first-party Claude model names:
 ccr launch --auth-mode preserve
 ```
 
-`--auth-mode gateway-token` disables the original Anthropic credentials and
-requires an explicit startup CCR alias:
+`--auth-mode gateway-token` disables the original Anthropic credentials,
+requires an explicit startup CCR alias, and enables authenticated gateway model
+discovery for the visual picker:
 
 ```bash
 ccr launch --auth-mode gateway-token --model coding-model

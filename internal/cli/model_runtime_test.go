@@ -444,6 +444,9 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 	if !strings.Contains(out, "No ccr startup model selected") {
 		t.Fatalf("launch output missing default model summary: %q", out)
 	}
+	if !strings.Contains(out, "/model claude-ccr-gpt") {
+		t.Fatalf("launch output missing direct model guidance: %q", out)
+	}
 	if !launcher.hasEnvPrefix("ANTHROPIC_BASE_URL=http://127.0.0.1:") ||
 		launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
 		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") ||
@@ -470,6 +473,22 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 	}
 	if !strings.Contains(out, "status=running") || !strings.Contains(out, "model=(request-selected)") {
 		t.Fatalf("sessions after launch output = %q", out)
+	}
+}
+
+func TestLaunchHelpDescribesPreserveAuthModelSelection(t *testing.T) {
+	out, _, err := runCommandWithDeps(t, Dependencies{}, "launch", "--help")
+	if err != nil {
+		t.Fatalf("launch help error = %v", err)
+	}
+	for _, want := range []string{
+		"direct /model claude-ccr-<alias>",
+		"may omit gateway aliases from the visual picker",
+		"gateway-token auth only when picker discovery matters more than preserving",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("launch help = %q, missing %q", out, want)
+		}
 	}
 }
 
@@ -558,13 +577,11 @@ func TestLaunchPreserveAuthModeClearsInheritedGatewayAuth(t *testing.T) {
 
 func assertPreserveAuthEnv(t *testing.T, launcher *fakeLauncher) {
 	t.Helper()
-	authToken, ok := launcher.envValue("ANTHROPIC_AUTH_TOKEN")
-	if !ok || authToken != "" {
-		t.Fatalf("preserve launch env should clear inherited ANTHROPIC_AUTH_TOKEN, got ok=%t value=%q env=%#v", ok, authToken, launcher.env)
+	if !launcher.unsetsEnv("ANTHROPIC_AUTH_TOKEN") {
+		t.Fatalf("preserve launch env should unset inherited ANTHROPIC_AUTH_TOKEN: %#v", launcher.env)
 	}
-	useGateway, ok := launcher.envValue("CLAUDE_CODE_USE_GATEWAY")
-	if !ok || useGateway != "" {
-		t.Fatalf("preserve launch env should clear inherited CLAUDE_CODE_USE_GATEWAY, got ok=%t value=%q env=%#v", ok, useGateway, launcher.env)
+	if !launcher.unsetsEnv("CLAUDE_CODE_USE_GATEWAY") {
+		t.Fatalf("preserve launch env should unset inherited CLAUDE_CODE_USE_GATEWAY: %#v", launcher.env)
 	}
 	if launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") {
 		t.Fatalf("preserve launch env overrides Anthropic API-key auth: %#v", launcher.env)
@@ -593,8 +610,8 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	if !launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") {
 		t.Fatalf("gateway-token launch env missing ANTHROPIC_AUTH_TOKEN: %#v", launcher.env)
 	}
-	if !launcher.hasEnv("CLAUDE_CODE_USE_GATEWAY=1") {
-		t.Fatalf("gateway-token launch env missing CLAUDE_CODE_USE_GATEWAY: %#v", launcher.env)
+	if !launcher.unsetsEnv("CLAUDE_CODE_USE_GATEWAY") || launcher.hasEnvPrefix("CLAUDE_CODE_USE_GATEWAY=") {
+		t.Fatalf("gateway-token launch env should unset CLAUDE_CODE_USE_GATEWAY: %#v", launcher.env)
 	}
 	if !launcher.hasEnv("ENABLE_TOOL_SEARCH=true") {
 		t.Fatalf("gateway-token launch env missing ENABLE_TOOL_SEARCH: %#v", launcher.env)

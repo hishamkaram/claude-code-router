@@ -36,9 +36,12 @@ with its Chrome integration.
 	Fallback and detached background modes are rejected because they cannot preserve
 	CCR's selected route and local gateway ownership.
 
-	Without --model, Claude Code starts on its normal configured model while CCR
-	exposes every configured, non-blocked routable alias in /model. Pass --model
-	<alias> only when you want that CCR alias to be the startup model.
+	Without --model, Claude Code starts on its normal configured model. In the
+	default preserve auth mode, CCR prints direct /model claude-ccr-<alias>
+	commands because Claude Code may omit gateway aliases from the visual picker.
+	Use gateway-token auth only when picker discovery matters more than preserving
+	the original Anthropic subscription or API-key authentication. Pass --model
+	<alias> when you want that CCR alias to be the startup model.
 
 	Use ccr launch --help for router-specific help. To ask Claude Code for its own
 	help, use ccr launch -- --help.`,
@@ -68,7 +71,7 @@ with its Chrome integration.
 }
 
 func runClaudeMetadata(ctx context.Context, cmd *cobra.Command, deps Dependencies, args []string) error {
-	process, err := deps.Launcher.Start(ctx, args, nil, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
+	process, err := deps.Launcher.Start(ctx, args, ClaudeEnvironment{}, cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 	if err != nil {
 		return fmt.Errorf("running Claude Code metadata command: %w", err)
 	}
@@ -194,9 +197,14 @@ func validateClaudePermissionMode(mode string) error {
 	}
 }
 
-func launchClaudeEnv(gatewayURL, token, modelAlias, modelID string, disableTools bool, authMode string) []string {
-	env := make([]string, 0, 10)
-	env = append(env,
+func launchClaudeEnv(gatewayURL, token, modelAlias, modelID string, disableTools bool, authMode string) ClaudeEnvironment {
+	env := ClaudeEnvironment{
+		Set: make([]string, 0, 10),
+		Unset: []string{
+			"CLAUDE_CODE_USE_GATEWAY",
+		},
+	}
+	env.Set = append(env.Set,
 		"ANTHROPIC_BASE_URL="+gatewayURL,
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
 		// This enables auto mode when the user selects it through --permission-mode
@@ -206,35 +214,34 @@ func launchClaudeEnv(gatewayURL, token, modelAlias, modelID string, disableTools
 		"CLAUDE_CODE_ENABLE_AUTO_MODE=1",
 	)
 	if disableTools {
-		env = append(env, "ENABLE_TOOL_SEARCH=")
+		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=")
 	} else {
 		// Claude Code disables deferred MCP tool search behind non-first-party gateways
 		// unless this is enabled. CCR translates the resulting tool_reference blocks.
-		env = append(env, "ENABLE_TOOL_SEARCH=true")
+		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=true")
 	}
 	if authMode == launchAuthModeGatewayToken {
-		env = append(env,
-			"CLAUDE_CODE_USE_GATEWAY=1",
+		env.Set = append(env.Set,
 			"ANTHROPIC_AUTH_TOKEN="+token,
 		)
 	} else {
-		env = append(env,
-			"CLAUDE_CODE_USE_GATEWAY=",
-			"ANTHROPIC_AUTH_TOKEN=",
+		env.Unset = append(env.Unset, "ANTHROPIC_AUTH_TOKEN")
+		env.Set = append(env.Set,
 			"ANTHROPIC_CUSTOM_HEADERS="+launchAnthropicCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS"), token),
 		)
 	}
 	if disableTools {
-		env = append(env, "CLAUDE_CODE_SIMPLE=1")
+		env.Set = append(env.Set, "CLAUDE_CODE_SIMPLE=1")
 	}
 	if modelID == "" {
 		return env
 	}
-	return append(env,
+	env.Set = append(env.Set,
 		"ANTHROPIC_CUSTOM_MODEL_OPTION="+modelID,
 		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=CCR "+modelAlias,
 		"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Model alias registered in ccr",
 	)
+	return env
 }
 
 func launchClaudeModelID(modelAlias string) string {
@@ -403,7 +410,27 @@ func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gate
 		fmt.Fprintln(out, "No ccr startup model selected; Claude Code will use its configured default model.")
 	}
 	writeLaunchAuthSummary(out, authMode)
-	fmt.Fprintln(out, "Gateway model discovery is enabled; registered aliases are exposed through /v1/models.")
+	if authMode == launchAuthModeGatewayToken {
+		fmt.Fprintln(out, "Gateway model discovery is requested; registered aliases are exposed through /v1/models.")
+		return
+	}
+	writePreserveAuthModelGuidance(ctx, out, s, disableTools)
+}
+
+func writePreserveAuthModelGuidance(ctx context.Context, out io.Writer, s *store.Store, includeToolDisabled bool) {
+	aliases, _, err := routableModelAliases(ctx, s, includeToolDisabled)
+	if err != nil {
+		fmt.Fprintf(out, "Registered ccr model guidance unavailable: %v\n", err)
+		return
+	}
+	if len(aliases) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "Claude Code may omit gateway aliases from /model while subscription authentication is preserved.")
+	fmt.Fprintln(out, "Select registered ccr models directly:")
+	for _, alias := range aliases {
+		fmt.Fprintf(out, "  /model %s\n", gateway.DiscoveryIDForAlias(alias))
+	}
 }
 
 func writeLaunchAuthSummary(out io.Writer, authMode string) {

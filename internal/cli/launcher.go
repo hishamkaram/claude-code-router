@@ -7,10 +7,16 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 )
 
+type ClaudeEnvironment struct {
+	Set   []string
+	Unset []string
+}
+
 type ClaudeLauncher interface {
-	Start(ctx context.Context, args, env []string, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error)
+	Start(ctx context.Context, args []string, env ClaudeEnvironment, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error)
 }
 
 type ClaudeProcess interface {
@@ -21,9 +27,9 @@ type ClaudeProcess interface {
 
 type ExecClaudeLauncher struct{}
 
-func (ExecClaudeLauncher) Start(ctx context.Context, args, env []string, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
+func (ExecClaudeLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
 	cmd := exec.CommandContext(ctx, "claude", args...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = applyClaudeEnvironment(os.Environ(), env)
 	cmd.Stdin = readerOrDefault(in, os.Stdin)
 	cmd.Stdout = writerOrDefault(out, os.Stdout)
 	cmd.Stderr = writerOrDefault(errOut, os.Stderr)
@@ -31,6 +37,31 @@ func (ExecClaudeLauncher) Start(ctx context.Context, args, env []string, in io.R
 		return nil, fmt.Errorf("starting Claude Code: %w", err)
 	}
 	return execClaudeProcess{cmd: cmd}, nil
+}
+
+func applyClaudeEnvironment(base []string, overlay ClaudeEnvironment) []string {
+	replaced := make(map[string]struct{}, len(overlay.Set)+len(overlay.Unset))
+	for _, name := range overlay.Unset {
+		replaced[name] = struct{}{}
+	}
+	for _, entry := range overlay.Set {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok {
+			replaced[name] = struct{}{}
+		}
+	}
+
+	merged := make([]string, 0, len(base)+len(overlay.Set))
+	for _, entry := range base {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, skip := replaced[name]; skip {
+				continue
+			}
+		}
+		merged = append(merged, entry)
+	}
+	return append(merged, overlay.Set...)
 }
 
 type execClaudeProcess struct {

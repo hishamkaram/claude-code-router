@@ -198,7 +198,7 @@ type livePluginClaudeLauncher struct {
 	pluginDir string
 }
 
-func (l livePluginClaudeLauncher) Start(ctx context.Context, args, env []string, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
+func (l livePluginClaudeLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
 	pluginArgs := append([]string{}, args...)
 	pluginArgs = append(pluginArgs, "--plugin-dir", l.pluginDir)
 	return (ExecClaudeLauncher{}).Start(ctx, pluginArgs, env, in, out, errOut)
