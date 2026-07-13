@@ -439,12 +439,9 @@ func interactiveModelImportPlan(ctx context.Context, cmd *cobra.Command, deps De
 
 	selected := models
 	if choice == modelImportSelect {
-		selected, err = promptModelSelection(ctx, deps, models)
+		selected, err = promptRequiredModelSelection(ctx, deps, models)
 		if err != nil {
 			return nil, modelImportSummary{}, err
-		}
-		if len(selected) == 0 {
-			return nil, modelImportSummary{}, nil
 		}
 	}
 	planned, summary, err := planModelImports(ctx, deps, s, provider.Name, selected, choice)
