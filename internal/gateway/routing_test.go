@@ -212,7 +212,7 @@ func TestGatewayModelDiscoveryIncludesFirstPartyWithoutNativeShim(t *testing.T) 
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"default", "sonnet", "opus", "haiku", "claude-ccr-gpt"} {
+	for _, want := range []string{"default", "sonnet", "opus", "haiku", "opusplan", "opusplan[1m]", "claude-ccr-gpt"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}
@@ -267,6 +267,59 @@ func TestGatewayFirstPartyClaudeRouteDoesNotFallBackWhenDiscoveryFails(t *testin
 	}
 	if openAICalled {
 		t.Fatalf("OpenAI-compatible provider was called after Anthropic discovery failure")
+	}
+}
+
+func TestGatewayRoutesOpusPlan1MToFirstParty(t *testing.T) {
+	ctx := context.Background()
+	openAICalled := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openAICalled = true
+		http.Error(w, "opusplan[1m] should pass through", http.StatusInternalServerError)
+	}))
+	defer provider.Close()
+	var gotBody string
+	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			http.NotFound(w, r)
+			return
+		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading anthropic body: %v", err)
+		}
+		gotBody = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"opusplan[1m]","content":[{"type":"text","text":"plan"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer anthropic.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGatewayWithConfig(t, ctx, Config{Store: s, Secrets: fakeGatewaySecrets{}, Token: "local-token", DefaultModelAlias: "gpt", AnthropicBaseURL: anthropic.URL})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"opusplan[1m]","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if openAICalled {
+		t.Fatalf("OpenAI-compatible provider was called for opusplan[1m]")
+	}
+	if !strings.Contains(gotBody, `"model":"opusplan[1m]"`) {
+		t.Fatalf("Anthropic pass-through body = %s, want original opusplan[1m] model", gotBody)
 	}
 }
 
@@ -366,7 +419,7 @@ func TestGatewayExactAliasWithDiscoveryPrefixWinsOverShim(t *testing.T) {
 	}
 }
 
-func TestGatewayRejectsUnknownNonClaudeModelWithoutDefaultAlias(t *testing.T) {
+func TestGatewayRejectsUnknownNonClaudeModelWithDefaultAlias(t *testing.T) {
 	ctx := context.Background()
 	called := false
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -376,7 +429,7 @@ func TestGatewayRejectsUnknownNonClaudeModelWithoutDefaultAlias(t *testing.T) {
 	defer provider.Close()
 
 	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
-	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	server := startGatewayWithConfig(t, ctx, Config{Store: s, Secrets: fakeGatewaySecrets{}, Token: "local-token", DefaultModelAlias: "gpt"})
 	defer func() {
 		if err := server.Shutdown(ctx); err != nil {
 			t.Fatalf("Shutdown() error = %v", err)
@@ -395,6 +448,13 @@ func TestGatewayRejectsUnknownNonClaudeModelWithoutDefaultAlias(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("gateway status = %d, want 502", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading gateway response: %v", err)
+	}
+	if !strings.Contains(string(raw), "refusing to route it to the startup alias") {
+		t.Fatalf("gateway response = %s, want visible startup alias refusal", raw)
 	}
 	if called {
 		t.Fatalf("provider was called for unknown non-Claude model")

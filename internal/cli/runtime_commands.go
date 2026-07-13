@@ -207,11 +207,6 @@ func launchClaudeEnv(gatewayURL, token, modelAlias, modelID string, disableTools
 	env.Set = append(env.Set,
 		"ANTHROPIC_BASE_URL="+gatewayURL,
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
-		// This enables auto mode when the user selects it through --permission-mode
-		// or their Claude Code settings. It does not select auto mode itself.
-		// Third-party gateways require the explicit opt-in before they can classify
-		// tool actions.
-		"CLAUDE_CODE_ENABLE_AUTO_MODE=1",
 	)
 	if disableTools {
 		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=")

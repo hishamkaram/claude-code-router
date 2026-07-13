@@ -69,5 +69,6 @@ func firstPartyAnthropicModelEntries() []gatewayModelEntry {
 		{ID: "sonnet[1m]", DisplayName: "Claude Sonnet 1M"},
 		{ID: "opus[1m]", DisplayName: "Claude Opus 1M"},
 		{ID: "opusplan", DisplayName: "Claude Opus planning"},
+		{ID: "opusplan[1m]", DisplayName: "Claude Opus planning 1M"},
 	}
 }

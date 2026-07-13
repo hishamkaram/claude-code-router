@@ -55,6 +55,34 @@ func TestLaunchPassesPermissionModeToClaude(t *testing.T) {
 	}
 }
 
+func TestLaunchAutoPermissionModeDoesNotForceLegacyAutoEnv(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+	}, "--db", dbPath, "launch", "--model", "gpt", "--permission-mode", "auto")
+	if err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	index := slices.Index(launcher.args, "--permission-mode")
+	if index < 0 || index+1 >= len(launcher.args) || launcher.args[index+1] != "auto" {
+		t.Fatalf("launch args = %#v", launcher.args)
+	}
+	if launcher.hasEnvPrefix("CLAUDE_CODE_ENABLE_AUTO_MODE=") {
+		t.Fatalf("launch env should not force legacy auto mode opt-in: %#v", launcher.env)
+	}
+}
+
 func TestLaunchForwardsClaudeCodeArguments(t *testing.T) {
 	t.Parallel()
 
