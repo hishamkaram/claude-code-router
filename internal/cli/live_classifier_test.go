@@ -128,7 +128,7 @@ type liveDebugClaudeLauncher struct {
 	debugPath string
 }
 
-func (l liveDebugClaudeLauncher) Start(ctx context.Context, args, env []string, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
+func (l liveDebugClaudeLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
 	debugArgs := append([]string{}, args...)
 	debugArgs = append(debugArgs, "--debug-file", l.debugPath)
 	return (ExecClaudeLauncher{}).Start(ctx, debugArgs, env, in, out, errOut)

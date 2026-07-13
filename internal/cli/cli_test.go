@@ -874,7 +874,7 @@ func (r *promptReader) Read(p []byte) (int, error) {
 type fakeLauncher struct {
 	pid     int
 	args    []string
-	env     []string
+	env     ClaudeEnvironment
 	out     io.Writer
 	errOut  io.Writer
 	waitErr error
@@ -882,13 +882,16 @@ type fakeLauncher struct {
 	process *fakeProcess
 }
 
-func (f *fakeLauncher) Start(ctx context.Context, args, env []string, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
+func (f *fakeLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	f.starts++
 	f.args = append([]string(nil), args...)
-	f.env = append([]string(nil), env...)
+	f.env = ClaudeEnvironment{
+		Set:   append([]string(nil), env.Set...),
+		Unset: append([]string(nil), env.Unset...),
+	}
 	f.out = out
 	f.errOut = errOut
 	f.process = &fakeProcess{pid: f.pid, waitErr: f.waitErr}
@@ -896,7 +899,7 @@ func (f *fakeLauncher) Start(ctx context.Context, args, env []string, in io.Read
 }
 
 func (f *fakeLauncher) hasEnvPrefix(prefix string) bool {
-	for _, item := range f.env {
+	for _, item := range f.env.Set {
 		if strings.HasPrefix(item, prefix) {
 			return true
 		}
@@ -905,7 +908,7 @@ func (f *fakeLauncher) hasEnvPrefix(prefix string) bool {
 }
 
 func (f *fakeLauncher) hasEnv(value string) bool {
-	for _, item := range f.env {
+	for _, item := range f.env.Set {
 		if item == value {
 			return true
 		}
@@ -915,12 +918,21 @@ func (f *fakeLauncher) hasEnv(value string) bool {
 
 func (f *fakeLauncher) envValue(name string) (string, bool) {
 	prefix := name + "="
-	for _, item := range f.env {
+	for _, item := range f.env.Set {
 		if strings.HasPrefix(item, prefix) {
 			return strings.TrimPrefix(item, prefix), true
 		}
 	}
 	return "", false
+}
+
+func (f *fakeLauncher) unsetsEnv(name string) bool {
+	for _, item := range f.env.Unset {
+		if item == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *fakeLauncher) hasArg(value string) bool {

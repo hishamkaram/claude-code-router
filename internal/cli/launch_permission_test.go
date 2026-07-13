@@ -138,7 +138,7 @@ func TestLaunchMetadataCommandSkipsRouter(t *testing.T) {
 	if !slices.Equal(launcher.args, []string{"--version"}) {
 		t.Fatalf("launcher args = %#v, want [--version]", launcher.args)
 	}
-	if len(launcher.env) != 0 {
+	if len(launcher.env.Set) != 0 || len(launcher.env.Unset) != 0 {
 		t.Fatalf("launcher env = %#v, want none", launcher.env)
 	}
 	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
