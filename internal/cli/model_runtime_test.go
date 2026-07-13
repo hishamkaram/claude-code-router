@@ -452,7 +452,7 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") ||
 		launcher.hasEnv("CLAUDE_CODE_USE_GATEWAY=1") || !launcher.hasEnv("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1") ||
 		launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_MODEL_OPTION=") ||
-		!launcher.hasEnv("ENABLE_TOOL_SEARCH=true") || !launcher.hasEnv("CLAUDE_CODE_ENABLE_AUTO_MODE=1") {
+		!launcher.hasEnv("ENABLE_TOOL_SEARCH=true") || launcher.hasEnvPrefix("CLAUDE_CODE_ENABLE_AUTO_MODE=") {
 		t.Fatalf("launch env = %#v", launcher.env)
 	}
 	assertPreserveAuthEnv(t, launcher)
@@ -616,8 +616,8 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	if !launcher.hasEnv("ENABLE_TOOL_SEARCH=true") {
 		t.Fatalf("gateway-token launch env missing ENABLE_TOOL_SEARCH: %#v", launcher.env)
 	}
-	if !launcher.hasEnv("CLAUDE_CODE_ENABLE_AUTO_MODE=1") {
-		t.Fatalf("gateway-token launch env missing auto mode capability opt-in: %#v", launcher.env)
+	if launcher.hasEnvPrefix("CLAUDE_CODE_ENABLE_AUTO_MODE=") {
+		t.Fatalf("gateway-token launch env should not force legacy auto mode opt-in: %#v", launcher.env)
 	}
 	if launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=") {
 		t.Fatalf("gateway-token launch env should not set custom headers: %#v", launcher.env)

@@ -98,8 +98,8 @@ web-search backend.
 ## Automation Modes
 
 CCR requests Claude Code gateway model discovery in `gateway-token` mode and
-enables auto-mode support and deferred tool search when the active route can use
-tools. Choose the desired Claude Code permission mode explicitly:
+enables deferred tool search when the active route can use tools. Choose the
+desired Claude Code permission mode explicitly:
 
 ```bash
 ccr launch --model coding-model --permission-mode auto

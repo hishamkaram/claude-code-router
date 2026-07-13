@@ -306,8 +306,6 @@ const (
 	anthropicAuthIncoming
 )
 
-var errNoDefaultModelAlias = errors.New("no default model alias configured")
-
 type messageRoute struct {
 	kind              routeKind
 	model             store.Model
@@ -355,14 +353,7 @@ func (h *handler) selectRoute(ctx context.Context, requested string) (messageRou
 	if isFirstPartyAnthropicModelRequest(requested) {
 		return h.routeFirstPartyAnthropicModel(requested), nil
 	}
-	defaultRoute, defaultErr := h.defaultAliasRoute(ctx)
-	if defaultErr == nil {
-		return defaultRoute, nil
-	}
-	if !errors.Is(defaultErr, errNoDefaultModelAlias) {
-		return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("default model alias could not be routed: %v", defaultErr)}
-	}
-	return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("model %q is not a configured ccr alias, a ccr discovery alias, or a first-party Anthropic model", requested)}
+	return messageRoute{}, &requestValidationError{status: http.StatusBadGateway, message: fmt.Sprintf("model %q is not a configured ccr alias, a ccr discovery alias, or a first-party Anthropic model; refusing to route it to the startup alias", requested)}
 }
 
 type configuredAliasLookup struct {
@@ -414,33 +405,6 @@ func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel
 	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q with protocol %q is not supported by the gateway path", provider.Type, caps.Protocol)}
 }
 
-func (h *handler) defaultAliasRoute(ctx context.Context) (messageRoute, error) {
-	alias := strings.TrimSpace(h.cfg.DefaultModelAlias)
-	if alias == "" {
-		return messageRoute{}, errNoDefaultModelAlias
-	}
-	model, err := h.cfg.Store.GetModel(ctx, alias)
-	if err != nil {
-		return messageRoute{}, err
-	}
-	if model.Status == "blocked" {
-		return messageRoute{}, fmt.Errorf("default model alias %q is blocked", alias)
-	}
-	provider, err := h.cfg.Store.GetProvider(ctx, model.ProviderName)
-	if err != nil {
-		return messageRoute{}, err
-	}
-	caps := effectiveProviderCapabilities(provider)
-	if caps.Protocol == providers.ProtocolOpenAICompatible {
-		return messageRoute{kind: routeOpenAI, model: model, provider: provider, capabilities: caps, responseModel: alias}, nil
-	}
-	if caps.Protocol == providers.ProtocolAnthropicCompatible {
-		rewrittenProvider := provider
-		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, responseModel: alias}, nil
-	}
-	return messageRoute{}, fmt.Errorf("default model alias %q uses provider type %q with protocol %q", alias, provider.Type, caps.Protocol)
-}
-
 func aliasFromDiscoveryID(id string) (string, bool) {
 	id = strings.TrimSpace(id)
 	if !strings.HasPrefix(id, discoveryAliasPrefix) {
@@ -490,7 +454,7 @@ func looksLikeAnthropicModelID(id string) bool {
 
 func isFirstPartyAnthropicModelRequest(id string) bool {
 	switch strings.TrimSpace(id) {
-	case "default", "best", "fable", "sonnet", "opus", "haiku", "sonnet[1m]", "opus[1m]", "opusplan":
+	case "default", "best", "fable", "sonnet", "opus", "haiku", "sonnet[1m]", "opus[1m]", "opusplan", "opusplan[1m]":
 		return true
 	default:
 		return looksLikeAnthropicModelID(id) && !strings.HasPrefix(strings.TrimSpace(id), discoveryAliasPrefix)
