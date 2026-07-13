@@ -122,6 +122,11 @@ CCR reports that limitation instead of bypassing it.
    unsafe behavior is rejected with an explanation; it is never redirected to
    Claude or another configured provider.
 
+Model self-identification is generated text, not proof of routing. When an
+OpenAI-compatible model is asked which model is active, CCR adds route context
+so the answer can reflect the current alias and provider model instead of an
+older turn from the same Claude Code session.
+
 Use `ccr launch --auth-mode gateway-token --model <alias>` when you want a
 third-party-only session. That mode intentionally disables the original
 Anthropic subscription and API-key authentication, but allows Claude Code to
