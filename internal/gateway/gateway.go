@@ -207,7 +207,12 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(route.provider.SecretRef)))
 		return
 	}
-	openAIReq, err := toOpenAIChatRequest(req, route.model.ProviderModel)
+	openAIReq, err := toOpenAIChatRequest(req, openAIModelRoute{
+		alias:         route.model.Alias,
+		providerName:  route.provider.Name,
+		providerModel: route.model.ProviderModel,
+		requestModel:  route.responseModel,
+	})
 	if err != nil {
 		writeAnthropicError(w, http.StatusNotImplemented, err.Error())
 		return
