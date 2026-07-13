@@ -170,19 +170,46 @@ func promptImportChoice(ctx context.Context, deps Dependencies, discovered int) 
 }
 
 func promptModelSelection(ctx context.Context, deps Dependencies, models []string) ([]string, error) {
+	return promptModelSelectionWithValidation(ctx, deps, models, nil)
+}
+
+func promptRequiredModelSelection(ctx context.Context, deps Dependencies, models []string) ([]string, error) {
+	selectionErr := errors.New("select at least one model before continuing")
+	accessible := shouldUseAccessiblePrompts(Dependencies{
+		In:  readerOrDefault(deps.In, os.Stdin),
+		Err: writerOrDefault(deps.Err, os.Stderr),
+	})
+	selected, err := promptModelSelectionWithValidation(ctx, deps, models, func(selected []string) error {
+		if len(selected) == 0 && !accessible {
+			return selectionErr
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(selected) == 0 {
+		return nil, selectionErr
+	}
+	return selected, nil
+}
+
+func promptModelSelectionWithValidation(ctx context.Context, deps Dependencies, models []string, validate func([]string) error) ([]string, error) {
 	selected := make([]string, 0, len(models))
 	options := make([]huh.Option[string], 0, len(models))
 	for _, model := range models {
 		options = append(options, huh.NewOption(model, model))
 	}
-	form := huh.NewForm(huh.NewGroup(
-		huh.NewMultiSelect[string]().
-			Title("Select models to import").
-			Options(options...).
-			Filterable(true).
-			Height(12).
-			Value(&selected),
-	))
+	selection := huh.NewMultiSelect[string]().
+		Title("Select models to import").
+		Options(options...).
+		Filterable(true).
+		Height(12).
+		Value(&selected)
+	if validate != nil {
+		selection = selection.Validate(validate)
+	}
+	form := huh.NewForm(huh.NewGroup(selection))
 	if err := runHuhForm(ctx, deps, form); err != nil {
 		return nil, err
 	}

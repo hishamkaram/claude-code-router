@@ -224,41 +224,6 @@ func TestProviderAddZAIAndGenericProtocol(t *testing.T) {
 	}
 }
 
-func TestProviderAddInteractiveSavesSelectedModelsWithPrefixedAliases(t *testing.T) {
-	t.Parallel()
-
-	server := newModelsServer(t, []string{"glm-5.2[1m]", "qwen/qwen3-coder"})
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	input := strings.Join([]string{
-		"5",        // LiteLLM/OpenAI-compatible
-		"",         // default provider name
-		server.URL, // base URL
-		"3",        // no API key
-		"1",        // select models
-		"1",        // select first discovered model
-		"0",        // finish multiselect
-		"1",        // save reviewed aliases
-	}, "\n") + "\n"
-
-	out, errOut, err := runCommandWithDeps(t, Dependencies{
-		In: newPromptReader(input),
-	}, "--db", dbPath, "provider", "add", "--interactive", "litellm")
-	if err != nil {
-		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
-	}
-	if !strings.Contains(out, `Provider "litellm" added`) || !strings.Contains(out, "Imported 1 model aliases") {
-		t.Fatalf("interactive provider add output = %q", out)
-	}
-
-	out, _, err = runCommand(t, "--db", dbPath, "model", "list")
-	if err != nil {
-		t.Fatalf("model list error = %v", err)
-	}
-	if !strings.Contains(out, "litellm-glm-5-2-1m") || !strings.Contains(out, "model=glm-5.2[1m]") {
-		t.Fatalf("model list output = %q", out)
-	}
-}
-
 func TestProviderAddInteractiveProtocolDefaultForNonTerminal(t *testing.T) {
 	t.Parallel()
 

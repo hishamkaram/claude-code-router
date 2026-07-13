@@ -48,6 +48,77 @@ func TestProviderHelpShowsGuidedInteractiveAndImportReview(t *testing.T) {
 	}
 }
 
+func TestProviderAddInteractiveSavesSelectedModels(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"glm-5.2[1m]", "qwen/qwen3-coder"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"5",        // LiteLLM/OpenAI-compatible
+		"",         // default provider name
+		server.URL, // base URL
+		"3",        // no API key
+		"1",        // select models
+		"1",        // select first discovered model
+		"2",        // select second discovered model
+		"0",        // finish multiselect
+		"1",        // save reviewed aliases
+	}, "\n") + "\n"
+
+	out, errOut, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "--interactive", "litellm")
+	if err != nil {
+		t.Fatalf("interactive provider add error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !strings.Contains(out, `Provider "litellm" added`) || !strings.Contains(out, "Imported 2 model aliases") {
+		t.Fatalf("interactive provider add output = %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "model", "list")
+	if err != nil {
+		t.Fatalf("model list error = %v", err)
+	}
+	for _, want := range []string{"litellm-glm-5-2-1m", "model=glm-5.2[1m]", "litellm-qwen-qwen3-coder", "model=qwen/qwen3-coder"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("model list output missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestProviderAddInteractiveRejectsEmptyModelSelectionBeforeSaving(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"glm-5.2[1m]"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	input := strings.Join([]string{
+		"5",        // LiteLLM/OpenAI-compatible
+		"",         // default provider name
+		server.URL, // base URL
+		"3",        // no API key
+		"1",        // select models
+		"0",        // finish without selecting a model
+	}, "\n") + "\n"
+
+	out, _, err := runCommandWithDeps(t, Dependencies{
+		In: newPromptReader(input),
+	}, "--db", dbPath, "provider", "add", "--interactive", "litellm")
+	if err == nil || !strings.Contains(err.Error(), "select at least one model before continuing") {
+		t.Fatalf("interactive provider add error = %v, want required-selection error", err)
+	}
+	if strings.Contains(out, `Provider "litellm" added`) {
+		t.Fatalf("interactive provider add persisted provider after empty selection: %q", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if strings.TrimSpace(out) != "No providers configured." {
+		t.Fatalf("provider list after empty selection = %q", out)
+	}
+}
+
 func TestProviderImportModelsGuidedReviewRenamesAlias(t *testing.T) {
 	t.Parallel()
 
