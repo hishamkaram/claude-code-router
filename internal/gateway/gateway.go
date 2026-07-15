@@ -268,8 +268,38 @@ func (h *handler) validateOpenAIMessageRequest(req *anthropicRequest) *requestVa
 			return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("Anthropic request field %q is not supported by the OpenAI-compatible gateway path", field)}
 		}
 	}
+	if err := validateOpenAIContextManagement(req.Fields); err != nil {
+		return err
+	}
 	if err := validateThinking(req.Thinking); err != nil {
 		return &requestValidationError{status: http.StatusNotImplemented, message: err.Error()}
+	}
+	return nil
+}
+
+func validateOpenAIContextManagement(fields map[string]json.RawMessage) *requestValidationError {
+	raw, ok := fields["context_management"]
+	if !ok || len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var contextManagement struct {
+		Edits []struct {
+			Type string `json:"type"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(raw, &contextManagement); err != nil {
+		return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic context_management field"}
+	}
+	for _, edit := range contextManagement.Edits {
+		if strings.HasPrefix(edit.Type, "compact_") {
+			return &requestValidationError{
+				status: http.StatusNotImplemented,
+				message: fmt.Sprintf(
+					"Anthropic context_management edit %q requires compaction support; OpenAI-compatible routes in ccr cannot apply it safely",
+					edit.Type,
+				),
+			}
+		}
 	}
 	return nil
 }

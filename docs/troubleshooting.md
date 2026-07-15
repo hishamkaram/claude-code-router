@@ -73,6 +73,14 @@ alias:
 ccr launch --model <alias>
 ```
 
+## `/compact` Does Not Reduce Context on an OpenAI-Compatible Alias
+
+Claude Code compaction uses Anthropic `context_management` edits. CCR rejects
+compaction edits on OpenAI-compatible routes instead of silently forwarding the
+pre-compact transcript, because that would make the selected provider keep
+seeing stale context. Use a first-party or Anthropic-compatible route for
+sessions where `/compact` must work.
+
 ## First-Party Subscription Authentication Fails
 
 Use the default `--auth-mode preserve` and verify the ordinary `claude` CLI is
