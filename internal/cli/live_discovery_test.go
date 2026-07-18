@@ -57,7 +57,7 @@ func TestLiveGatewayTokenLaunchDiscoversConfiguredAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading Claude gateway discovery cache: %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
-	if !bytes.Contains(cache, []byte("claude-ccr-gpt")) {
+	if !bytes.Contains(cache, []byte("anthropic.ccr.gpt")) {
 		t.Fatalf("gateway discovery cache does not include configured alias: %s", cache)
 	}
 }

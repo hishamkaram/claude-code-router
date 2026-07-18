@@ -37,7 +37,7 @@ func TestGatewayInjectsOpenAIRouteIdentityForModelQuestion(t *testing.T) {
 	}()
 
 	body := `{
-		"model":"claude-ccr-glm",
+		"model":"anthropic.ccr.glm",
 		"messages":[
 			{"role":"user","content":"which model were you earlier?"},
 			{"role":"assistant","content":"I am Sonnet."},
@@ -65,7 +65,7 @@ func TestGatewayInjectsOpenAIRouteIdentityForModelQuestion(t *testing.T) {
 		!strings.Contains(identity.Content, `CCR alias "glm"`) ||
 		!strings.Contains(identity.Content, `provider "litellm"`) ||
 		!strings.Contains(identity.Content, `provider model "glm-5.2"`) ||
-		!strings.Contains(identity.Content, `Claude Code requested model ID "claude-ccr-glm"`) {
+		!strings.Contains(identity.Content, `Claude Code requested model ID "anthropic.ccr.glm"`) {
 		t.Fatalf("route identity message = %#v", identity)
 	}
 	if gotMessages[2].Role != "assistant" || gotMessages[2].Content != "I am Sonnet." {

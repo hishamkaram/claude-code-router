@@ -22,7 +22,7 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		display := fmt.Sprintf("CCR %s (%s)", model.Alias, model.ProviderModel)
-		appendGatewayModelEntry(&entries, seen, gatewayModelEntry{ID: discoveryIDForAlias(model.Alias), DisplayName: display})
+		appendGatewayModelEntry(&entries, seen, gatewayModelEntry{ID: DiscoveryIDForAlias(model.Alias), DisplayName: display})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": entries})
 }
@@ -42,11 +42,6 @@ func appendGatewayModelEntry(entries *[]gatewayModelEntry, seen map[string]struc
 	}
 	seen[entry.ID] = struct{}{}
 	*entries = append(*entries, entry)
-}
-
-func discoveryIDForAlias(alias string) string {
-	alias = strings.TrimSpace(alias)
-	return discoveryAliasPrefix + alias
 }
 
 func FirstPartyAnthropicModelIDs() []string {

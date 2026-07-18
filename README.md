@@ -68,13 +68,12 @@ ccr model list
 ccr launch
 ```
 
-`ccr launch` keeps Claude Code's normal startup model and preserves subscription
-authentication. Current Claude Code does not auto-populate gateway aliases in
-the `/model` picker while that login remains active, so CCR prints ready-to-use
-commands such as `/model claude-ccr-<alias>` for every safe registered alias.
-Those direct selections still route future work in the same session. To start
-directly on one alias, including a `chat-only` alias that disables tools for the
-launch, pass it explicitly:
+`ccr launch` keeps Claude Code's normal startup model, preserves subscription
+authentication, and adds safe registered aliases to the `/model` picker beside
+the permitted Anthropic models. CCR also prints each picker ID, such as
+`/model anthropic.ccr.<alias>`, for scripted selection. To start directly on one
+alias, including a `chat-only` alias that disables tools for the launch, pass it
+explicitly:
 
 ```bash
 ccr launch --model <alias> --chrome
@@ -111,10 +110,9 @@ CCR reports that limitation instead of bypassing it.
 ## How Routing Works
 
 1. CCR launches Claude Code through a loopback-only local gateway.
-2. Default subscription-preserving launches print direct
-   `/model claude-ccr-<alias>` commands for registered, non-blocked,
-   tool-compatible aliases. Tool-disabled aliases are available by starting
-   directly with `ccr launch --model <alias>`.
+2. Default subscription-preserving launches add registered, non-blocked,
+   tool-compatible aliases to the `/model` picker. Tool-disabled aliases are
+   available by starting directly with `ccr launch --model <alias>`.
 3. Standard first-party model names route to Anthropic. The default
    `--auth-mode preserve` keeps an existing Claude Code subscription login or
    Anthropic API-key authentication available for those routes.
@@ -129,8 +127,8 @@ older turn from the same Claude Code session.
 
 Use `ccr launch --auth-mode gateway-token --model <alias>` when you want a
 third-party-only session. That mode intentionally disables the original
-Anthropic subscription and API-key authentication, but allows Claude Code to
-discover registered aliases from CCR's `/v1/models` endpoint for its picker.
+Anthropic subscription and API-key authentication. It also lets Claude Code
+authenticate to CCR's `/v1/models` endpoint for friendly discovery metadata.
 
 ## Common Commands
 
@@ -139,7 +137,7 @@ ccr provider list                 # show configured providers
 ccr model list                    # show model aliases
 ccr model test <alias>            # validate a route against its provider
 ccr conformance run <alias>       # record compatibility checks
-ccr launch                        # preserve subscription; print direct /model commands
+ccr launch                        # preserve subscription; expose aliases in /model
 ccr launch --model <alias>        # start directly on one CCR alias
 ccr status                        # inspect local router state
 ccr sessions                      # list launched sessions

@@ -114,21 +114,10 @@ type handler struct {
 
 const (
 	defaultAnthropicBaseURL = "https://api.anthropic.com"
-	discoveryAliasPrefix    = "claude-ccr-"
 	ccrSessionTokenHeader   = "X-CCR-Session-Token"
 	ccrSessionTokenLower    = "x-ccr-session-token"
 	ccrIgnoredFieldsHeader  = "X-CCR-Ignored-Anthropic-Fields"
 )
-
-// DiscoveryAliasPrefix returns the Claude-compatible prefix used for CCR model aliases.
-func DiscoveryAliasPrefix() string {
-	return discoveryAliasPrefix
-}
-
-// DiscoveryIDForAlias returns the Claude-compatible model ID for a CCR alias.
-func DiscoveryIDForAlias(alias string) string {
-	return discoveryAliasPrefix + alias
-}
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead && r.URL.Path == "/" {
@@ -383,6 +372,9 @@ func (h *handler) selectRoute(ctx context.Context, requested string) (messageRou
 		return h.routeConfiguredAlias(ctx, aliasLookup.alias, requested)
 	}
 	if aliasLookup.prefixed {
+		if aliasLookup.malformed {
+			return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("model discovery alias %q is malformed", requested)}
+		}
 		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("model discovery alias %q maps to unconfigured ccr alias %q", requested, aliasLookup.alias)}
 	}
 	if isFirstPartyAnthropicModelRequest(requested) {
@@ -392,9 +384,10 @@ func (h *handler) selectRoute(ctx context.Context, requested string) (messageRou
 }
 
 type configuredAliasLookup struct {
-	alias    string
-	exists   bool
-	prefixed bool
+	alias     string
+	exists    bool
+	prefixed  bool
+	malformed bool
 }
 
 func (h *handler) configuredAliasForRequest(ctx context.Context, requested string) (configuredAliasLookup, *requestValidationError) {
@@ -406,15 +399,18 @@ func (h *handler) configuredAliasForRequest(ctx context.Context, requested strin
 	if aliasExists {
 		return configuredAliasLookup{alias: alias, exists: true}, nil
 	}
-	discoveryAlias, ok := aliasFromDiscoveryID(requested)
-	if !ok {
+	discovery := parseDiscoveryID(requested)
+	if !discovery.prefixed {
 		return configuredAliasLookup{alias: alias}, nil
 	}
-	aliasExists, err = h.cfg.Store.ModelExists(ctx, discoveryAlias)
-	if err != nil {
-		return configuredAliasLookup{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("checking requested model alias %q: %v", discoveryAlias, err)}
+	if !discovery.valid {
+		return configuredAliasLookup{prefixed: true, malformed: true}, nil
 	}
-	return configuredAliasLookup{alias: discoveryAlias, exists: aliasExists, prefixed: true}, nil
+	aliasExists, err = h.cfg.Store.ModelExists(ctx, discovery.alias)
+	if err != nil {
+		return configuredAliasLookup{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("checking requested model alias %q: %v", discovery.alias, err)}
+	}
+	return configuredAliasLookup{alias: discovery.alias, exists: aliasExists, prefixed: true}, nil
 }
 
 func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel string) (messageRoute, *requestValidationError) {
@@ -438,18 +434,6 @@ func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel
 		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, responseModel: responseModel}, nil
 	}
 	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q with protocol %q is not supported by the gateway path", provider.Type, caps.Protocol)}
-}
-
-func aliasFromDiscoveryID(id string) (string, bool) {
-	id = strings.TrimSpace(id)
-	if !strings.HasPrefix(id, discoveryAliasPrefix) {
-		return "", false
-	}
-	alias := strings.TrimPrefix(id, discoveryAliasPrefix)
-	if alias == "" {
-		return "", false
-	}
-	return alias, true
 }
 
 func (h *handler) routeFirstPartyAnthropicModel(requested string) messageRoute {
@@ -492,7 +476,7 @@ func isFirstPartyAnthropicModelRequest(id string) bool {
 	case "default", "best", "fable", "sonnet", "opus", "haiku", "sonnet[1m]", "opus[1m]", "opusplan", "opusplan[1m]":
 		return true
 	default:
-		return looksLikeAnthropicModelID(id) && !strings.HasPrefix(strings.TrimSpace(id), discoveryAliasPrefix)
+		return looksLikeAnthropicModelID(id) && !strings.HasPrefix(strings.TrimSpace(id), legacyDiscoveryAliasPrefix)
 	}
 }
 

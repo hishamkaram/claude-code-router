@@ -38,19 +38,17 @@ ccr launch
 ```
 
 A normal no-model launch preserves Claude Code's startup model and subscription
-authentication, then prints direct commands for configured, non-blocked aliases
-that are safe for a tools-enabled session:
+authentication, then adds configured, non-blocked aliases that are safe for a
+tools-enabled session to the visual picker. It also prints their model IDs:
 
 ```text
-/model claude-ccr-<alias>
+/model anthropic.ccr.<alias>
 ```
 
-Current Claude Code does not auto-populate gateway aliases in the visual picker
-while the saved claude.ai login remains active. Direct selection still works and
-you can switch back to `opus`, `sonnet`, or another subscription model in the
-same session. If a direct alias fails, check that it is not `blocked`, that its
-provider still exists, and that the provider protocol is Anthropic-compatible or
-OpenAI-compatible. If it is `chat-only` or its provider mode disables tools,
+You can switch back to `opus`, `sonnet`, or another subscription model in the
+same session. If an alias is absent, check that it is not `blocked`, that its
+provider still exists, and that the provider protocol is Anthropic-compatible
+or OpenAI-compatible. If it is `chat-only` or its provider mode disables tools,
 start directly with `ccr launch --model <alias>`.
 
 Claude Code organization policy can still restrict the model picker. CCR cannot
@@ -58,10 +56,9 @@ bypass that policy; use an allowed default model or ask the organization
 administrator to permit the needed model option.
 
 `--auth-mode gateway-token` requires `--model <alias>` and lets Claude Code
-authenticate to CCR's `/v1/models` endpoint, so aliases can appear in the visual
-picker. That mode intentionally disables the original subscription and API-key
-authentication; do not use it when first-party subscription routes must remain
-available.
+authenticate to CCR's `/v1/models` endpoint for discovery metadata. That mode
+intentionally disables the original subscription and API-key authentication;
+do not use it when first-party subscription routes must remain available.
 
 ## CCR Starts on an Unexpected Model
 
