@@ -212,7 +212,7 @@ func TestGatewayModelDiscoveryIncludesFirstPartyWithoutNativeShim(t *testing.T) 
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"default", "sonnet", "opus", "haiku", "opusplan", "opusplan[1m]", "claude-ccr-gpt"} {
+	for _, want := range []string{"default", "sonnet", "opus", "haiku", "opusplan", "opusplan[1m]", "anthropic.ccr.gpt"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}
@@ -367,7 +367,7 @@ func TestGatewayModelsKeepsFirstPartyAliasesWhenAnthropicDiscoveryFails(t *testi
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"default", "sonnet", "claude-ccr-gpt"} {
+	for _, want := range []string{"default", "sonnet", "anthropic.ccr.gpt"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}
@@ -416,6 +416,57 @@ func TestGatewayExactAliasWithDiscoveryPrefixWinsOverShim(t *testing.T) {
 	}
 	if gotModel != "prefix-model" {
 		t.Fatalf("provider model = %q, want prefix-model", gotModel)
+	}
+}
+
+func TestGatewayRoutesSelectivelyEscapedDiscoveryAliases(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := newGatewayStore(t,
+		store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""},
+		store.Model{Alias: "sonnet-opus-haiku", ProviderName: "litellm", ProviderModel: "third-party-model", Status: "degraded"},
+	)
+	h := handler{cfg: Config{Store: s, Secrets: fakeGatewaySecrets{}, Token: "local-token"}}
+	requested := "anthropic.ccr.s%6fnnet-%6fpus-h%61iku"
+
+	route, validationErr := h.selectRoute(ctx, requested)
+	if validationErr != nil {
+		t.Fatalf("selectRoute(%q) error = %#v", requested, validationErr)
+	}
+	if route.model.Alias != "sonnet-opus-haiku" {
+		t.Fatalf("route alias = %q, want sonnet-opus-haiku", route.model.Alias)
+	}
+	if route.responseModel != requested {
+		t.Fatalf("response model = %q, want %q", route.responseModel, requested)
+	}
+}
+
+func TestGatewayRejectsUnknownOrMalformedCanonicalDiscoveryAliases(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s := newGatewayStore(t,
+		store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""},
+		store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"},
+	)
+	h := handler{cfg: Config{Store: s, Secrets: fakeGatewaySecrets{}, Token: "local-token", DefaultModelAlias: "gpt"}}
+
+	for _, requested := range []string{
+		"anthropic.ccr.unknown",
+		"anthropic.ccr.sonnet",
+		"anthropic.ccr.g%70t",
+		"anthropic.ccr.",
+	} {
+		t.Run(requested, func(t *testing.T) {
+			_, validationErr := h.selectRoute(ctx, requested)
+			if validationErr == nil {
+				t.Fatalf("selectRoute(%q) succeeded, want rejection", requested)
+			}
+			if validationErr.status != http.StatusBadRequest {
+				t.Fatalf("selectRoute(%q) status = %d, want %d", requested, validationErr.status, http.StatusBadRequest)
+			}
+		})
 	}
 }
 

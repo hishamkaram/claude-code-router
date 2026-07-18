@@ -1,9 +1,9 @@
 # Providers and Model Aliases
 
 A provider is a connection definition. A model alias is the stable name used by
-`ccr launch --model <alias>` and `/model claude-ccr-<alias>`. In gateway-token
-sessions, authenticated discovery can also show it as `CCR <alias>` in Claude
-Code's visual picker.
+`ccr launch --model <alias>` and the matching `/model` picker row. Picker model
+IDs use `anthropic.ccr.<alias>`. In gateway-token sessions, authenticated
+discovery can additionally supply the friendly `CCR <alias>` display name.
 
 Keeping providers and aliases separate lets you change a provider model without
 changing workflows that use the alias.

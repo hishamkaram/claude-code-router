@@ -103,7 +103,7 @@ func TestLaunchForwardsClaudeCodeArguments(t *testing.T) {
 		t.Fatalf("launch error = %v", err)
 	}
 	modelIndex := slices.Index(launcher.args, "--model")
-	if modelIndex < 0 || modelIndex+1 >= len(launcher.args) || launcher.args[modelIndex+1] != "claude-ccr-gpt" {
+	if modelIndex < 0 || modelIndex+1 >= len(launcher.args) || launcher.args[modelIndex+1] != "anthropic.ccr.gpt" {
 		t.Fatalf("launch args missing CCR model selection: %#v", launcher.args)
 	}
 	wantTail := []string{"--chrome", "--add-dir", "/tmp/extra", "review this change"}

@@ -9,34 +9,32 @@ allowlist for that launch:
 - existing user `availableModels` entries are preserved;
 - if no user allowlist exists, CCR includes known first-party Claude model IDs;
 - every configured, non-blocked alias that is safe for the launch tool mode is
-  added as `claude-ccr-<alias>`;
+  added as `anthropic.ccr.<alias>`;
 - `~/.claude/settings.json` is never written.
 
 Without `--model`, Claude Code keeps its normal startup model. In the default
-subscription-preserving mode, the allowlist permits direct selections but does
-not make arbitrary gateway aliases appear in the visual picker. CCR therefore
-prints `/model claude-ccr-<alias>` commands for every alias that can run in the
-current tool mode. Pass `--model <alias>` when you want that alias to be the
-startup model, or when it is `chat-only` and needs tools disabled for the whole
-launch.
+subscription-preserving mode, IDs beginning with `anthropic.` become custom
+rows in the visual picker, so registered models appear beside the permitted
+Anthropic models without authenticated gateway discovery. Pass `--model
+<alias>` when you want that alias to be the startup model, or when it is
+`chat-only` and needs tools disabled for the whole launch. See Claude Code's
+[`availableModels` documentation](https://code.claude.com/docs/en/model-config).
 
-Claude Code populates custom picker rows from `/v1/models` only when a gateway
-credential is active. That credential replaces the saved claude.ai login, so
-CCR cannot enable picker discovery in `preserve` mode without breaking
-subscription-backed first-party routes. See Anthropic's
-[gateway connection guide](https://code.claude.com/docs/en/llm-gateway-connect)
-and [gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol).
+Claude Code treats the strings `sonnet`, `opus`, and `haiku` inside custom IDs
+as native model-family signals. CCR selectively percent-escapes those substrings
+in picker IDs so native rows remain visible. For example, an alias named
+`my-sonnet` appears as `anthropic.ccr.my-s%6fnnet`; the stored CCR alias remains
+`my-sonnet`.
 
 ## Route Selection
 
 For each request, CCR uses this precedence:
 
-1. An exact configured alias or `claude-ccr-<alias>` discovery ID routes to that
-   alias's provider.
+1. An exact configured alias, canonical `anthropic.ccr.<alias>` picker ID, or
+   legacy `claude-ccr-<alias>` ID routes to that alias's provider.
 2. A standard first-party Claude model name routes to Anthropic.
-3. An otherwise unmatched request can use the explicit launch alias when one was
-   configured with `ccr launch --model <alias>`.
-4. If no safe route exists, CCR returns an explicit error.
+3. If no safe route exists, CCR returns an explicit error. Unknown or malformed
+   CCR IDs never fall through to Anthropic or a startup alias.
 
 Because exact aliases take precedence, do not name a third-party alias `sonnet`,
 `opus`, `haiku`, or another first-party model identifier unless you intentionally
@@ -44,13 +42,13 @@ want it to override that route.
 
 ## Model Switching and Workers
 
-Use `/model claude-ccr-<alias>` in Claude Code to select a registered route. In
-gateway-token mode, the same aliases can also appear as `CCR <alias>` picker
-options discovered from `/v1/models`. Future work in the same session uses that
-route where safely possible. Subagents, workflow agents, and teammates created
-after a switch inherit the active model where Claude Code permits it. Existing
-workers can remain on the model used when they were created; CCR does not hide
-that fact.
+Open `/model` and select the `anthropic.ccr.<alias>` row to use a registered
+route. CCR also prints the exact ID for direct or scripted selection. Legacy
+`claude-ccr-<alias>` IDs remain gateway-routable but are not placed in new
+allowlists. Future work in the same session uses the selected route where safely
+possible. Subagents, workflow agents, and teammates created after a switch
+inherit the active model where Claude Code permits it. Existing workers can
+remain on the model used when they were created; CCR does not hide that fact.
 
 ## Authentication Modes
 
@@ -64,8 +62,8 @@ CCR adds a temporary local session token through `ANTHROPIC_CUSTOM_HEADERS`.
 For first-party Anthropic routes it preserves an existing Claude Code
 subscription login or Anthropic API-key authentication. This is the normal mode
 when a session can use both first-party and external routes. Claude Code does
-not run authenticated gateway picker discovery in this mode; use the direct
-switch commands printed by CCR.
+not run authenticated gateway discovery in this mode; CCR supplies registered
+picker rows through the launch-only `availableModels` override instead.
 
 ### `gateway-token`
 
@@ -76,8 +74,9 @@ ccr launch --auth-mode gateway-token --model coding-model
 CCR uses only its generated local gateway token. Original Anthropic subscription
 and API-key authentication are deliberately disabled. Because a no-startup-model
 session must preserve first-party auth, `gateway-token` requires an explicit CCR
-startup alias. Claude Code can authenticate to `/v1/models` in this mode and add
-registered aliases to the visual picker.
+startup alias. Claude Code can authenticate to `/v1/models` in this mode and use
+its friendly discovery metadata. See Anthropic's
+[gateway documentation](https://code.claude.com/docs/en/llm-gateway).
 
 ## Capability Handling
 

@@ -444,8 +444,8 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 	if !strings.Contains(out, "No ccr startup model selected") {
 		t.Fatalf("launch output missing default model summary: %q", out)
 	}
-	if !strings.Contains(out, "/model claude-ccr-gpt") {
-		t.Fatalf("launch output missing direct model guidance: %q", out)
+	if !strings.Contains(out, "/model anthropic.ccr.gpt") {
+		t.Fatalf("launch output missing picker model guidance: %q", out)
 	}
 	if !launcher.hasEnvPrefix("ANTHROPIC_BASE_URL=http://127.0.0.1:") ||
 		launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
@@ -463,7 +463,7 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 		t.Fatalf("launch args = %#v", launcher.args)
 	}
 	settings, ok := launcher.settingsArgValue()
-	if !ok || !strings.Contains(settings, "claude-ccr-gpt") {
+	if !ok || !strings.Contains(settings, "anthropic.ccr.gpt") {
 		t.Fatalf("launch settings = %q ok=%v args=%#v", settings, ok, launcher.args)
 	}
 
@@ -482,9 +482,8 @@ func TestLaunchHelpDescribesPreserveAuthModelSelection(t *testing.T) {
 		t.Fatalf("launch help error = %v", err)
 	}
 	for _, want := range []string{
-		"direct /model claude-ccr-<alias>",
-		"may omit gateway aliases from the visual picker",
-		"gateway-token auth only when picker discovery matters more than preserving",
+		"registered, compatible aliases to the visual /model picker",
+		"permitted Anthropic models while preserving subscription or API-key",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("launch help = %q, missing %q", out, want)

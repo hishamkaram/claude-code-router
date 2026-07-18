@@ -33,7 +33,7 @@ func TestGatewayTranslatesAutoModeClassifierRequest(t *testing.T) {
 	}()
 
 	body := `{
-		"model":"claude-ccr-glm-5-2",
+		"model":"anthropic.ccr.glm-5-2",
 		"max_tokens":64,
 		"temperature":1,
 		"stop_sequences":["</block>"],
@@ -83,7 +83,7 @@ func TestGatewayPreservesAutoModeClassifierRequestForAnthropicCompatible(t *test
 		}
 	}()
 
-	body := `{"model":"claude-ccr-glm","max_tokens":64,"temperature":1,"stop_sequences":["</block>"],"messages":[{"role":"user","content":"classify Agent"}]}`
+	body := `{"model":"anthropic.ccr.glm","max_tokens":64,"temperature":1,"stop_sequences":["</block>"],"messages":[{"role":"user","content":"classify Agent"}]}`
 	resp := postClassifierRequest(t, ctx, server.URL(), body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

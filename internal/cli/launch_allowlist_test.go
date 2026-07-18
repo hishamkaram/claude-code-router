@@ -39,14 +39,72 @@ func TestLaunchExtendsExistingClaudeAvailableModelsForCCRAliases(t *testing.T) {
 		t.Fatalf("launch error = %v", err)
 	}
 	payload := launchSettingsPayload(t, launcher)
-	if !slices.Contains(payload.AvailableModels, "claude-ccr-gpt") {
-		t.Fatalf("availableModels = %#v, want claude-ccr-gpt", payload.AvailableModels)
+	if !slices.Contains(payload.AvailableModels, "anthropic.ccr.gpt") {
+		t.Fatalf("availableModels = %#v, want anthropic.ccr.gpt", payload.AvailableModels)
 	}
 	if !slices.Contains(payload.AvailableModels, "sonnet") {
 		t.Fatalf("availableModels = %#v, want existing sonnet entry preserved", payload.AvailableModels)
 	}
-	if slices.Contains(payload.AvailableModels, "claude-ccr-blocked") {
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.blocked") {
 		t.Fatalf("availableModels includes blocked alias: %#v", payload.AvailableModels)
+	}
+}
+
+func TestLaunchSelectivelyEscapesAnthropicFamilyNamesInCCRAliases(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	server := newModelsServer(t, []string{"third-party-sonnet", "third-party-opus", "third-party-haiku"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	models := []struct {
+		alias string
+		model string
+	}{
+		{alias: "sonnet", model: "third-party-sonnet"},
+		{alias: "opus", model: "third-party-opus"},
+		{alias: "haiku", model: "third-party-haiku"},
+	}
+	for _, model := range models {
+		if _, _, err := runCommand(t, "--db", dbPath, "model", "add", model.alias, "--provider", "litellm", "--model", model.model); err != nil {
+			t.Fatalf("model add %q error = %v", model.alias, err)
+		}
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	out, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch")
+	if err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	payload := launchSettingsPayload(t, launcher)
+	for _, want := range []string{
+		"sonnet",
+		"opus",
+		"haiku",
+		"anthropic.ccr.s%6fnnet",
+		"anthropic.ccr.%6fpus",
+		"anthropic.ccr.h%61iku",
+	} {
+		if !slices.Contains(payload.AvailableModels, want) {
+			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
+		}
+		if strings.HasPrefix(want, "anthropic.ccr.") && !strings.Contains(out, "/model "+want) {
+			t.Fatalf("launch output = %q, missing picker ID %q", out, want)
+		}
+	}
+	for _, unwanted := range []string{
+		"anthropic.ccr.sonnet",
+		"anthropic.ccr.opus",
+		"anthropic.ccr.haiku",
+		"claude-ccr-sonnet",
+		"claude-ccr-opus",
+		"claude-ccr-haiku",
+	} {
+		if slices.Contains(payload.AvailableModels, unwanted) {
+			t.Fatalf("availableModels = %#v, should not include %q", payload.AvailableModels, unwanted)
+		}
 	}
 }
 
@@ -87,20 +145,20 @@ func TestLaunchExtendsClaudeAvailableModelsWithoutStartupModel(t *testing.T) {
 		t.Fatalf("launch args = %#v, want Claude Code default startup model", launcher.args)
 	}
 	payload := launchSettingsPayload(t, launcher)
-	for _, want := range []string{"sonnet", "claude-ccr-gpt", "claude-ccr-qwen"} {
+	for _, want := range []string{"sonnet", "anthropic.ccr.gpt", "anthropic.ccr.qwen"} {
 		if !slices.Contains(payload.AvailableModels, want) {
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
 		}
 	}
-	if slices.Contains(payload.AvailableModels, "claude-ccr-chat") {
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.chat") {
 		t.Fatalf("availableModels includes tool-disabled alias in tools-enabled launch: %#v", payload.AvailableModels)
 	}
-	for _, want := range []string{"/model claude-ccr-gpt", "/model claude-ccr-qwen"} {
+	for _, want := range []string{"/model anthropic.ccr.gpt", "/model anthropic.ccr.qwen"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("launch output = %q, missing %q", out, want)
 		}
 	}
-	if strings.Contains(out, "/model claude-ccr-chat") {
+	if strings.Contains(out, "/model anthropic.ccr.chat") {
 		t.Fatalf("launch output includes tool-disabled alias guidance: %q", out)
 	}
 }
@@ -124,7 +182,7 @@ func TestLaunchRegistersStartupModelWhenClaudeAvailableModelsUnset(t *testing.T)
 		t.Fatalf("launch error = %v", err)
 	}
 	payload := launchSettingsPayload(t, launcher)
-	for _, want := range []string{"sonnet", "opus", "claude-ccr-gpt"} {
+	for _, want := range []string{"sonnet", "opus", "anthropic.ccr.gpt"} {
 		if !slices.Contains(payload.AvailableModels, want) {
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
 		}
@@ -160,12 +218,12 @@ func TestLaunchCreatesClaudeAvailableModelsAllowlistWithoutStartupModel(t *testi
 		t.Fatalf("launch args = %#v, want Claude Code default startup model", launcher.args)
 	}
 	payload := launchSettingsPayload(t, launcher)
-	for _, want := range []string{"sonnet", "opus", "claude-ccr-gpt", "claude-ccr-qwen"} {
+	for _, want := range []string{"sonnet", "opus", "anthropic.ccr.gpt", "anthropic.ccr.qwen"} {
 		if !slices.Contains(payload.AvailableModels, want) {
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
 		}
 	}
-	if slices.Contains(payload.AvailableModels, "claude-ccr-chat") {
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.chat") {
 		t.Fatalf("availableModels includes tool-disabled alias in tools-enabled launch: %#v", payload.AvailableModels)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".claude", "settings.json")); !os.IsNotExist(err) {
@@ -201,7 +259,7 @@ func TestLaunchCreatesFirstPartyAllowlistWhenAllAliasesNeedToolsDisabled(t *test
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
 		}
 	}
-	if slices.Contains(payload.AvailableModels, "claude-ccr-chat") {
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.chat") {
 		t.Fatalf("availableModels includes tool-disabled alias in tools-enabled launch: %#v", payload.AvailableModels)
 	}
 }

@@ -180,14 +180,14 @@ func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
 		}
 	}
 
-	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--print", "/model claude-ccr-gpt")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--print", "/model anthropic.ccr.gpt")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !chatCalled {
 		t.Fatalf("fake OpenAI-compatible chat endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	if !strings.Contains(out, "Set model to claude-ccr-gpt") {
+	if !strings.Contains(out, "Set model to anthropic.ccr.gpt") {
 		t.Fatalf("launch output missing model switch confirmation:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(errOut, "No ccr startup model selected") {

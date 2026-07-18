@@ -315,22 +315,26 @@ func TestGatewayDiscoveryShimRoutesConfiguredRequestAlias(t *testing.T) {
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"claude-ccr-other","messages":[{"role":"user","content":"hello"}]}`))
-	if err != nil {
-		t.Fatalf("NewRequest() error = %v", err)
-	}
-	req.Header.Set("X-CCR-Session-Token", "local-token")
-	req.Header.Set("Authorization", "Bearer anthropic-session")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("gateway request error = %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
-	}
-	if gotModel != "other-model" {
-		t.Fatalf("provider model = %q, want other-model", gotModel)
+	for _, requested := range []string{"anthropic.ccr.other", "claude-ccr-other"} {
+		gotModel = ""
+		body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, requested)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("NewRequest(%q) error = %v", requested, err)
+		}
+		req.Header.Set("X-CCR-Session-Token", "local-token")
+		req.Header.Set("Authorization", "Bearer anthropic-session")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("gateway request %q error = %v", requested, err)
+		}
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("gateway status for %q = %d, want 200", requested, resp.StatusCode)
+		}
+		if gotModel != "other-model" {
+			t.Fatalf("provider model for %q = %q, want other-model", requested, gotModel)
+		}
 	}
 }
 
@@ -1060,6 +1064,9 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	if err := s.AddModel(ctx, store.Model{Alias: "claude-custom", ProviderName: "litellm", ProviderModel: "claude-compatible", Status: "full"}); err != nil {
 		t.Fatalf("AddModel(claude-custom) error = %v", err)
 	}
+	if err := s.AddModel(ctx, store.Model{Alias: "sonnet", ProviderName: "litellm", ProviderModel: "third-party-sonnet", Status: "degraded"}); err != nil {
+		t.Fatalf("AddModel(sonnet) error = %v", err)
+	}
 	if err := s.AddModel(ctx, store.Model{Alias: "blocked", ProviderName: "litellm", ProviderModel: "blocked-model", Status: "blocked"}); err != nil {
 		t.Fatalf("AddModel(blocked) error = %v", err)
 	}
@@ -1096,12 +1103,12 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"default", "sonnet", "opus", "haiku", "claude-ccr-gpt", "claude-ccr-claude-custom"} {
+	for _, want := range []string{"default", "sonnet", "opus", "haiku", "anthropic.ccr.gpt", "anthropic.ccr.claude-custom", "anthropic.ccr.s%6fnnet"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}
 	}
-	for _, hidden := range []string{"gpt", "claude-custom", "claude-native-claude-sonnet-4-6", "claude-ccr-blocked"} {
+	for _, hidden := range []string{"gpt", "claude-custom", "claude-native-claude-sonnet-4-6", "anthropic.ccr.blocked", "claude-ccr-gpt"} {
 		if containsString(ids, hidden) {
 			t.Fatalf("discovery ids = %#v, should hide %q", ids, hidden)
 		}

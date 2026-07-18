@@ -36,12 +36,11 @@ with its Chrome integration.
 	Fallback and detached background modes are rejected because they cannot preserve
 	CCR's selected route and local gateway ownership.
 
-	Without --model, Claude Code starts on its normal configured model. In the
-	default preserve auth mode, CCR prints direct /model claude-ccr-<alias>
-	commands because Claude Code may omit gateway aliases from the visual picker.
-	Use gateway-token auth only when picker discovery matters more than preserving
-	the original Anthropic subscription or API-key authentication. Pass --model
-	<alias> when you want that CCR alias to be the startup model.
+	Without --model, Claude Code starts on its normal configured model. CCR adds
+	registered, compatible aliases to the visual /model picker alongside the
+	permitted Anthropic models while preserving subscription or API-key
+	authentication. Pass --model <alias> when you want that CCR alias to be the
+	startup model.
 
 	Use ccr launch --help for router-specific help. To ask Claude Code for its own
 	help, use ccr launch -- --help.`,
@@ -421,8 +420,7 @@ func writePreserveAuthModelGuidance(ctx context.Context, out io.Writer, s *store
 	if len(aliases) == 0 {
 		return
 	}
-	fmt.Fprintln(out, "Claude Code may omit gateway aliases from /model while subscription authentication is preserved.")
-	fmt.Fprintln(out, "Select registered ccr models directly:")
+	fmt.Fprintln(out, "Registered ccr models are available in Claude Code's /model picker:")
 	for _, alias := range aliases {
 		fmt.Fprintf(out, "  /model %s\n", gateway.DiscoveryIDForAlias(alias))
 	}
