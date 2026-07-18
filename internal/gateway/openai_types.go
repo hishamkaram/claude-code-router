@@ -1,6 +1,9 @@
 package gateway
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 type anthropicRequest struct {
 	Model         string                     `json:"model"`
@@ -82,4 +85,23 @@ type openAIChatResponse struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 	} `json:"usage"`
+	usageObserved bool
+}
+
+func (r *openAIChatResponse) UnmarshalJSON(data []byte) error {
+	type wireResponse openAIChatResponse
+	var decoded wireResponse
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var presence struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &presence); err != nil {
+		return err
+	}
+	*r = openAIChatResponse(decoded)
+	trimmed := bytes.TrimSpace(presence.Usage)
+	r.usageObserved = len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
+	return nil
 }

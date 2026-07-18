@@ -1,3 +1,2 @@
-// Package session will track Claude Code sessions, active model aliases, and
-// agent/workflow metadata observed by the gateway.
+// Package session tracks launch-scoped Claude sessions, routes, agents, and tasks.
 package session

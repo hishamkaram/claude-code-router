@@ -3,10 +3,53 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestOpenReadOnlyHandlesEscapedPathsAndRejectsWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr #1.db")
+	writable, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if migrateErr := writable.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("Migrate() error = %v", migrateErr)
+	}
+	if addErr := writable.AddProvider(ctx, Provider{Name: "fixture", Type: "local", BaseURL: "http://localhost:4000"}); addErr != nil {
+		t.Fatalf("AddProvider() error = %v", addErr)
+	}
+	if closeErr := writable.Close(); closeErr != nil {
+		t.Fatalf("Close(writable) error = %v", closeErr)
+	}
+	readOnly, err := OpenReadOnly(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenReadOnly() error = %v", err)
+	}
+	defer func() { _ = readOnly.Close() }()
+	providers, err := readOnly.ListProviders(ctx)
+	if err != nil || len(providers) != 1 || providers[0].Name != "fixture" {
+		t.Fatalf("ListProviders() = %#v, error = %v", providers, err)
+	}
+	if err := readOnly.AddProvider(ctx, Provider{Name: "forbidden", Type: "local", BaseURL: "http://localhost:5000"}); err == nil {
+		t.Fatal("AddProvider() error = nil on read-only store")
+	}
+}
+
+func TestOpenReadOnlyDoesNotCreateMissingDatabase(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "missing")
+	if _, err := OpenReadOnly(context.Background(), filepath.Join(root, "ccr.db")); err == nil {
+		t.Fatal("OpenReadOnly() error = nil for missing database")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("OpenReadOnly() created parent directory: %v", err)
+	}
+}
 
 func TestMigrateAndProviderModelRoundTrip(t *testing.T) {
 	t.Parallel()

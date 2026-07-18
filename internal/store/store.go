@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -12,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 type Store struct {
 	db *sql.DB
@@ -53,12 +54,16 @@ type Session struct {
 
 type Agent struct {
 	ID         int64
+	LaunchID   int64
 	SessionID  int64
+	ExternalID string
 	Name       string
 	Kind       string
 	ModelAlias string
 	Status     string
 	CreatedAt  string
+	UpdatedAt  string
+	EndedAt    string
 }
 
 type ConformanceRecord struct {
@@ -81,10 +86,63 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: opening sqlite database: %w", err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	store := &Store{db: db}
 	if err := store.db.PingContext(ctx); err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("store.Open: pinging sqlite database: %w", err)
+	}
+	pragmas := [...]string{
+		"PRAGMA foreign_keys = ON",
+		"PRAGMA busy_timeout = 5000",
+		"PRAGMA journal_mode = WAL",
+		"PRAGMA synchronous = NORMAL",
+	}
+	for _, pragma := range pragmas {
+		if _, err := store.db.ExecContext(ctx, pragma); err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("store.Open: applying %q: %w", pragma, err)
+		}
+	}
+	return store, nil
+}
+
+// OpenReadOnly opens an existing database without creating directories,
+// changing journal settings, or permitting writes.
+func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
+	if path == "" {
+		return nil, fmt.Errorf("store.OpenReadOnly: database path is required")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("store.OpenReadOnly: resolving database path: %w", err)
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("store.OpenReadOnly: inspecting database: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("store.OpenReadOnly: database path must be a regular file")
+	}
+	databaseURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	query := databaseURL.Query()
+	query.Set("mode", "ro")
+	databaseURL.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", databaseURL.String())
+	if err != nil {
+		return nil, fmt.Errorf("store.OpenReadOnly: opening sqlite database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	store := &Store{db: db}
+	if err := store.db.PingContext(ctx); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("store.OpenReadOnly: pinging sqlite database: %w", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("store.OpenReadOnly: enforcing query-only mode: %w", err)
 	}
 	return store, nil
 }
@@ -109,22 +167,51 @@ func (s *Store) Migrate(ctx context.Context) error {
 	}
 	switch version {
 	case 1:
-		if _, err := s.db.ExecContext(ctx, migrateV1ToV2SQL); err != nil {
-			return fmt.Errorf("store.Migrate: migrating schema from version 1 to 2: %w", err)
-		}
-		if err := s.migrateV2ToV3(ctx); err != nil {
-			return fmt.Errorf("store.Migrate: migrating schema from version 1 to 3: %w", err)
-		}
+		return s.migrateFromV1(ctx)
 	case 2:
-		if err := s.migrateV2ToV3(ctx); err != nil {
-			return fmt.Errorf("store.Migrate: migrating schema from version 2 to 3: %w", err)
-		}
+		return s.migrateFromV2(ctx)
+	case 3:
+		return s.migrateFromV3(ctx)
 	case CurrentSchemaVersion:
-		if _, err := s.db.ExecContext(ctx, currentSchemaSQL); err != nil {
-			return fmt.Errorf("store.Migrate: ensuring current schema: %w", err)
-		}
+		return s.ensureCurrentSchema(ctx)
 	default:
 		return fmt.Errorf("store.Migrate: unsupported schema version %d", version)
+	}
+}
+
+func (s *Store) migrateFromV1(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, migrateV1ToV2SQL); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 2: %w", err)
+	}
+	if err := s.migrateV2ToV3(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 3: %w", err)
+	}
+	if err := s.migrateV3ToV4(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 4: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateFromV2(ctx context.Context) error {
+	if err := s.migrateV2ToV3(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 3: %w", err)
+	}
+	if err := s.migrateV3ToV4(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 4: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateFromV3(ctx context.Context) error {
+	if err := s.migrateV3ToV4(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 4: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ensureCurrentSchema(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, currentSchemaSQL); err != nil {
+		return fmt.Errorf("store.Migrate: ensuring current schema: %w", err)
 	}
 	return nil
 }
@@ -437,9 +524,12 @@ ORDER BY models.alias
 func (s *Store) AddSession(ctx context.Context, session Session) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO sessions (gateway_url, pid, model_alias, created_at)
-VALUES (?, ?, ?, ?)
-`, session.GatewayURL, session.PID, session.ModelAlias, now)
+INSERT INTO launches (
+  gateway_url, pid, model_alias, state, lifecycle_state, statusline_state,
+  created_at, started_at
+)
+VALUES (?, ?, ?, 'running', 'unobserved', 'not-configured', ?, ?)
+`, session.GatewayURL, session.PID, session.ModelAlias, now, now)
 	if err != nil {
 		return 0, fmt.Errorf("store.AddSession: inserting session for pid %d: %w", session.PID, err)
 	}
@@ -453,7 +543,7 @@ VALUES (?, ?, ?, ?)
 func (s *Store) ListSessions(ctx context.Context) ([]Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, gateway_url, pid, model_alias, created_at
-FROM sessions
+FROM launches
 ORDER BY id DESC
 `)
 	if err != nil {
@@ -479,10 +569,17 @@ ORDER BY id DESC
 
 func (s *Store) AddAgent(ctx context.Context, agent Agent) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	externalID := agent.ExternalID
+	if externalID == "" {
+		externalID = fmt.Sprintf("legacy-%d", time.Now().UTC().UnixNano())
+	}
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO agents (session_id, name, kind, model_alias, status, created_at)
-VALUES (?, ?, ?, ?, ?, ?)
-`, agent.SessionID, agent.Name, agent.Kind, agent.ModelAlias, agent.Status, now)
+INSERT INTO agents (
+  launch_id, session_id, external_id, name, kind, model_alias, status,
+  created_at, updated_at
+)
+VALUES (NULL, NULL, ?, ?, ?, ?, ?, ?, ?)
+`, externalID, agent.Name, agent.Kind, agent.ModelAlias, agent.Status, now, now)
 	if err != nil {
 		return 0, fmt.Errorf("store.AddAgent: inserting agent %q: %w", agent.Name, err)
 	}
@@ -495,7 +592,8 @@ VALUES (?, ?, ?, ?, ?, ?)
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, session_id, name, kind, model_alias, status, created_at
+SELECT id, COALESCE(launch_id, 0), COALESCE(session_id, 0), external_id,
+  name, kind, model_alias, status, created_at, updated_at, ended_at
 FROM agents
 ORDER BY id DESC
 `)
@@ -509,7 +607,9 @@ ORDER BY id DESC
 	var agents []Agent
 	for rows.Next() {
 		var agent Agent
-		if err := rows.Scan(&agent.ID, &agent.SessionID, &agent.Name, &agent.Kind, &agent.ModelAlias, &agent.Status, &agent.CreatedAt); err != nil {
+		if err := rows.Scan(&agent.ID, &agent.LaunchID, &agent.SessionID, &agent.ExternalID,
+			&agent.Name, &agent.Kind, &agent.ModelAlias, &agent.Status, &agent.CreatedAt,
+			&agent.UpdatedAt, &agent.EndedAt); err != nil {
 			return nil, fmt.Errorf("store.ListAgents: scanning agent: %w", err)
 		}
 		agents = append(agents, agent)

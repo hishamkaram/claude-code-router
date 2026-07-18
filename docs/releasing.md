@@ -1,7 +1,7 @@
 # Releasing CCR
 
 CCR releases are created from an approved `main` branch after a semantic-version
-tag such as `v0.1.0` is pushed.
+tag such as `v0.2.0` is pushed.
 
 ## One-Time Setup
 
@@ -20,13 +20,28 @@ From a clean, synchronized `main` branch:
 
 ```bash
 make check
-make test-live
+make test-live-fixture
+CCR_LIVE_REAL_MATRIX=1 make test-live-real
+go test -tags=live -count=1 -p 1 ./...
 goreleaser check
 goreleaser release --snapshot --clean
 ```
 
-Live E2E requires an installed and authenticated Claude Code binary. If it skips
-or cannot run, do not claim that a routing change is live-verified.
+The fixture target requires an installed Claude Code CLI and no external
+provider credential. It must pass without skips for both fixture protocols. The
+real target uses first-party Anthropic authentication and every configured
+non-blocked alias in the selected database; set `CCR_LIVE_CONFIGURED_DB` when
+the release matrix is not in the default data directory. If a required live
+target skips or cannot run, do not claim that the routing change is verified.
+
+Pull-request CI also runs the fixture target through a four-job matrix:
+OpenAI-compatible and Anthropic-compatible protocols against pinned Claude Code
+2.1.209 and the current npm release. The workflow runs on pull requests, `main`,
+and a daily schedule.
+
+For v0.2.0, record every gate in
+[`docs/acceptance/v0.2.0.md`](acceptance/v0.2.0.md). A checked item requires
+reproducible PR evidence.
 
 Run the required review gate before committing the release-related change:
 
@@ -47,8 +62,8 @@ After `main` contains the approved release commit:
 ```bash
 git switch main
 git pull --ff-only origin main
-git tag -a v0.1.0 -m 'Release v0.1.0'
-git push origin v0.1.0
+git tag -a v0.2.0 -m 'Release v0.2.0'
+git push origin v0.2.0
 ```
 
 The tag workflow runs deterministic checks, creates macOS and Linux release

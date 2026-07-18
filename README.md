@@ -129,6 +129,9 @@ Use `ccr launch --auth-mode gateway-token --model <alias>` when you want a
 third-party-only session. That mode intentionally disables the original
 Anthropic subscription and API-key authentication. It also lets Claude Code
 authenticate to CCR's `/v1/models` endpoint for friendly discovery metadata.
+Current Claude Code auto mode may require first-party Anthropic access for its
+safety classifier, so use the default `--auth-mode preserve` for Agent or
+Workflow actions. CCR surfaces classifier denial instead of bypassing it.
 
 ## Common Commands
 
@@ -139,10 +142,34 @@ ccr model test <alias>            # validate a route against its provider
 ccr conformance run <alias>       # record compatibility checks
 ccr launch                        # preserve subscription; expose aliases in /model
 ccr launch --model <alias>        # start directly on one CCR alias
-ccr status                        # inspect local router state
-ccr sessions                      # list launched sessions
-ccr agents                        # list observed agents and workers
+ccr status                        # show the latest observed route and health
+ccr trace --follow                # follow redacted route and lifecycle events
+ccr sessions --active             # list active launches and Claude sessions
+ccr agents --active               # list active agents, teammates, and tasks
+ccr doctor --live                 # probe one model per configured provider
+ccr profile export team.json      # export routing config without credentials
 ```
+
+`ccr status`, `ccr trace`, `ccr sessions`, and `ccr agents` also support stable
+`schema_version: 1` JSON output. Launches inject a compact CCR status line and
+Claude lifecycle hooks for that process only. Existing status-line and hook
+configuration is preserved. Use `--no-statusline`, `--no-lifecycle`, or
+`--no-history` to disable those features independently for one launch.
+
+## Team Profiles
+
+Export provider and model routing configuration for another machine without
+exporting credentials:
+
+```bash
+ccr profile export team.json
+ccr profile import team.json --dry-run
+ccr profile import team.json --credential openrouter=OPENROUTER_API_KEY
+```
+
+Profiles may carry environment-variable names, but never raw secret values,
+keychain identifiers, or credential-file paths. Imports are validated and
+applied atomically; conflicts fail without partial changes.
 
 ## Documentation
 
@@ -154,15 +181,19 @@ ccr agents                        # list observed agents and workers
 
 ## Security and Local State
 
-CCR stores provider configuration, model aliases, sessions, and compatibility
-metadata in a local SQLite database. By default it uses
+CCR stores provider configuration, model aliases, redacted route history,
+hook-observed lifecycle state, and compatibility metadata in a local SQLite
+database. By default it uses
 `$XDG_DATA_HOME/claude-code-router/ccr.db`, or
 `~/.local/share/claude-code-router/ccr.db` when `XDG_DATA_HOME` is unset. Use
 `--db <path>` to keep state elsewhere.
 
 SQLite contains only secret references such as `env:OPENROUTER_API_KEY`, never
-the API-key value. See [provider credential handling](docs/providers.md#credentials)
-for the supported secret sources.
+the API-key value. Route history never stores prompts, responses, tool
+arguments, hook bodies, transcript paths, or authorization headers. CCR records
+provider-reported token usage when available but does not estimate monetary
+cost. See [provider credential handling](docs/providers.md#credentials) for the
+supported secret sources.
 
 ## Development
 
@@ -170,12 +201,16 @@ for the supported secret sources.
 make build
 make test
 make check
-make test-live
+make test-live-fixture
+CCR_LIVE_REAL_MATRIX=1 make test-live-real
 ```
 
-Live tests require a working, authenticated Claude Code installation. They may
-skip when it is unavailable; skipped live tests are not equivalent to a verified
-runtime route.
+The required fixture target needs an installed Claude Code CLI but no provider
+credential. CI runs it without skips through OpenAI-compatible and
+Anthropic-compatible fixtures against pinned Claude Code 2.1.209 and the latest
+npm release. The real target uses first-party Anthropic authentication and every
+configured non-blocked alias in the selected database. A skipped live test is
+not equivalent to a verified runtime route.
 
 ## Contributing and Security
 

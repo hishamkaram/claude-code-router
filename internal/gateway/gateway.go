@@ -13,8 +13,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
+	"github.com/hishamkaram/claude-code-router/internal/session"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -23,8 +25,11 @@ type Config struct {
 	Secrets           secret.Backend
 	HTTPClient        *http.Client
 	Token             string
+	ObserverToken     string
 	DefaultModelAlias string
 	AnthropicBaseURL  string
+	Recorder          *observability.Recorder
+	Tracker           *session.Tracker
 }
 
 type Server struct {
@@ -50,6 +55,9 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	if strings.TrimSpace(cfg.Token) == "" {
 		return nil, fmt.Errorf("gateway.Start: token is required")
+	}
+	if (cfg.Recorder != nil || cfg.Tracker != nil) && strings.TrimSpace(cfg.ObserverToken) == "" {
+		return nil, fmt.Errorf("gateway.Start: observer token is required when runtime observation is enabled")
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -124,6 +132,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/internal/v1/") {
+		h.handleRuntimeRequest(w, r)
+		return
+	}
 	if !h.authorized(r) {
 		writeAnthropicError(w, http.StatusUnauthorized, "invalid local gateway token")
 		return
@@ -163,11 +175,19 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	observedWriter := &observedResponseWriter{ResponseWriter: w}
+	w = observedWriter
+	span := h.beginRoute(w, r, "messages", req)
+	var usage observability.TokenUsage
+	defer func(ctx context.Context) {
+		completeRoute(span, ctx, observedWriter.Status(), usage)
+	}(r.Context())
 	route, validationErr := h.selectRoute(r.Context(), req.Model)
 	if validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return
 	}
+	h.observeRoute(r.Context(), span, route)
 	if capabilityErr := validateRouteMessageCapabilities(route, req); capabilityErr != nil {
 		writeAnthropicError(w, capabilityErr.status, capabilityErr.message)
 		return
@@ -182,7 +202,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			passBody = rewritten
 		}
-		h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
+		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
 		return
 	}
 	if err := h.validateOpenAIMessageRequest(&req); err != nil {
@@ -216,6 +236,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, status, err.Error())
 		return
 	}
+	usage = tokenUsageFromOpenAI(resp)
 	finishReason, err := anthropicStopReasonFromOpenAI(resp)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())

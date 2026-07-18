@@ -13,13 +13,17 @@ type launchInvocation struct {
 	permissionMode string
 	dbPath         string
 	dbPathSet      bool
+	noHistory      bool
+	noLifecycle    bool
+	noStatusline   bool
 	help           bool
 	claudeArgs     []string
 }
 
 func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
 	if invocation.modelAlias != "" || invocation.printMode ||
-		invocation.authMode != launchAuthModePreserve || invocation.permissionMode != "" {
+		invocation.authMode != launchAuthModePreserve || invocation.permissionMode != "" ||
+		invocation.noHistory || invocation.noLifecycle || invocation.noStatusline {
 		return nil, false
 	}
 	args := invocation.claudeArgs
@@ -66,6 +70,18 @@ func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *
 	case "--print", "-p":
 		invocation.printMode = true
 		return true, nil
+	case "--no-history":
+		invocation.noHistory = true
+		return true, nil
+	case "--no-lifecycle":
+		invocation.noLifecycle = true
+		return true, nil
+	case "--no-statusline":
+		invocation.noStatusline = true
+		return true, nil
+	}
+	if handled, err := parseLaunchDisableOption(invocation, arg); handled {
+		return true, err
 	}
 	if value, found := launchPrintOptionValue(arg); found {
 		parsed, err := strconv.ParseBool(value)
@@ -92,6 +108,30 @@ func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *
 	if set != nil {
 		*set = true
 	}
+	return true, nil
+}
+
+func parseLaunchDisableOption(invocation *launchInvocation, arg string) (bool, error) {
+	option, raw, found := strings.Cut(arg, "=")
+	if !found {
+		return false, nil
+	}
+	var target *bool
+	switch option {
+	case "--no-history":
+		target = &invocation.noHistory
+	case "--no-lifecycle":
+		target = &invocation.noLifecycle
+	case "--no-statusline":
+		target = &invocation.noStatusline
+	default:
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return true, fmt.Errorf("invalid value for %s: %w", option, err)
+	}
+	*target = value
 	return true, nil
 }
 
@@ -145,7 +185,7 @@ func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, pe
 }
 
 func validateLaunchPassthroughArgs(args []string) error {
-	if option := findLaunchOption(args, "--model", "--auth-mode", "--permission-mode", "--print", "-p", "--db"); option != "" {
+	if option := findLaunchOption(args, "--model", "--auth-mode", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline"); option != "" {
 		return fmt.Errorf("%s is managed by ccr launch; pass its CCR value before other Claude Code options", option)
 	}
 	if option := findLaunchOption(args, "--fallback-model"); option != "" {

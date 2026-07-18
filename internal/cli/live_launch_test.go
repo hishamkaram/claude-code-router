@@ -217,6 +217,7 @@ func TestLiveLaunchOpenAIProviderStreamsAgentToolInput(t *testing.T) {
 		t.Fatalf("launch output missing parent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	state.assertComplete(t, out, errOut)
+	assertLiveAgentVisibility(t, ctx, dbPath)
 }
 
 func TestLiveLaunchOpenAIProviderRunsDynamicWorkflow(t *testing.T) {
@@ -228,19 +229,26 @@ func TestLiveLaunchOpenAIProviderRunsDynamicWorkflow(t *testing.T) {
 
 	provider, state := newLiveWorkflowProvider(t)
 	defer provider.Close()
+	classifier := newLiveFirstPartyClassifierFixture(t)
+	defer classifier.Close()
+	t.Setenv("ANTHROPIC_API_KEY", liveFixtureAPIKey)
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
 
 	prompt := `Use a workflow now. The workflow should run one worker that returns exactly CCR_LIVE_WORKFLOW_CHILD_OK. After the workflow starts, reply exactly CCR_LIVE_WORKFLOW_LAUNCHED_OK. Do not use shell or web.`
-	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader(prompt + "\n")}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--permission-mode", "auto")
+	deps := Dependencies{In: strings.NewReader(prompt + "\n"), StartGateway: classifier.StartGateway}
+	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "preserve", "--permission-mode", "auto")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !strings.Contains(out, "CCR_LIVE_WORKFLOW_LAUNCHED_OK") {
 		t.Fatalf("launch output missing workflow launch response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut)
+	state.assertComplete(t, out, errOut, classifier.Seen())
+	assertLiveAgentVisibility(t, ctx, dbPath)
 }
 
 func TestLiveLaunchPreserveAuthRoutesThroughFakeAnthropicCompatibleProvider(t *testing.T) {
@@ -467,6 +475,7 @@ type liveOpenAIChatPayload struct {
 	MaxTokens   int      `json:"max_tokens"`
 	Temperature *float64 `json:"temperature"`
 	Stop        []string `json:"stop"`
+	Stream      bool     `json:"stream"`
 	Tools       []struct {
 		Function struct {
 			Name string `json:"name"`
@@ -577,7 +586,7 @@ func (s *liveWorkflowProviderState) handleChat(t *testing.T, w http.ResponseWrit
 	switch {
 	case isLiveAutoClassifierRequest(payload):
 		s.workflowClassifierSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-classifier","choices":[{"message":{"content":"<block>no</block>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}`)
+		writeLiveOpenAIClassifierResponse(w, payload)
 	case !s.firstRequestHadWorkflowTool:
 		s.firstRequestHadWorkflowTool = liveToolsContain(payload.Tools, "Workflow")
 		writeOpenAIWorkflowToolCall(w)
@@ -662,12 +671,12 @@ func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.Res
 	_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-child","choices":[{"message":{"content":"CCR_LIVE_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
 }
 
-func (s *liveWorkflowProviderState) assertComplete(t *testing.T, out, errOut string) {
+func (s *liveWorkflowProviderState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadWorkflowTool || !s.workflowClassifierSeen || !s.workflowChildPromptSeen || !s.workflowLaunchResultSeen {
-		t.Fatalf("Workflow live route incomplete: firstRequestHadWorkflowTool=%v workflowClassifierSeen=%v workflowChildPromptSeen=%v workflowLaunchResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWorkflowTool, s.workflowClassifierSeen, s.workflowChildPromptSeen, s.workflowLaunchResultSeen, s.chatCalls, out, errOut)
+	if !s.firstRequestHadWorkflowTool || (!s.workflowClassifierSeen && !firstPartyClassifierSeen) || !s.workflowChildPromptSeen || !s.workflowLaunchResultSeen {
+		t.Fatalf("Workflow live route incomplete: firstRequestHadWorkflowTool=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v workflowChildPromptSeen=%v workflowLaunchResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWorkflowTool, s.workflowClassifierSeen, firstPartyClassifierSeen, s.workflowChildPromptSeen, s.workflowLaunchResultSeen, s.chatCalls, out, errOut)
 	}
 }
 

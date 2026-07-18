@@ -19,6 +19,8 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/liveclaude"
 )
 
+const liveToolSearchAgentResult = "CCR_LIVE_TOOLSEARCH_AGENT_OK"
+
 func TestLiveLaunchOpenAIProviderAutoModePluginResearchAgent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -32,20 +34,29 @@ func TestLiveLaunchOpenAIProviderAutoModePluginResearchAgent(t *testing.T) {
 		state.handle(t, w, r)
 	}))
 	defer provider.Close()
+	classifier := newLiveFirstPartyClassifierFixture(t)
+	defer classifier.Close()
+	t.Setenv("ANTHROPIC_API_KEY", liveFixtureAPIKey)
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
 
 	prompt := `/ccr-live-plugin:research Find latest ChatGPT news`
-	deps := Dependencies{In: strings.NewReader(prompt + "\n"), Launcher: livePluginClaudeLauncher{pluginDir: pluginDir}}
-	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--permission-mode", "auto")
+	deps := Dependencies{
+		In: strings.NewReader(prompt + "\n"), Launcher: livePluginClaudeLauncher{pluginDir: pluginDir},
+		StartGateway: classifier.StartGateway,
+	}
+	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "preserve", "--permission-mode", "auto")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
-	if !strings.Contains(out, "CCR_LIVE_TOOLSEARCH_PARENT_OK") {
-		t.Fatalf("launch output missing parent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	if !strings.Contains(out, liveToolSearchAgentResult) {
+		t.Fatalf("launch output missing completed agent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut)
+	state.assertComplete(t, out, errOut, classifier.Seen())
+	assertLiveAgentVisibility(t, ctx, dbPath)
 }
 
 type liveToolSearchAgentState struct {
@@ -55,7 +66,7 @@ type liveToolSearchAgentState struct {
 	toolReferenceResultSeen   bool
 	classifierRequestSeen     bool
 	childPromptSeen           bool
-	parentAgentToolResultSeen bool
+	callerAgentResultSeen     bool
 }
 
 func (s *liveToolSearchAgentState) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -87,7 +98,7 @@ func (s *liveToolSearchAgentState) handleChat(t *testing.T, w http.ResponseWrite
 	switch {
 	case isLiveAutoClassifierRequest(payload):
 		s.classifierRequestSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-toolsearch-classifier","choices":[{"message":{"content":"<block>no</block>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}`)
+		writeLiveOpenAIClassifierResponse(w, payload)
 	case s.chatCalls == 1:
 		s.firstRequestHadToolSearch = liveToolsContain(payload.Tools, "ToolSearch")
 		writeLiveToolSearchCall(w)
@@ -96,10 +107,10 @@ func (s *liveToolSearchAgentState) handleChat(t *testing.T, w http.ResponseWrite
 		writeLiveResearchAgentCall(w)
 	case !s.childPromptSeen && openAIMessagesContain(payload.Messages, "Find latest ChatGPT news"):
 		s.childPromptSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-toolsearch-child","choices":[{"message":{"content":"CCR_LIVE_TOOLSEARCH_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
-	case openAIMessagesContainToolRole(payload.Messages, "CCR_LIVE_TOOLSEARCH_CHILD_OK"):
-		s.parentAgentToolResultSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-toolsearch-parent","choices":[{"message":{"content":"CCR_LIVE_TOOLSEARCH_PARENT_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+		_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-toolsearch-child","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, liveToolSearchAgentResult)
+	case openAIMessagesContainToolRole(payload.Messages, liveToolSearchAgentResult):
+		s.callerAgentResultSeen = true
+		_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-toolsearch-caller","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, liveToolSearchAgentResult)
 	default:
 		t.Errorf("unexpected provider request in research Agent live route: %#v", payload.Messages)
 		http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -141,12 +152,12 @@ func writeLiveToolCall(w http.ResponseWriter, id, toolID, name string, args any)
 	})
 }
 
-func (s *liveToolSearchAgentState) assertComplete(t *testing.T, out, errOut string) {
+func (s *liveToolSearchAgentState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadToolSearch || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen || !s.parentAgentToolResultSeen {
-		t.Fatalf("Research Agent live route incomplete: firstRequestHadToolSearch=%v toolReferenceResultSeen=%v classifierRequestSeen=%v childPromptSeen=%v parentAgentToolResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadToolSearch, s.toolReferenceResultSeen, s.classifierRequestSeen, s.childPromptSeen, s.parentAgentToolResultSeen, s.chatCalls, out, errOut)
+	if !s.firstRequestHadToolSearch || !s.toolReferenceResultSeen || (!s.classifierRequestSeen && !firstPartyClassifierSeen) || !s.childPromptSeen {
+		t.Fatalf("Research Agent live route incomplete: firstRequestHadToolSearch=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadToolSearch, s.toolReferenceResultSeen, s.classifierRequestSeen, firstPartyClassifierSeen, s.childPromptSeen, s.callerAgentResultSeen, s.chatCalls, out, errOut)
 	}
 }
 
@@ -185,7 +196,7 @@ Research the requested topic and report concise findings.
 description: Research current news with the plugin's investigating researcher
 ---
 Use the Agent tool to launch ccr-live-plugin:investigating-researcher with this task: "$ARGUMENTS".
-Wait for the agent, then reply exactly CCR_LIVE_TOOLSEARCH_PARENT_OK.
+Return the completed agent's final response as the command result.
 `
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skill), 0o600); err != nil {
 		t.Fatalf("writing live plugin skill: %v", err)

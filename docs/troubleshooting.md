@@ -5,6 +5,7 @@ Start with local diagnostics:
 ```bash
 ccr doctor
 ccr status
+ccr trace --since 30m
 ccr provider list
 ccr model list
 ```
@@ -26,6 +27,14 @@ ccr model test <alias>
 Check that the API-key environment variable is present in the shell that starts
 CCR, or that the configured key file is a regular file with mode `0600`. Do not
 print the key while debugging.
+
+Use bounded live diagnostics when configuration checks pass but routing fails:
+
+```bash
+ccr doctor --live
+ccr doctor --live --all
+ccr conformance run <alias>
+```
 
 ## The Desired Model Is Missing from `/model`
 
@@ -59,6 +68,9 @@ administrator to permit the needed model option.
 authenticate to CCR's `/v1/models` endpoint for discovery metadata. That mode
 intentionally disables the original subscription and API-key authentication;
 do not use it when first-party subscription routes must remain available.
+This includes current Claude Code auto-mode safety classification for some
+Agent and Workflow actions. Use `--auth-mode preserve`; CCR does not reroute or
+bypass a safety classifier that cannot reach its required Anthropic model.
 
 ## CCR Starts on an Unexpected Model
 
@@ -69,6 +81,40 @@ alias:
 ```bash
 ccr launch --model <alias>
 ```
+
+Confirm the actual route from another terminal with `ccr status` or
+`ccr trace --follow`. Generated text claiming a model identity is not routing
+evidence.
+
+## Sessions or Agents Are Missing
+
+Run `ccr sessions` and inspect the launch's observation state. CCR injects
+launch-only lifecycle hooks while preserving existing hooks, but managed policy
+may block the injected HTTP callbacks. Such a launch is reported as unobserved.
+It is not represented as an observed session with zero agents.
+
+`--no-lifecycle` deliberately disables this state. `--no-history` only disables
+route history; it does not disable lifecycle observation. An unfinished session,
+agent, or task is marked abandoned when Claude Code exits abruptly.
+
+## The CCR Status Line Is Missing
+
+CCR does not replace an existing Claude Code status line. Run `ccr status` to
+inspect the same route state outside Claude Code. Also check that the launch was
+not started with `--no-statusline`.
+
+## Remove Runtime History
+
+Route and lifecycle history is redacted and bounded, but can be removed
+explicitly:
+
+```bash
+ccr trace purge --all --yes
+```
+
+Start a one-off launch with `--no-history` when no route events should be
+persisted. Prompts, responses, tool arguments, transcript paths, raw hook bodies,
+authorization headers, and provider secret values are never part of history.
 
 ## `/compact` Does Not Reduce Context on an OpenAI-Compatible Alias
 
