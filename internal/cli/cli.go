@@ -4,24 +4,25 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/hishamkaram/claude-code-router/internal/buildinfo"
 	"github.com/hishamkaram/claude-code-router/internal/config"
+	"github.com/hishamkaram/claude-code-router/internal/gateway"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 type Dependencies struct {
-	In       io.Reader
-	Out      io.Writer
-	Err      io.Writer
-	Secrets  secret.Backend
-	Launcher ClaudeLauncher
+	In           io.Reader
+	Out          io.Writer
+	Err          io.Writer
+	Secrets      secret.Backend
+	Launcher     ClaudeLauncher
+	StartGateway func(context.Context, gateway.Config) (*gateway.Server, error)
 }
 
 type options struct {
@@ -64,6 +65,9 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	if deps.Launcher == nil {
 		deps.Launcher = ExecClaudeLauncher{}
 	}
+	if deps.StartGateway == nil {
+		deps.StartGateway = gateway.Start
+	}
 	opts := &options{}
 	cmd := &cobra.Command{
 		Use:           "ccr",
@@ -101,12 +105,15 @@ Significant gateway behavior must be proven with live Claude Code E2E tests.`,
 		newInitCommand(ctx, opts),
 		newProviderCommand(ctx, opts, deps),
 		newModelCommand(ctx, opts, deps),
+		newProfileCommand(ctx, opts),
 		newLaunchCommand(ctx, opts, deps),
 		newStatusCommand(ctx, opts),
+		newTraceCommand(ctx, opts),
 		newDoctorCommand(ctx, opts, deps),
 		newConformanceCommand(ctx, opts, deps),
 		newSessionsCommand(ctx, opts),
 		newAgentsCommand(ctx, opts),
+		newStatuslineCommand(),
 	)
 	return cmd
 }
@@ -489,88 +496,10 @@ func newModelListCommand(ctx context.Context, opts *options) *cobra.Command {
 	}
 }
 
-func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Show local router status",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			s, dbPath, err := openMigratedStore(ctx, opts)
-			if err != nil {
-				return err
-			}
-			defer closeStore(s)
-			providerList, err := s.ListProviders(ctx)
-			if err != nil {
-				return err
-			}
-			models, err := s.ListModels(ctx)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Database: %s\nProviders: %d\nModels: %d\n", dbPath, len(providerList), len(models))
-			for i := range providerList {
-				provider := providerList[i]
-				caps := effectiveProviderCapabilities(provider)
-				fmt.Fprintf(cmd.OutOrStdout(), "Provider %s: type=%s protocol=%s mode=%s token-count=%s caps=%s\n", provider.Name, provider.Type, caps.Protocol, caps.Mode, providerTokenCountMode(provider), providerCapabilitySummary(provider))
-			}
-			for _, model := range models {
-				fmt.Fprintf(cmd.OutOrStdout(), "Model %s: provider=%s model=%s compat=%s\n", model.Alias, model.ProviderName, model.ProviderModel, model.Status)
-			}
-			return nil
-		},
-	}
-}
-
-func newDoctorCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
-	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Check local database, secret backend, and Claude Code availability",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			s, dbPath, err := openMigratedStore(ctx, opts)
-			if err != nil {
-				return err
-			}
-			defer closeStore(s)
-			version, err := s.SchemaVersion(ctx)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "SQLite: ok (%s, schema=%d)\n", dbPath, version)
-			providerList, err := s.ListProviders(ctx)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Providers: %d\n", len(providerList))
-			for i := range providerList {
-				provider := providerList[i]
-				caps := effectiveProviderCapabilities(provider)
-				fmt.Fprintf(cmd.OutOrStdout(), "Provider %s: protocol=%s mode=%s token-count=%s\n", provider.Name, caps.Protocol, caps.Mode, providerTokenCountMode(provider))
-			}
-			if err := deps.Secrets.Available(ctx); err != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "Secrets: unavailable (%v)\n", err)
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "Secrets: ok")
-			}
-			if path, err := exec.LookPath("claude"); err == nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "Claude Code: found (%s)\n", path)
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(), "Claude Code: not found in PATH")
-			}
-			return nil
-		},
-	}
-}
-
 func openMigratedStore(ctx context.Context, opts *options) (*store.Store, string, error) {
-	dbPath := opts.dbPath
-	if dbPath == "" {
-		var err error
-		dbPath, err = config.DefaultDBPath()
-		if err != nil {
-			return nil, "", err
-		}
+	dbPath, err := resolveDBPath(opts)
+	if err != nil {
+		return nil, "", err
 	}
 	s, err := store.Open(ctx, dbPath)
 	if err != nil {
@@ -581,6 +510,13 @@ func openMigratedStore(ctx context.Context, opts *options) (*store.Store, string
 		return nil, "", err
 	}
 	return s, dbPath, nil
+}
+
+func resolveDBPath(opts *options) (string, error) {
+	if opts.dbPath != "" {
+		return opts.dbPath, nil
+	}
+	return config.DefaultDBPath()
 }
 
 func closeStore(s *store.Store) {

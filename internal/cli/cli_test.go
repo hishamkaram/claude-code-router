@@ -119,7 +119,7 @@ func TestNoArgCommandsRejectStrayArgs(t *testing.T) {
 func TestVisibleCommandsDoNotReturnNotImplemented(t *testing.T) {
 	t.Parallel()
 
-	server := newModelsServer(t, []string{"gpt-5"})
+	server := newCLIConformanceOpenAIServer(t, "gpt-5")
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
 		t.Fatalf("provider add error = %v", err)

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
@@ -30,63 +31,72 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	observedWriter := &observedResponseWriter{ResponseWriter: w}
+	w = observedWriter
+	span := h.beginRoute(w, r, "count_tokens", req)
+	var usage observability.TokenUsage
+	defer func(ctx context.Context) {
+		completeRoute(span, ctx, observedWriter.Status(), usage)
+	}(r.Context())
 	route, validationErr := h.selectRoute(r.Context(), req.Model)
 	if validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return
 	}
+	h.observeRoute(r.Context(), span, route)
 	if route.kind == routeAnthropic {
-		h.handleAnthropicCountTokens(w, r, route, body)
+		usage = h.handleAnthropicCountTokens(w, r, route, body)
 		return
 	}
-	h.handleOpenAICountTokens(w, r, route, body)
+	usage = h.handleOpenAICountTokens(w, r, route, body)
 }
 
-func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) {
+func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) observability.TokenUsage {
 	if !route.capabilities.SupportsCountTokens {
 		if writeTokenCountCanceled(w, r.Context()) {
-			return
+			return observability.TokenUsage{}
 		}
 		writeEstimatedTokenCount(w, body, "")
-		return
+		return estimatedUsage(body)
 	}
 	passBody, ok := rewriteCountTokenBody(w, body, route.model.ProviderModel)
 	if !ok {
-		return
+		return observability.TokenUsage{}
 	}
 	w.Header().Set(ccrTokenCountModeHeader, tokenCountModeProvider)
-	h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
+	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
 }
 
-func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) {
+func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) observability.TokenUsage {
 	if !route.capabilities.SupportsCountTokens {
 		if writeTokenCountCanceled(w, r.Context()) {
-			return
+			return observability.TokenUsage{}
 		}
 		writeEstimatedTokenCount(w, body, "")
-		return
+		return estimatedUsage(body)
 	}
 	apiKey, err := resolveProviderSecret(r.Context(), h.cfg.Secrets, route.provider.SecretRef)
 	if err != nil {
 		if writeTokenCountCanceled(w, r.Context()) {
-			return
+			return observability.TokenUsage{}
 		}
 		writeEstimatedTokenCount(w, body, tokenCountFallbackSecret)
-		return
+		return estimatedUsage(body)
 	}
 	passBody, ok := rewriteCountTokenBody(w, body, route.model.ProviderModel)
 	if !ok {
-		return
+		return observability.TokenUsage{}
 	}
 	inputTokens, fallback, ok := h.callOpenAICompatibleCountTokens(r.Context(), route.provider, apiKey, passBody)
 	if !ok {
 		if writeTokenCountCanceled(w, r.Context()) {
-			return
+			return observability.TokenUsage{}
 		}
 		writeEstimatedTokenCount(w, body, fallback)
-		return
+		return estimatedUsage(body)
 	}
 	writeProviderTokenCount(w, inputTokens)
+	return observability.TokenUsage{Observed: true, InputTokens: int64(inputTokens)}
 }
 
 func rewriteCountTokenBody(w http.ResponseWriter, body []byte, providerModel string) ([]byte, bool) {
@@ -179,4 +189,8 @@ func estimatedTokenCount(body []byte) int {
 		return 1
 	}
 	return len(body)
+}
+
+func estimatedUsage(body []byte) observability.TokenUsage {
+	return observability.TokenUsage{InputTokens: int64(estimatedTokenCount(body))}
 }

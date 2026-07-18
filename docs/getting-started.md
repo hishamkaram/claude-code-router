@@ -60,6 +60,20 @@ Pass ordinary Claude Code options after `launch`:
 ccr launch --chrome
 ```
 
+The launch adds redacted route history, lifecycle observation, and a compact CCR
+status line without changing your settings files. Disable any one independently
+for a sensitive or policy-constrained session:
+
+```bash
+ccr launch --no-history
+ccr launch --no-lifecycle
+ccr launch --no-statusline
+```
+
+CCR preserves existing Claude hooks and an existing status line. If managed
+policy prevents lifecycle hooks, runtime commands report the launch as
+unobserved rather than pretending that no agents or tasks ran.
+
 Start directly on one CCR alias only when you want that alias to be the startup
 model:
 
@@ -134,9 +148,29 @@ ccr launch --auth-mode gateway-token --model coding-model
 ccr provider list
 ccr model list
 ccr status
-ccr sessions
-ccr agents
+ccr trace --since 30m
+ccr sessions --active
+ccr agents --active
 ```
+
+Add `--json` to these inspection commands for stable `schema_version: 1` output.
+With `ccr trace --follow --json`, each event is emitted as one versioned JSON
+document. `ccr status` shows the latest observed route, while
+`ccr trace --follow` follows new redacted route and lifecycle events. Use
+`ccr trace purge --all --yes` when retained history is no longer needed.
 
 CCR uses a local SQLite database. `ccr init` prints its exact path. Override it
 for an isolated test or separate workspace with `ccr --db /path/to/ccr.db ...`.
+
+## Share Routing Configuration
+
+Team profiles move provider and model definitions without moving credentials:
+
+```bash
+ccr profile export team.json
+ccr profile import team.json --dry-run
+ccr profile import team.json --credential openrouter=OPENROUTER_API_KEY
+```
+
+Import validates the complete profile before writing and fails atomically on a
+name conflict. Credential bindings are always local to the importing machine.

@@ -140,10 +140,10 @@ func TestModelUpdateInteractiveInvalidStaticFlagsFailBeforeDatabaseOpen(t *testi
 	}
 }
 
-func TestConformanceRunRecordsLocalUnverifiedStatus(t *testing.T) {
+func TestConformanceRunRecordsProviderVerifiedStatus(t *testing.T) {
 	t.Parallel()
 
-	server := newModelsServer(t, []string{"gpt-5"})
+	server := newCLIConformanceOpenAIServer(t, "gpt-5")
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
 		t.Fatalf("provider add error = %v", err)
@@ -156,7 +156,7 @@ func TestConformanceRunRecordsLocalUnverifiedStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conformance run error = %v", err)
 	}
-	for _, want := range []string{"local-verified", "Live runtime status: unverified"} {
+	for _, want := range []string{"Conformance run", "passed", "forced_tool", "count_tokens"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("conformance output missing %q:\n%s", want, out)
 		}
@@ -166,8 +166,9 @@ func TestConformanceRunRecordsLocalUnverifiedStatus(t *testing.T) {
 func TestConformanceRunAcceptsAnthropicCompatibleProvider(t *testing.T) {
 	t.Parallel()
 
+	server := newCLIConformanceAnthropicServer(t, "claude-opus")
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--no-api-key"); err != nil {
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--base-url", server.URL, "--no-api-key"); err != nil {
 		t.Fatalf("provider add error = %v", err)
 	}
 	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "claude", "--provider", "anthropic", "--model", "claude-opus"); err != nil {
@@ -178,7 +179,7 @@ func TestConformanceRunAcceptsAnthropicCompatibleProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("conformance run error = %v", err)
 	}
-	for _, want := range []string{"local-verified", "protocol=anthropic-compatible", "Live runtime status: unverified"} {
+	for _, want := range []string{"Conformance run", "passed", "stream", "count_tokens"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("conformance output missing %q:\n%s", want, out)
 		}
@@ -471,7 +472,7 @@ func TestSessionsAgentsAndLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sessions after launch error = %v", err)
 	}
-	if !strings.Contains(out, "status=running") || !strings.Contains(out, "model=(request-selected)") {
+	if !strings.Contains(out, "status=exited") || !strings.Contains(out, "model=(request-selected)") {
 		t.Fatalf("sessions after launch output = %q", out)
 	}
 }
@@ -602,7 +603,7 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	out, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--model", "gpt", "--auth-mode", "gateway-token")
+	}, "--db", dbPath, "launch", "--model", "gpt", "--auth-mode", "gateway-token", "--permission-mode", "auto")
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
@@ -623,6 +624,9 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	}
 	if !strings.Contains(out, "not active in --auth-mode gateway-token") {
 		t.Fatalf("launch output missing gateway-token warning:\n%s", out)
+	}
+	if !strings.Contains(out, "auto mode may require first-party Anthropic access") {
+		t.Fatalf("launch output missing auto-mode compatibility warning:\n%s", out)
 	}
 }
 
@@ -815,7 +819,7 @@ func TestLaunchInvalidModelFlagFailsBeforeDatabaseOpen(t *testing.T) {
 	}
 }
 
-func TestLaunchCleansUpClaudeWhenSessionPersistenceFails(t *testing.T) {
+func TestLaunchCleansUpClaudeWhenLaunchActivationFails(t *testing.T) {
 	t.Parallel()
 
 	server := newModelsServer(t, []string{"gpt-5"})
@@ -831,7 +835,14 @@ func TestLaunchCleansUpClaudeWhenSessionPersistenceFails(t *testing.T) {
 		t.Fatalf("sql.Open() error = %v", err)
 	}
 	defer db.Close()
-	if _, execErr := db.Exec(`CREATE TRIGGER fail_sessions BEFORE INSERT ON sessions BEGIN SELECT RAISE(FAIL, 'session insert denied'); END;`); execErr != nil {
+	if _, execErr := db.Exec(`
+CREATE TRIGGER fail_launch_activation
+BEFORE UPDATE OF gateway_url, pid, state ON launches
+WHEN NEW.state = 'running'
+BEGIN
+  SELECT RAISE(FAIL, 'launch activation denied');
+END;
+`); execErr != nil {
 		t.Fatalf("create trigger error = %v", execErr)
 	}
 
@@ -842,16 +853,16 @@ func TestLaunchCleansUpClaudeWhenSessionPersistenceFails(t *testing.T) {
 	if err == nil {
 		t.Fatalf("launch unexpectedly succeeded")
 	}
-	if !strings.Contains(err.Error(), "recording launch session") {
+	if !strings.Contains(err.Error(), "activating launch record") {
 		t.Fatalf("launch error = %v", err)
 	}
 	if launcher.process == nil {
 		t.Fatalf("launcher did not return a process")
 	}
 	if !launcher.process.stopped {
-		t.Fatalf("process was not stopped after session persistence failure")
+		t.Fatalf("process was not stopped after launch activation failure")
 	}
 	if !launcher.process.waited {
-		t.Fatalf("process was not waited after session persistence failure")
+		t.Fatalf("process was not waited after launch activation failure")
 	}
 }

@@ -50,6 +50,67 @@ func TestLaunchExtendsExistingClaudeAvailableModelsForCCRAliases(t *testing.T) {
 	}
 }
 
+func TestLaunchReadsAvailableModelsFromCustomClaudeConfigDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	customConfigDir := filepath.Join(t.TempDir(), "custom-claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", customConfigDir)
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatalf("MkdirAll(home config) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"availableModels":["ignored-home-model"]}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(home settings) error = %v", err)
+	}
+	if err := os.MkdirAll(customConfigDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll(custom config) error = %v", err)
+	}
+	customSettings := []byte(`{"availableModels":["custom-model"],"statusLine":{"type":"command","command":"custom-status"}}`)
+	customSettingsPath := filepath.Join(customConfigDir, "settings.json")
+	if err := os.WriteFile(customSettingsPath, customSettings, 0o600); err != nil {
+		t.Fatalf("WriteFile(custom settings) error = %v", err)
+	}
+
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch"); err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	settingsJSON, ok := launcher.settingsArgValue()
+	if !ok {
+		t.Fatalf("launch args missing --settings: %#v", launcher.args)
+	}
+	var payload struct {
+		AvailableModels []string        `json:"availableModels"`
+		StatusLine      json.RawMessage `json:"statusLine"`
+	}
+	if err := json.Unmarshal([]byte(settingsJSON), &payload); err != nil {
+		t.Fatalf("settings JSON %q did not parse: %v", settingsJSON, err)
+	}
+	for _, want := range []string{"custom-model", "anthropic.ccr.gpt"} {
+		if !slices.Contains(payload.AvailableModels, want) {
+			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
+		}
+	}
+	if slices.Contains(payload.AvailableModels, "ignored-home-model") {
+		t.Fatalf("availableModels used ignored home configuration: %#v", payload.AvailableModels)
+	}
+	if payload.StatusLine != nil {
+		t.Fatalf("generated settings replaced custom status line: %s", settingsJSON)
+	}
+	current, err := os.ReadFile(customSettingsPath)
+	if err != nil || !slices.Equal(current, customSettings) {
+		t.Fatalf("custom Claude settings changed: %q, %v", current, err)
+	}
+}
+
 func TestLaunchSelectivelyEscapesAnthropicFamilyNamesInCCRAliases(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -1,19 +1,44 @@
 name: Live Claude Code E2E
 
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: live-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  live:
-    name: Live E2E
+  fixture:
+    name: Fixture / Claude ${{ matrix.claude-version }} / ${{ matrix.protocol }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        claude-version: ["2.1.209", "latest"]
+        protocol: [openai, anthropic]
+    env:
+      CCR_LIVE_FIXTURE_PROTOCOL: ${{ matrix.protocol }}
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1"
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - name: Live Claude Code E2E
-        run: make check-live
+      - name: Install Claude Code
+        run: npm install --global "@anthropic-ai/claude-code@${{ matrix.claude-version }}"
+      - name: Verify Claude Code version
+        run: claude --version
+      - name: Fixture Claude Code E2E
+        run: make test-live-fixture

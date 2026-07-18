@@ -17,7 +17,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
+	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
+	"github.com/hishamkaram/claude-code-router/internal/session"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -33,17 +35,17 @@ unless they would override CCR's selected model, generated model allowlist, or
 tool-safety restrictions. For example ccr launch --chrome starts Claude Code
 with its Chrome integration.
 
-	Fallback and detached background modes are rejected because they cannot preserve
-	CCR's selected route and local gateway ownership.
+Fallback and detached background modes are rejected because they cannot preserve
+CCR's selected route and local gateway ownership.
 
-	Without --model, Claude Code starts on its normal configured model. CCR adds
-	registered, compatible aliases to the visual /model picker alongside the
-	permitted Anthropic models while preserving subscription or API-key
-	authentication. Pass --model <alias> when you want that CCR alias to be the
-	startup model.
+Without --model, Claude Code starts on its normal configured model. CCR adds
+registered, compatible aliases to the visual /model picker alongside the
+permitted Anthropic models while preserving subscription or API-key
+authentication. Pass --model <alias> when you want that CCR alias to be the
+startup model.
 
-	Use ccr launch --help for router-specific help. To ask Claude Code for its own
-	help, use ccr launch -- --help.`,
+Use ccr launch --help for router-specific help. To ask Claude Code for its own
+help, use ccr launch -- --help.`,
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			invocation, err := parseLaunchInvocation(args)
@@ -59,13 +61,16 @@ with its Chrome integration.
 			if invocation.dbPathSet {
 				opts.dbPath = invocation.dbPath
 			}
-			return runLaunch(ctx, cmd, opts, deps, invocation.modelAlias, invocation.printMode, invocation.authMode, invocation.permissionMode, invocation.claudeArgs)
+			return runLaunch(ctx, cmd, opts, deps, invocation)
 		},
 	}
 	cmd.Flags().String("model", "", "Optional CCR model alias to use as the startup model")
 	cmd.Flags().String("auth-mode", launchAuthModePreserve, "Gateway auth mode: preserve or gateway-token")
 	cmd.Flags().String("permission-mode", "", "Optional Claude Code permission mode to pass through")
 	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
+	cmd.Flags().Bool("no-history", false, "Disable redacted route history for this launch")
+	cmd.Flags().Bool("no-lifecycle", false, "Disable Claude lifecycle hooks for this launch")
+	cmd.Flags().Bool("no-statusline", false, "Disable CCR status-line injection for this launch")
 	return cmd
 }
 
@@ -82,11 +87,28 @@ const (
 	launchAuthModeGatewayToken = "gateway-token"
 )
 
-func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, modelAlias string, printMode bool, authMode, permissionMode string, passthroughArgs []string) error {
-	if err := validateLaunchInputs(modelAlias, authMode, permissionMode); err != nil {
+type resolvedLaunch struct {
+	modelAlias    string
+	claudeModelID string
+	disableTools  bool
+}
+
+type launchExecution struct {
+	store         *store.Store
+	launchID      int64
+	server        *gateway.Server
+	finalizer     *launchFinalizer
+	token         string
+	observerToken string
+	resolved      resolvedLaunch
+	invocation    launchInvocation
+}
+
+func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, invocation launchInvocation) (resultErr error) {
+	if err := validateLaunchInputs(invocation.modelAlias, invocation.authMode, invocation.permissionMode); err != nil {
 		return err
 	}
-	if err := validateLaunchPassthroughArgs(passthroughArgs); err != nil {
+	if err := validateLaunchPassthroughArgs(invocation.claudeArgs); err != nil {
 		return err
 	}
 
@@ -96,43 +118,160 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	}
 	defer closeStore(s)
 
-	resolvedModelAlias, err := resolveLaunchModelAlias(ctx, deps, s, modelAlias)
+	resolved, err := resolveLaunch(ctx, deps, s, invocation)
 	if err != nil {
 		return err
 	}
-	if authErr := validateResolvedLaunchAuthMode(authMode, resolvedModelAlias); authErr != nil {
-		return authErr
-	}
-	disableTools, err := launchShouldDisableTools(ctx, s, resolvedModelAlias)
-	if err != nil {
-		return err
-	}
-	claudeModelID := launchClaudeModelID(resolvedModelAlias)
-	claudeSettings, err := launchClaudeSettingsArg(ctx, s, disableTools)
-	if err != nil {
-		return err
-	}
-	if passthroughErr := validateDynamicLaunchPassthroughArgs(passthroughArgs, disableTools, claudeSettings != ""); passthroughErr != nil {
+	if passthroughErr := validateResolvedLaunchPassthroughArgs(ctx, s, invocation, resolved); passthroughErr != nil {
 		return passthroughErr
 	}
-
-	token, err := gateway.NewToken()
+	lifecycleState, statuslineState := launchObservationStates(invocation)
+	launchID, err := s.CreateLaunch(ctx, resolved.modelAlias, lifecycleState, statuslineState)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating launch record: %w", err)
 	}
-	server, err := gateway.Start(ctx, gateway.Config{
-		Store:             s,
-		Secrets:           deps.Secrets,
-		Token:             token,
-		DefaultModelAlias: resolvedModelAlias,
+	finalizer := &launchFinalizer{store: s, launchID: launchID}
+	execution := &launchExecution{
+		store: s, launchID: launchID, finalizer: finalizer,
+		resolved: resolved, invocation: invocation,
+	}
+	defer func() {
+		if finalizer.finished {
+			return
+		}
+		resultErr = errors.Join(resultErr, finalizer.Finish(ctx, "failed", "startup_failed", nil))
+	}()
+
+	if startErr := startObservableGateway(ctx, deps, execution); startErr != nil {
+		return startErr
+	}
+	defer shutdownGateway(ctx, execution.server)
+
+	claudeSettings, err := launchClaudeSettingsArg(ctx, s, launchSettingsOptions{
+		IncludeToolDisabled: resolved.disableTools, LifecycleEnabled: !invocation.noLifecycle,
+		StatuslineEnabled: !invocation.noStatusline, GatewayURL: execution.server.URL(),
 	})
 	if err != nil {
 		return err
 	}
-	defer shutdownGateway(ctx, server)
+	if statusErr := s.SetLaunchStatuslineState(ctx, launchID, claudeSettings.StatuslineState); statusErr != nil {
+		return statusErr
+	}
+	if passthroughErr := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, claudeSettings.JSON != ""); passthroughErr != nil {
+		return passthroughErr
+	}
+	return runClaudeLaunchProcess(ctx, cmd, deps, execution, claudeSettings.JSON)
+}
 
-	claudeArgs := launchClaudeArgs(claudeModelID, printMode, disableTools, claudeSettings, permissionMode, passthroughArgs)
-	env := launchClaudeEnv(server.URL(), token, resolvedModelAlias, claudeModelID, disableTools, authMode)
+func validateResolvedLaunchPassthroughArgs(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch) error {
+	if err := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, false); err != nil {
+		return err
+	}
+	if findLaunchOption(invocation.claudeArgs, "--settings") == "" {
+		return nil
+	}
+	hasSettings, err := launchWillInjectSettings(ctx, s, invocation, resolved.disableTools)
+	if err != nil {
+		return err
+	}
+	return validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, hasSettings)
+}
+
+func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation launchInvocation, includeToolDisabled bool) (bool, error) {
+	if !invocation.noLifecycle {
+		return true, nil
+	}
+	if !invocation.noStatusline {
+		configured, err := claudeStatuslineConfigured()
+		if err != nil {
+			return false, err
+		}
+		if !configured {
+			return true, nil
+		}
+	}
+	settings := make(map[string]any, 1)
+	if err := addLaunchAvailableModels(ctx, s, includeToolDisabled, settings); err != nil {
+		return false, err
+	}
+	return len(settings) > 0, nil
+}
+
+func resolveLaunch(ctx context.Context, deps Dependencies, s *store.Store, invocation launchInvocation) (resolvedLaunch, error) {
+	modelAlias, err := resolveLaunchModelAlias(ctx, deps, s, invocation.modelAlias)
+	if err != nil {
+		return resolvedLaunch{}, err
+	}
+	if authErr := validateResolvedLaunchAuthMode(invocation.authMode, modelAlias); authErr != nil {
+		return resolvedLaunch{}, authErr
+	}
+	disableTools, err := launchShouldDisableTools(ctx, s, modelAlias)
+	if err != nil {
+		return resolvedLaunch{}, err
+	}
+	return resolvedLaunch{
+		modelAlias: modelAlias, claudeModelID: launchClaudeModelID(modelAlias),
+		disableTools: disableTools,
+	}, nil
+}
+
+func launchObservationStates(invocation launchInvocation) (lifecycleState, statuslineState string) {
+	lifecycleState, statuslineState = "pending", "pending"
+	if invocation.noLifecycle {
+		lifecycleState = "disabled"
+	}
+	if invocation.noStatusline {
+		statuslineState = "disabled"
+	}
+	return lifecycleState, statuslineState
+}
+
+func startObservableGateway(ctx context.Context, deps Dependencies, execution *launchExecution) error {
+	var err error
+	execution.token, err = gateway.NewToken()
+	if err != nil {
+		return fmt.Errorf("creating gateway session token: %w", err)
+	}
+	execution.observerToken, err = gateway.NewToken()
+	if err != nil {
+		return fmt.Errorf("creating lifecycle observer token: %w", err)
+	}
+	recorder := observability.NewRecorder(ctx, observability.Config{
+		Store: execution.store, LaunchID: execution.launchID,
+		Enabled: !execution.invocation.noHistory,
+	})
+	tracker, err := session.NewTracker(session.Config{
+		Store: execution.store, Recorder: recorder, LaunchID: execution.launchID,
+		Enabled:           !execution.invocation.noLifecycle,
+		DefaultModelAlias: execution.resolved.modelAlias,
+	})
+	if err != nil {
+		return fmt.Errorf("creating lifecycle tracker: %w", err)
+	}
+	execution.finalizer.tracker = tracker
+	execution.server, err = deps.StartGateway(ctx, gateway.Config{
+		Store: execution.store, Secrets: deps.Secrets,
+		Token: execution.token, ObserverToken: execution.observerToken,
+		DefaultModelAlias: execution.resolved.modelAlias,
+		Recorder:          recorder, Tracker: tracker,
+	})
+	if err != nil {
+		return fmt.Errorf("starting local gateway: %w", err)
+	}
+	return nil
+}
+
+func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Dependencies, execution *launchExecution, claudeSettings string) error {
+	invocation := execution.invocation
+	resolved := execution.resolved
+	claudeArgs := launchClaudeArgs(resolved.claudeModelID, invocation.printMode, resolved.disableTools,
+		claudeSettings, invocation.permissionMode, invocation.claudeArgs)
+	env := launchClaudeEnv(launchEnvironmentOptions{
+		GatewayURL: execution.server.URL(), Token: execution.token,
+		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
+		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
+		DisableTools: resolved.disableTools, AuthMode: invocation.authMode,
+	})
 	outputLock := &sync.Mutex{}
 	out := launchProcessWriter(cmd.OutOrStdout(), outputLock)
 	errOut := launchProcessWriter(cmd.ErrOrStderr(), outputLock)
@@ -140,23 +279,23 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	if err != nil {
 		return fmt.Errorf("launching Claude Code through the gateway: %w", err)
 	}
-	sessionID, err := s.AddSession(ctx, store.Session{
-		GatewayURL: server.URL(),
-		PID:        process.PID(),
-		ModelAlias: resolvedModelAlias,
-	})
-	if err != nil {
+	if err := execution.store.ActivateLaunch(ctx, execution.launchID, execution.server.URL(), process.PID()); err != nil {
 		if cleanupErr := cleanupStartedClaudeProcess(process); cleanupErr != nil {
-			return errors.Join(fmt.Errorf("recording launch session: %w", err), fmt.Errorf("cleaning up Claude Code process: %w", cleanupErr))
+			return errors.Join(fmt.Errorf("activating launch record: %w", err), fmt.Errorf("cleaning up Claude Code process: %w", cleanupErr))
 		}
-		return fmt.Errorf("recording launch session: %w", err)
+		return fmt.Errorf("activating launch record: %w", err)
 	}
 	summaryOut := out
-	if printMode {
+	if invocation.printMode {
 		summaryOut = errOut
 	}
-	writeLaunchSummary(ctx, summaryOut, s, server.URL(), sessionID, process.PID(), resolvedModelAlias, disableTools, authMode)
-	return process.Wait()
+	writeLaunchSummary(ctx, summaryOut, execution.store, execution.server.URL(), execution.launchID,
+		process.PID(), resolved.modelAlias, resolved.disableTools, invocation.authMode, invocation.permissionMode)
+	waitErr := process.Wait()
+	shutdownGateway(ctx, execution.server)
+	state, reason := launchExitState(ctx, waitErr)
+	finishErr := execution.finalizer.Finish(ctx, state, reason, launchExitCode(waitErr))
+	return errors.Join(waitErr, finishErr)
 }
 
 func validateLaunchInputs(modelAlias, authMode, permissionMode string) error {
@@ -196,43 +335,61 @@ func validateClaudePermissionMode(mode string) error {
 	}
 }
 
-func launchClaudeEnv(gatewayURL, token, modelAlias, modelID string, disableTools bool, authMode string) ClaudeEnvironment {
+type launchEnvironmentOptions struct {
+	GatewayURL    string
+	Token         string
+	ObserverToken string
+	LaunchID      int64
+	ModelAlias    string
+	ModelID       string
+	DisableTools  bool
+	AuthMode      string
+}
+
+func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
 	env := ClaudeEnvironment{
-		Set: make([]string, 0, 10),
+		Set: make([]string, 0, 13),
 		Unset: []string{
 			"CLAUDE_CODE_USE_GATEWAY",
 		},
 	}
-	env.Set = append(env.Set,
-		"ANTHROPIC_BASE_URL="+gatewayURL,
+	env.Set = append(
+		env.Set,
+		"ANTHROPIC_BASE_URL="+options.GatewayURL,
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
+		statuslineGatewayURLEnv+"="+options.GatewayURL,
+		statuslineTokenEnv+"="+options.ObserverToken,
+		fmt.Sprintf("CCR_LAUNCH_ID=%d", options.LaunchID),
 	)
-	if disableTools {
+	if options.DisableTools {
 		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=")
 	} else {
 		// Claude Code disables deferred MCP tool search behind non-first-party gateways
 		// unless this is enabled. CCR translates the resulting tool_reference blocks.
 		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=true")
 	}
-	if authMode == launchAuthModeGatewayToken {
-		env.Set = append(env.Set,
-			"ANTHROPIC_AUTH_TOKEN="+token,
+	if options.AuthMode == launchAuthModeGatewayToken {
+		env.Set = append(
+			env.Set,
+			"ANTHROPIC_AUTH_TOKEN="+options.Token,
 		)
 	} else {
 		env.Unset = append(env.Unset, "ANTHROPIC_AUTH_TOKEN")
-		env.Set = append(env.Set,
-			"ANTHROPIC_CUSTOM_HEADERS="+launchAnthropicCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS"), token),
+		env.Set = append(
+			env.Set,
+			"ANTHROPIC_CUSTOM_HEADERS="+launchAnthropicCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS"), options.Token),
 		)
 	}
-	if disableTools {
+	if options.DisableTools {
 		env.Set = append(env.Set, "CLAUDE_CODE_SIMPLE=1")
 	}
-	if modelID == "" {
+	if options.ModelID == "" {
 		return env
 	}
-	env.Set = append(env.Set,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION="+modelID,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=CCR "+modelAlias,
+	env.Set = append(
+		env.Set,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION="+options.ModelID,
+		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=CCR "+options.ModelAlias,
 		"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Model alias registered in ccr",
 	)
 	return env
@@ -243,53 +400,6 @@ func launchClaudeModelID(modelAlias string) string {
 		return ""
 	}
 	return gateway.DiscoveryIDForAlias(modelAlias)
-}
-
-func launchClaudeSettingsArg(ctx context.Context, s *store.Store, includeToolDisabled bool) (string, error) {
-	existing, configured, err := claudeAvailableModels()
-	if err != nil {
-		return "", err
-	}
-	aliases, hasRoutable, err := routableModelAliases(ctx, s, includeToolDisabled)
-	if err != nil {
-		return "", fmt.Errorf("building Claude Code model allowlist extension: %w", err)
-	}
-	if !hasRoutable {
-		return "", nil
-	}
-	ids := make([]string, 0, len(existing)+len(aliases))
-	seen := make(map[string]struct{}, len(existing)+len(aliases))
-	baseIDs := existing
-	if !configured {
-		baseIDs = gateway.FirstPartyAnthropicModelIDs()
-	}
-	for _, id := range baseIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-	}
-	for _, alias := range aliases {
-		id := gateway.DiscoveryIDForAlias(alias)
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
-	}
-	payload := struct {
-		AvailableModels []string `json:"availableModels"`
-	}{AvailableModels: ids}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("building Claude Code settings override: %w", err)
-	}
-	return string(encoded), nil
 }
 
 func claudeAvailableModels() (models []string, configured bool, err error) {
@@ -309,14 +419,23 @@ func claudeAvailableModels() (models []string, configured bool, err error) {
 
 func claudeSettingsPaths() []string {
 	paths := []string{}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		paths = append(paths,
+	configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if configDir != "" {
+		paths = append(
+			paths,
+			filepath.Join(configDir, "settings.json"),
+			filepath.Join(configDir, "settings.local.json"),
+		)
+	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(
+			paths,
 			filepath.Join(home, ".claude", "settings.json"),
 			filepath.Join(home, ".claude", "settings.local.json"),
 		)
 	}
 	if cwd, err := os.Getwd(); err == nil && cwd != "" {
-		paths = append(paths,
+		paths = append(
+			paths,
 			filepath.Join(cwd, ".claude", "settings.json"),
 			filepath.Join(cwd, ".claude", "settings.local.json"),
 		)
@@ -391,11 +510,11 @@ func providerDisablesClaudeTools(provider store.Provider) bool {
 	return caps.Mode == providers.ModeChatOnly || !caps.SupportsTools
 }
 
-func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool, authMode string) {
+func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool, authMode, permissionMode string) {
 	fmt.Fprintf(out, "Claude Code launched through %s (session=%d pid=%d)\n", gatewayURL, sessionID, pid)
 	if modelAlias != "" {
 		fmt.Fprintf(out, "Selected ccr model alias %q is exposed to Claude Code and used as the startup model.\n", modelAlias)
-		fmt.Fprintf(out, "Unmatched non-Claude model requests in this launch are routed through selected ccr alias %q.\n", modelAlias)
+		fmt.Fprintf(out, "Requests selecting ccr alias %q are routed through its registered provider.\n", modelAlias)
 		writeLaunchCompatibilitySummary(ctx, out, s, modelAlias)
 		if disableTools {
 			fmt.Fprintln(out, "Selected route does not support tools; Claude Code tools are disabled for this launch.")
@@ -405,6 +524,9 @@ func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gate
 	}
 	writeLaunchAuthSummary(out, authMode)
 	if authMode == launchAuthModeGatewayToken {
+		if permissionMode == "auto" {
+			fmt.Fprintln(out, "Claude Code auto mode may require first-party Anthropic access for safety classification; use --auth-mode preserve if Agent or Workflow actions are denied.")
+		}
 		fmt.Fprintln(out, "Gateway model discovery is requested; registered aliases are exposed through /v1/models.")
 		return
 	}
@@ -526,116 +648,6 @@ func shutdownGateway(parent context.Context, server *gateway.Server) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
 	defer cancel()
 	_ = server.Shutdown(ctx)
-}
-
-func newSessionsCommand(ctx context.Context, opts *options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "sessions",
-		Short: "List tracked Claude Code sessions",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			s, _, err := openMigratedStore(ctx, opts)
-			if err != nil {
-				return err
-			}
-			defer closeStore(s)
-			sessions, err := s.ListSessions(ctx)
-			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No launch sessions tracked.")
-				return nil
-			}
-			for _, session := range sessions {
-				model := session.ModelAlias
-				if model == "" {
-					model = "(request-selected)"
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%d\tpid=%d\tstatus=%s\tgateway=%s\tmodel=%s\tcreated=%s\n", session.ID, session.PID, processStatus(session.PID), session.GatewayURL, model, session.CreatedAt)
-			}
-			return nil
-		},
-	}
-}
-
-func newAgentsCommand(ctx context.Context, opts *options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "agents",
-		Short: "List tracked Claude Code agents and workers",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			s, _, err := openMigratedStore(ctx, opts)
-			if err != nil {
-				return err
-			}
-			defer closeStore(s)
-			agents, err := s.ListAgents(ctx)
-			if err != nil {
-				return err
-			}
-			if len(agents) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No agents observed.")
-				return nil
-			}
-			for _, agent := range agents {
-				fmt.Fprintf(cmd.OutOrStdout(), "%d\tsession=%d\tname=%s\tkind=%s\tmodel=%s\tstatus=%s\tcreated=%s\n", agent.ID, agent.SessionID, agent.Name, agent.Kind, agent.ModelAlias, agent.Status, agent.CreatedAt)
-			}
-			return nil
-		},
-	}
-}
-
-func newConformanceCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "conformance",
-		Short: "Run model compatibility checks",
-	}
-	cmd.AddCommand(&cobra.Command{
-		Use:   "run <alias>",
-		Short: "Run conformance checks for a model alias",
-		Args: func(cmd *cobra.Command, args []string) error {
-			if len(args) != 1 {
-				return fmt.Errorf("model alias is required; example: ccr conformance run qwen")
-			}
-			return validateName("model alias", args[0])
-		},
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runConformance(ctx, cmd, opts, deps, args[0])
-		},
-	})
-	return cmd
-}
-
-func runConformance(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, alias string) error {
-	s, _, err := openMigratedStore(ctx, opts)
-	if err != nil {
-		return err
-	}
-	defer closeStore(s)
-
-	model, provider, discovered, err := validateRoutableModelAliasTargetWithStore(ctx, deps, s, alias, true)
-	if err != nil {
-		return err
-	}
-	caps := effectiveProviderCapabilities(provider)
-	details := fmt.Sprintf("provider=%s type=%s protocol=%s model=%s compat=%s", provider.Name, provider.Type, caps.Protocol, model.ProviderModel, model.Status)
-	if caps.Protocol == providers.ProtocolOpenAICompatible && caps.SupportsModelDiscovery {
-		details = fmt.Sprintf("%s discovered_models=%d", details, discovered)
-	}
-	recordID, err := s.AddConformanceRecord(ctx, store.ConformanceRecord{
-		Alias:        alias,
-		Status:       "local-verified",
-		LiveVerified: false,
-		Details:      details,
-	})
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Conformance record %d for %q: local-verified\n", recordID, alias)
-	fmt.Fprintf(cmd.OutOrStdout(), "Compatibility: %s\n", details)
-	fmt.Fprintln(cmd.OutOrStdout(), "Live runtime status: unverified until live Claude Code E2E passes.")
-	return nil
 }
 
 func processStatus(pid int) string {

@@ -50,6 +50,33 @@ possible. Subagents, workflow agents, and teammates created after a switch
 inherit the active model where Claude Code permits it. Existing workers can
 remain on the model used when they were created; CCR does not hide that fact.
 
+The next authenticated request after `/model` is the routing source of truth.
+Its actual alias, provider model, protocol, capabilities, result, latency, and
+provider-reported token usage appear in `ccr status`, `ccr trace`, and the CCR
+status line. CCR does not infer a route from generated model self-identification.
+
+## Runtime and Lifecycle Visibility
+
+Each launch gets a normalized launch record. Launch-scoped Claude hooks observe
+session, subagent, task, teammate-idle, stop-failure, and session-end events.
+Abrupt exits mark unfinished observed work abandoned. Hook payloads are reduced
+to identifiers, kinds, states, and bounded reasons before persistence; prompts,
+task descriptions, tool arguments, transcript paths, and raw hook bodies are
+not retained.
+
+```bash
+ccr status --json
+ccr trace --follow
+ccr sessions --active
+ccr agents --active
+```
+
+The hook and status endpoints listen only on the launch gateway's loopback
+address and require a separate ephemeral token. Existing user hooks are kept.
+An existing status line wins over CCR's launch-only status line. The
+`--no-history`, `--no-lifecycle`, and `--no-statusline` flags disable their
+respective feature for one launch.
+
 ## Authentication Modes
 
 ### `preserve` (default)
@@ -88,6 +115,8 @@ use, streaming, thinking, model discovery, and token-count operations.
 - Chat-only routes disable Claude Code tools.
 - Unsupported or unsafe requests fail with a clear error.
 - CCR never silently falls back to Claude or another provider.
+- Observed token counts are recorded when supplied; monetary cost is not
+  estimated.
 
 Built-in `WebSearch` and `WebFetch` are Claude Code host tools. CCR forwards the
 model's tool protocol but cannot redirect those host-owned web operations to a

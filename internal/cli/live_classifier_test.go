@@ -38,20 +38,28 @@ func TestLiveLaunchOpenAIProviderAutoModeClassifierRequest(t *testing.T) {
 		state.handle(t, w, r)
 	}))
 	defer provider.Close()
+	classifier := newLiveFirstPartyClassifierFixture(t)
+	defer classifier.Close()
+	t.Setenv("ANTHROPIC_API_KEY", liveFixtureAPIKey)
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
 
 	prompt := `Inspect the current project state, then reply exactly CCR_LIVE_CLASSIFIER_OK.`
-	deps := Dependencies{In: strings.NewReader(prompt + "\n"), Launcher: liveDebugClaudeLauncher{debugPath: debugPath}}
-	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--permission-mode", "auto")
+	deps := Dependencies{
+		In: strings.NewReader(prompt + "\n"), Launcher: liveDebugClaudeLauncher{debugPath: debugPath},
+		StartGateway: classifier.StartGateway,
+	}
+	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "preserve", "--permission-mode", "auto")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !strings.Contains(out, "CCR_LIVE_CLASSIFIER_OK") {
 		t.Fatalf("launch output missing classifier sentinel:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut)
+	state.assertComplete(t, out, errOut, classifier.Seen())
 	if _, err := os.Stat(writePath); err != nil {
 		t.Fatalf("classified Write did not create test file: %v", err)
 	}
@@ -95,7 +103,7 @@ func (s *liveAutoClassifierState) handleChat(t *testing.T, w http.ResponseWriter
 	switch {
 	case isLiveAutoClassifierRequest(payload):
 		s.classifierRequestSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-auto-classifier","choices":[{"message":{"content":"<block>no</block>"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}`)
+		writeLiveOpenAIClassifierResponse(w, payload)
 	case s.chatCalls == 1:
 		s.firstRequestHadWrite = liveToolsContain(payload.Tools, "Write")
 		writeLiveToolCall(w, "chatcmpl-classifier-write", "toolu_classifier_write", "Write", map[string]string{
@@ -111,17 +119,13 @@ func (s *liveAutoClassifierState) handleChat(t *testing.T, w http.ResponseWriter
 	}
 }
 
-func (s *liveAutoClassifierState) assertComplete(t *testing.T, out, errOut string) {
+func (s *liveAutoClassifierState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadWrite || !s.classifierRequestSeen || !s.writeToolResultSeen {
-		t.Fatalf("Classifier live route incomplete: firstRequestHadWrite=%v classifierRequestSeen=%v writeToolResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWrite, s.classifierRequestSeen, s.writeToolResultSeen, s.chatCalls, out, errOut)
+	if !s.firstRequestHadWrite || (!s.classifierRequestSeen && !firstPartyClassifierSeen) || !s.writeToolResultSeen {
+		t.Fatalf("Classifier live route incomplete: firstRequestHadWrite=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v writeToolResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWrite, s.classifierRequestSeen, firstPartyClassifierSeen, s.writeToolResultSeen, s.chatCalls, out, errOut)
 	}
-}
-
-func isLiveAutoClassifierRequest(payload liveOpenAIChatPayload) bool {
-	return openAIMessagesContain(payload.Messages, "You are a security monitor for autonomous AI coding agents.")
 }
 
 type liveDebugClaudeLauncher struct {

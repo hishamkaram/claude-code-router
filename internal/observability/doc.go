@@ -1,3 +1,2 @@
-// Package observability will report redacted routing traces, latency, usage,
-// and cost metadata.
+// Package observability records redacted routing and lifecycle metadata.
 package observability

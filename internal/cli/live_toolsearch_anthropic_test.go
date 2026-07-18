@@ -30,6 +30,11 @@ func TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent(t *tes
 		state.handle(t, w, r)
 	}))
 	defer provider.Close()
+	classifier := newLiveFirstPartyClassifierFixture(t)
+	defer classifier.Close()
+	t.Setenv("ANTHROPIC_API_KEY", liveFixtureAPIKey)
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	for _, args := range [][]string{
@@ -43,15 +48,19 @@ func TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent(t *tes
 	}
 
 	prompt := `/ccr-live-plugin:research Find latest ChatGPT news`
-	deps := Dependencies{In: strings.NewReader(prompt + "\n"), Launcher: livePluginClaudeLauncher{pluginDir: pluginDir}}
-	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "glm", "--print", "--auth-mode", "gateway-token", "--permission-mode", "auto")
+	deps := Dependencies{
+		In: strings.NewReader(prompt + "\n"), Launcher: livePluginClaudeLauncher{pluginDir: pluginDir},
+		StartGateway: classifier.StartGateway,
+	}
+	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "glm", "--print", "--auth-mode", "preserve", "--permission-mode", "auto")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
-	if !strings.Contains(out, "CCR_LIVE_TOOLSEARCH_PARENT_OK") {
-		t.Fatalf("launch output missing parent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	if !strings.Contains(out, liveToolSearchAgentResult) {
+		t.Fatalf("launch output missing completed agent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut)
+	state.assertComplete(t, out, errOut, classifier.Seen())
+	assertLiveAgentVisibility(t, ctx, dbPath)
 }
 
 type liveAnthropicToolSearchAgentState struct {
@@ -61,7 +70,7 @@ type liveAnthropicToolSearchAgentState struct {
 	toolReferenceResultSeen bool
 	classifierRequestSeen   bool
 	childPromptSeen         bool
-	parentAgentResultSeen   bool
+	callerAgentResultSeen   bool
 }
 
 type liveAnthropicMessagePayload struct {
@@ -105,7 +114,7 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	s.messageCalls++
 	if isLiveAnthropicAutoClassifierRequest(payload) {
 		s.classifierRequestSeen = true
-		writeLiveAnthropicClassifierResponse(w, payload.Model, payload.Stream)
+		writeLiveAnthropicClassifierResponse(w, payload)
 		return
 	}
 	switch {
@@ -122,32 +131,29 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 		})
 	case !s.childPromptSeen && liveAnthropicMessagesContain(payload.Messages, "Find latest ChatGPT news"):
 		s.childPromptSeen = true
-		writeLiveAnthropicStream(w, payload.Model, "CCR_LIVE_TOOLSEARCH_CHILD_OK")
-	case liveAnthropicMessagesContain(payload.Messages, "CCR_LIVE_TOOLSEARCH_CHILD_OK"):
-		s.parentAgentResultSeen = true
-		writeLiveAnthropicStream(w, payload.Model, "CCR_LIVE_TOOLSEARCH_PARENT_OK")
+		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
+	case liveAnthropicMessagesContain(payload.Messages, liveToolSearchAgentResult):
+		s.callerAgentResultSeen = true
+		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
 	default:
 		t.Errorf("unexpected provider request in Anthropic research Agent route: %#v", payload.Messages)
 		http.Error(w, "unexpected request", http.StatusBadRequest)
 	}
 }
 
-func (s *liveAnthropicToolSearchAgentState) assertComplete(t *testing.T, out, errOut string) {
+func (s *liveAnthropicToolSearchAgentState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.toolSearchSeen || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen || !s.parentAgentResultSeen {
-		t.Fatalf("Anthropic research Agent live route incomplete: toolSearchSeen=%v toolReferenceResultSeen=%v classifierRequestSeen=%v childPromptSeen=%v parentAgentResultSeen=%v messageCalls=%d\nstdout:\n%s\nstderr:\n%s", s.toolSearchSeen, s.toolReferenceResultSeen, s.classifierRequestSeen, s.childPromptSeen, s.parentAgentResultSeen, s.messageCalls, out, errOut)
+	if !s.toolSearchSeen || !s.toolReferenceResultSeen || (!s.classifierRequestSeen && !firstPartyClassifierSeen) || !s.childPromptSeen {
+		t.Fatalf("Anthropic research Agent live route incomplete: toolSearchSeen=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v messageCalls=%d\nstdout:\n%s\nstderr:\n%s", s.toolSearchSeen, s.toolReferenceResultSeen, s.classifierRequestSeen, firstPartyClassifierSeen, s.childPromptSeen, s.callerAgentResultSeen, s.messageCalls, out, errOut)
 	}
-}
-
-func isLiveAnthropicAutoClassifierRequest(payload liveAnthropicMessagePayload) bool {
-	return strings.Contains(string(payload.System), "You are a security monitor for autonomous AI coding agents.")
 }
 
 func liveAnthropicToolsContain(tools []struct {
 	Name string `json:"name"`
-}, want string) bool {
+}, want string,
+) bool {
 	for _, tool := range tools {
 		if tool.Name == want {
 			return true
@@ -158,7 +164,8 @@ func liveAnthropicToolsContain(tools []struct {
 
 func liveAnthropicMessagesContain(messages []struct {
 	Content json.RawMessage `json:"content"`
-}, want string) bool {
+}, want string,
+) bool {
 	for _, message := range messages {
 		if strings.Contains(string(message.Content), want) {
 			return true
@@ -183,13 +190,4 @@ func writeLiveAnthropicToolCall(w http.ResponseWriter, model, toolID, name strin
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
-}
-
-func writeLiveAnthropicClassifierResponse(w http.ResponseWriter, model string, stream bool) {
-	if stream {
-		writeLiveAnthropicStream(w, model, "<block>no</block>")
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"msg_live_classifier","type":"message","role":"assistant","model":%q,"content":[{"type":"text","text":"<block>no</block>"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":9,"output_tokens":3}}`, model)
 }

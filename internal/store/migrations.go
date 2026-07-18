@@ -39,6 +39,105 @@ func (s *Store) migrateV2ToV3(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) migrateV3ToV4(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v3 to v4 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if _, err := tx.ExecContext(ctx, legacyV2SchemaSQL); err != nil {
+		return fmt.Errorf("ensuring legacy runtime tables: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE sessions RENAME TO launches`); err != nil {
+		return fmt.Errorf("renaming legacy sessions table: %w", err)
+	}
+	launchColumns := [...]string{
+		"state TEXT NOT NULL DEFAULT 'legacy'",
+		"lifecycle_state TEXT NOT NULL DEFAULT 'unobserved'",
+		"statusline_state TEXT NOT NULL DEFAULT 'not-configured'",
+		"started_at TEXT NOT NULL DEFAULT ''",
+		"ended_at TEXT NOT NULL DEFAULT ''",
+		"exit_code INTEGER",
+		"end_reason TEXT NOT NULL DEFAULT ''",
+	}
+	if err := addMigrationColumns(ctx, tx, "launches", launchColumns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE launches SET state = 'legacy', started_at = created_at`); err != nil {
+		return fmt.Errorf("backfilling legacy launches: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE agents RENAME TO agents_v3`); err != nil {
+		return fmt.Errorf("renaming legacy agents table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, migrateV3ToV4CreateSQL); err != nil {
+		return fmt.Errorf("creating v4 runtime tables: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO agents (
+  id, launch_id, session_id, external_id, name, kind, model_alias, status,
+  created_at, updated_at, ended_at
+)
+SELECT
+  agents_v3.id,
+  CASE WHEN EXISTS (SELECT 1 FROM launches WHERE launches.id = agents_v3.session_id)
+    THEN agents_v3.session_id ELSE NULL END,
+  NULL,
+  'legacy-' || agents_v3.id,
+  agents_v3.name,
+  agents_v3.kind,
+  agents_v3.model_alias,
+  agents_v3.status,
+  agents_v3.created_at,
+  agents_v3.created_at,
+  ''
+FROM agents_v3
+`); err != nil {
+		return fmt.Errorf("migrating legacy agents: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE agents_v3`); err != nil {
+		return fmt.Errorf("dropping legacy agents table: %w", err)
+	}
+
+	conformanceColumns := [...]string{
+		"scope TEXT NOT NULL DEFAULT 'provider'",
+		"provider_name TEXT NOT NULL DEFAULT ''",
+		"provider_model TEXT NOT NULL DEFAULT ''",
+		"protocol TEXT NOT NULL DEFAULT ''",
+		"claude_version TEXT NOT NULL DEFAULT ''",
+		"started_at TEXT NOT NULL DEFAULT ''",
+		"completed_at TEXT NOT NULL DEFAULT ''",
+	}
+	if err := addMigrationColumns(ctx, tx, "conformance_runs", conformanceColumns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE conformance_runs
+SET started_at = created_at, completed_at = created_at
+`); err != nil {
+		return fmt.Errorf("backfilling conformance timestamps: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 4 WHERE id = 1 AND version = 3`); err != nil {
+		return fmt.Errorf("updating schema version to 4: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v3 to v4 migration: %w", err)
+	}
+	return nil
+}
+
+func addMigrationColumns(ctx context.Context, tx *sql.Tx, table string, definitions []string) error {
+	for _, definition := range definitions {
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+definition); err != nil {
+			return fmt.Errorf("adding %s column %q: %w", table, definition, err)
+		}
+	}
+	return nil
+}
+
 func (s *Store) providerColumnExists(ctx context.Context, name string) (bool, error) {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(providers)`)
 	if err != nil {

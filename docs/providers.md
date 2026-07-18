@@ -149,3 +149,44 @@ ccr conformance run code-review
 Provider capabilities also gate tools, streaming, thinking, model discovery, and
 token counting. CCR reports safe degradation and rejects unsafe translations; it
 does not silently change providers.
+
+## Conformance and Diagnostics
+
+Run the protocol matrix through CCR's production gateway path:
+
+```bash
+ccr conformance run code-review
+ccr conformance run code-review --claude --include-anthropic
+ccr conformance list code-review --json
+```
+
+The matrix checks configuration, discovery where supported, text, streaming,
+forced tools, thinking, token counting, cancellation, and sanitized errors.
+Capability-disabled checks are reported as not applicable. A failed declared
+capability does not silently change the model's compatibility setting.
+
+`--claude` runs the route through the installed Claude Code CLI and verifies
+launch history, hooks, traces, Agent, and Workflow behavior. With
+`--include-anthropic`, CCR switches from first-party Anthropic to every
+tool-compatible alias and back in one launch. Tool-disabled aliases are checked
+in explicit launches because Claude cannot safely change tool availability in
+the middle of a session.
+
+`ccr doctor` is offline by default. Use `ccr doctor --live` to probe one alias
+per provider or `ccr doctor --live --all` to probe every non-blocked alias.
+
+## Team Profiles
+
+`ccr profile export` creates deterministic provider and model configuration for
+review or team distribution. It excludes raw credentials, keychain identifiers,
+and key-file paths. On import, bind each required provider to an environment
+variable on the destination machine:
+
+```bash
+ccr profile import team.json --dry-run
+ccr profile import team.json --credential openrouter=OPENROUTER_API_KEY
+```
+
+Unknown fields, unsupported schema versions, invalid URLs, and oversized files
+are rejected before any database change. Existing provider or model names cause
+the whole import to fail atomically.

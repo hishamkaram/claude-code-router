@@ -10,34 +10,35 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string) {
+func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string) observability.TokenUsage {
 	if body == nil {
 		var err error
 		body, err = io.ReadAll(io.LimitReader(r.Body, 16<<20))
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadRequest, "invalid Anthropic request")
-			return
+			return observability.TokenUsage{}
 		}
 	}
 	if providerOverride == nil {
 		writeAnthropicError(w, http.StatusBadGateway, "Anthropic route missing upstream provider")
-		return
+		return observability.TokenUsage{}
 	}
 	provider := *providerOverride
 	endpoint, err := anthropicEndpoint(provider.BaseURL, anthropicResourceFromPath(r.URL.Path))
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())
-		return
+		return observability.TokenUsage{}
 	}
 	if r.URL.RawQuery != "" {
 		parsed, parseErr := url.Parse(endpoint)
 		if parseErr != nil {
 			writeAnthropicError(w, http.StatusBadGateway, parseErr.Error())
-			return
+			return observability.TokenUsage{}
 		}
 		parsed.RawQuery = r.URL.RawQuery
 		endpoint = parsed.String()
@@ -46,14 +47,14 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("creating Anthropic pass-through request: %v", err))
-		return
+		return observability.TokenUsage{}
 	}
 	copyAnthropicPassThroughHeaders(req.Header, r.Header, h.cfg.Token, authMode == anthropicAuthIncoming)
 	if authMode == anthropicAuthProviderSecret {
 		apiKey, secretErr := resolveProviderSecret(r.Context(), h.cfg.Secrets, provider.SecretRef)
 		if secretErr != nil {
 			writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(provider.SecretRef)))
-			return
+			return observability.TokenUsage{}
 		}
 		if apiKey != "" {
 			req.Header.Set("x-api-key", apiKey)
@@ -63,7 +64,7 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 	resp, err := h.httpClient().Do(req)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("requesting Anthropic provider %q: %v", provider.Name, err))
-		return
+		return observability.TokenUsage{}
 	}
 	defer func() {
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -71,7 +72,7 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 	}()
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	copyProviderResponseBody(w, resp, responseModel)
+	return copyProviderResponseBody(w, resp, responseModel)
 }
 
 func rewriteAnthropicRequestModel(body []byte, model string) ([]byte, error) {
@@ -195,49 +196,137 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-func copyProviderResponseBody(w http.ResponseWriter, resp *http.Response, responseModel string) {
+func copyProviderResponseBody(w http.ResponseWriter, resp *http.Response, responseModel string) observability.TokenUsage {
 	if responseModel == "" || resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		_, _ = io.Copy(w, resp.Body)
-		return
+		return observability.TokenUsage{}
 	}
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "+json") {
-		copyJSONProviderResponseBody(w, resp.Body, responseModel)
-		return
+		return copyJSONProviderResponseBody(w, resp.Body, responseModel)
 	}
 	if strings.Contains(contentType, "text/event-stream") {
 		if flusher, ok := w.(http.Flusher); ok {
-			copyAndRewriteSSE(w, resp.Body, flusher, responseModel)
-			return
+			return copyAndRewriteSSE(w, resp.Body, flusher, responseModel)
 		}
 	}
 	_, _ = io.Copy(w, resp.Body)
+	return observability.TokenUsage{}
 }
 
-func copyJSONProviderResponseBody(dst io.Writer, src io.Reader, responseModel string) {
+func copyJSONProviderResponseBody(dst io.Writer, src io.Reader, responseModel string) observability.TokenUsage {
 	raw, err := io.ReadAll(src)
 	if err != nil {
-		return
+		return observability.TokenUsage{}
 	}
+	usage := anthropicUsageFromJSON(raw)
 	if rewritten, ok := rewriteAnthropicResponseModel(raw, responseModel); ok {
 		raw = rewritten
 	}
 	_, _ = dst.Write(raw)
+	return usage
 }
 
-func copyAndRewriteSSE(dst io.Writer, src io.Reader, flusher http.Flusher, responseModel string) {
+func copyAndRewriteSSE(dst io.Writer, src io.Reader, flusher http.Flusher, responseModel string) observability.TokenUsage {
 	reader := bufio.NewReader(src)
+	var usage observability.TokenUsage
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			mergeTokenUsage(&usage, anthropicUsageFromSSELine(line))
 			if _, writeErr := dst.Write(rewriteSSEDataLine(line, responseModel)); writeErr != nil {
-				return
+				return usage
 			}
 			flusher.Flush()
 		}
 		if err != nil {
-			return
+			return usage
 		}
+	}
+}
+
+type anthropicUsageFields struct {
+	InputTokens      *int64 `json:"input_tokens"`
+	OutputTokens     *int64 `json:"output_tokens"`
+	CacheReadTokens  *int64 `json:"cache_read_input_tokens"`
+	CacheWriteTokens *int64 `json:"cache_creation_input_tokens"`
+}
+
+func anthropicUsageFromJSON(raw []byte) observability.TokenUsage {
+	var payload struct {
+		InputTokens *int64                `json:"input_tokens"`
+		Usage       *anthropicUsageFields `json:"usage"`
+		Message     *struct {
+			Usage *anthropicUsageFields `json:"usage"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return observability.TokenUsage{}
+	}
+	var usage observability.TokenUsage
+	if payload.InputTokens != nil {
+		usage.Observed = true
+		usage.InputTokens = *payload.InputTokens
+	}
+	mergeUsageFields(&usage, payload.Message)
+	if payload.Usage != nil {
+		applyUsageFields(&usage, payload.Usage)
+	}
+	return usage
+}
+
+func mergeUsageFields(usage *observability.TokenUsage, message *struct {
+	Usage *anthropicUsageFields `json:"usage"`
+},
+) {
+	if message != nil && message.Usage != nil {
+		applyUsageFields(usage, message.Usage)
+	}
+}
+
+func applyUsageFields(usage *observability.TokenUsage, fields *anthropicUsageFields) {
+	if fields.InputTokens != nil {
+		usage.Observed, usage.InputTokens = true, *fields.InputTokens
+	}
+	if fields.OutputTokens != nil {
+		usage.Observed, usage.OutputTokens = true, *fields.OutputTokens
+	}
+	if fields.CacheReadTokens != nil {
+		usage.Observed, usage.CacheReadTokens = true, *fields.CacheReadTokens
+	}
+	if fields.CacheWriteTokens != nil {
+		usage.Observed, usage.CacheWriteTokens = true, *fields.CacheWriteTokens
+	}
+}
+
+func anthropicUsageFromSSELine(line []byte) observability.TokenUsage {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return observability.TokenUsage{}
+	}
+	payload := bytes.TrimSpace(trimmed[len("data:"):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return observability.TokenUsage{}
+	}
+	return anthropicUsageFromJSON(payload)
+}
+
+func mergeTokenUsage(current *observability.TokenUsage, next observability.TokenUsage) {
+	if !next.Observed {
+		return
+	}
+	current.Observed = true
+	if next.InputTokens != 0 {
+		current.InputTokens = next.InputTokens
+	}
+	if next.OutputTokens != 0 {
+		current.OutputTokens = next.OutputTokens
+	}
+	if next.CacheReadTokens != 0 {
+		current.CacheReadTokens = next.CacheReadTokens
+	}
+	if next.CacheWriteTokens != 0 {
+		current.CacheWriteTokens = next.CacheWriteTokens
 	}
 }
 

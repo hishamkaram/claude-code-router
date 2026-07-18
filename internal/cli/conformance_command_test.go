@@ -1,0 +1,156 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/hishamkaram/claude-code-router/internal/store"
+)
+
+func TestConformanceCommandPersistsChecksAndEmitsVersionedJSON(t *testing.T) {
+	t.Parallel()
+	server := newCLIConformanceOpenAIServer(t, "model-v1")
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "fixture",
+		"--type", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "coder",
+		"--provider", "fixture", "--model", "model-v1"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	out, errOut, err := runCommand(t, "--db", dbPath, "conformance", "run", "coder", "--json")
+	if err != nil {
+		t.Fatalf("conformance run error = %v\nstderr=%s", err, errOut)
+	}
+	if !strings.Contains(errOut, "alias=coder provider=fixture model=model-v1") {
+		t.Fatalf("conformance target missing from stderr: %s", errOut)
+	}
+	var document conformanceDocument
+	if decodeErr := json.Unmarshal([]byte(out), &document); decodeErr != nil {
+		t.Fatalf("conformance JSON error = %v\n%s", decodeErr, out)
+	}
+	if document.SchemaVersion != 1 || document.Status != "passed" ||
+		!document.LiveVerified || len(document.Checks) != 9 {
+		t.Fatalf("conformance document = %#v", document)
+	}
+	ctx := context.Background()
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	defer s.Close()
+	runs, err := s.ListConformanceRuns(ctx, "coder", 10)
+	if err != nil || len(runs) != 1 || runs[0].Status != "passed" {
+		t.Fatalf("ListConformanceRuns() = %#v, %v", runs, err)
+	}
+	checks, err := s.ListConformanceChecks(ctx, runs[0].ID)
+	if err != nil || len(checks) != 9 {
+		t.Fatalf("ListConformanceChecks() = %#v, %v", checks, err)
+	}
+	listOut, _, err := runCommand(t, "--db", dbPath, "conformance", "list", "coder", "--json")
+	if err != nil {
+		t.Fatalf("conformance list error = %v", err)
+	}
+	if !strings.Contains(listOut, `"schema_version": 1`) || !strings.Contains(listOut, `"live_verified": true`) {
+		t.Fatalf("conformance list JSON = %s", listOut)
+	}
+}
+
+func newCLIConformanceOpenAIServer(t *testing.T, model string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"data":[{"id":%q}]}`, model)
+		case "/v1/messages/count_tokens":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"input_tokens":9}`)
+		case "/v1/chat/completions":
+			var payload struct {
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+				Tools []any `json:"tools"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			for _, message := range payload.Messages {
+				if strings.Contains(message.Content, "CCR_CONFORMANCE_CANCEL") {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if len(payload.Tools) > 0 {
+				_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"","tool_calls":[{"id":"toolu-1","type":"function","function":{"name":"ccr_probe","arguments":"{}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`)
+				return
+			}
+			_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func newCLIConformanceAnthropicServer(t *testing.T, model string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/messages/count_tokens":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"input_tokens":9}`)
+		case "/v1/messages":
+			var payload struct {
+				Stream   bool  `json:"stream"`
+				Tools    []any `json:"tools"`
+				Messages []struct {
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			for _, message := range payload.Messages {
+				if strings.Contains(message.Content, "CCR_CONFORMANCE_CANCEL") {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
+				}
+			}
+			if payload.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":%q,\"usage\":{\"input_tokens\":5}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", model)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			if len(payload.Tools) > 0 {
+				_, _ = fmt.Fprintf(w, `{"type":"message","model":%q,"content":[{"type":"tool_use","id":"toolu-1","name":"ccr_probe","input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":2}}`, model)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"type":"message","model":%q,"content":[{"type":"text","text":"OK"}],"stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":2}}`, model)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
