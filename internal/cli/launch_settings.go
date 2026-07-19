@@ -84,7 +84,7 @@ func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDi
 	if err != nil {
 		return err
 	}
-	aliases, hasRoutable, err := routableModelAliases(ctx, s, includeToolDisabled)
+	models, hasRoutable, err := routableModels(ctx, s, includeToolDisabled)
 	if err != nil {
 		return fmt.Errorf("building Claude Code model allowlist extension: %w", err)
 	}
@@ -95,13 +95,17 @@ func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDi
 	if !configured {
 		baseIDs = gateway.FirstPartyAnthropicModelIDs()
 	}
-	settings["availableModels"] = mergedClaudeModelIDs(baseIDs, aliases)
+	ids, err := mergedClaudeModelIDs(baseIDs, models)
+	if err != nil {
+		return fmt.Errorf("building Claude Code model IDs: %w", err)
+	}
+	settings["availableModels"] = ids
 	return nil
 }
 
-func mergedClaudeModelIDs(baseIDs, aliases []string) []string {
-	ids := make([]string, 0, len(baseIDs)+len(aliases))
-	seen := make(map[string]struct{}, len(baseIDs)+len(aliases))
+func mergedClaudeModelIDs(baseIDs []string, models []store.Model) ([]string, error) {
+	ids := make([]string, 0, len(baseIDs)+len(models))
+	seen := make(map[string]struct{}, len(baseIDs)+len(models))
 	for _, id := range baseIDs {
 		id = strings.TrimSpace(id)
 		if id == "" {
@@ -113,15 +117,18 @@ func mergedClaudeModelIDs(baseIDs, aliases []string) []string {
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
-	for _, alias := range aliases {
-		id := gateway.DiscoveryIDForAlias(alias)
+	for index := range models {
+		id, err := gateway.DiscoveryIDForModel(models[index])
+		if err != nil {
+			return nil, err
+		}
 		if _, ok := seen[id]; ok {
 			continue
 		}
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
-	return ids
+	return ids, nil
 }
 
 func launchHookSettings(gatewayURL string) map[string][]claudeHookMatcher {

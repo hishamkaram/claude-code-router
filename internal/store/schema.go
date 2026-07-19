@@ -189,6 +189,9 @@ CREATE TABLE IF NOT EXISTS models (
   provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
   provider_model TEXT NOT NULL,
   status TEXT NOT NULL,
+  discovered_capabilities TEXT NOT NULL DEFAULT '{}',
+  capability_overrides TEXT NOT NULL DEFAULT '{}',
+  capabilities_refreshed_at TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );
 

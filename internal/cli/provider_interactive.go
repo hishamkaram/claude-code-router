@@ -373,6 +373,9 @@ func ensureProviderCanBeAdded(ctx context.Context, s *store.Store, providerName 
 }
 
 func saveInteractiveProviderAdd(ctx context.Context, cmd *cobra.Command, deps Dependencies, s *store.Store, provider store.Provider, plan secretPlan, planned []plannedModelImport, summary modelImportSummary) error {
+	if err := validatePlannedProviderModels(provider, planned); err != nil {
+		return err
+	}
 	if plan.store {
 		if err := deps.Secrets.Store(ctx, plan.ref, plan.value); err != nil {
 			return fmt.Errorf("storing API key for provider %q: %w", provider.Name, err)
@@ -405,7 +408,7 @@ func interactiveModelImportPlan(ctx context.Context, cmd *cobra.Command, deps De
 		return manualModelImportPlan(ctx, cmd, deps, s, provider, plan)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Discovering models for provider %q (%s)\n", provider.Name, provider.BaseURL)
-	models, err := discoverProviderModelsWithPlan(ctx, deps, provider, plan)
+	discovery, err := discoverProviderModelsWithPlan(ctx, deps, provider, plan)
 	if err != nil {
 		fmt.Fprintf(cmd.OutOrStdout(), "Model discovery failed for provider %q: %v\n", provider.Name, err)
 		action, promptErr := promptDiscoveryFailureAction(ctx, deps)
@@ -424,6 +427,8 @@ func interactiveModelImportPlan(ctx context.Context, cmd *cobra.Command, deps De
 			return nil, modelImportSummary{}, fmt.Errorf("invalid discovery failure action %q", action)
 		}
 	}
+	writeDiscoveryDiagnostics(cmd.OutOrStdout(), discovery)
+	models := discovery.RoutableModels()
 	if len(models) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "No models discovered for provider %q.\n", provider.Name)
 		return nil, modelImportSummary{}, nil
@@ -439,10 +444,12 @@ func interactiveModelImportPlan(ctx context.Context, cmd *cobra.Command, deps De
 
 	selected := models
 	if choice == modelImportSelect {
-		selected, err = promptRequiredModelSelection(ctx, deps, models)
+		selectedIDs, selectionErr := promptRequiredModelSelection(ctx, deps, discoveredModelIDs(models))
+		err = selectionErr
 		if err != nil {
 			return nil, modelImportSummary{}, err
 		}
+		selected = selectDiscoveredModels(models, selectedIDs)
 	}
 	planned, summary, err := planModelImports(ctx, deps, s, provider.Name, selected, choice)
 	if err != nil {

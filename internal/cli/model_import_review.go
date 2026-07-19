@@ -271,8 +271,8 @@ func promptModelImportReviewAction(ctx context.Context, deps Dependencies) (mode
 func promptPlannedModelIndex(ctx context.Context, deps Dependencies, title string, planned []plannedModelImport) (int, error) {
 	selected := "0"
 	options := make([]huh.Option[string], 0, len(planned))
-	for index, item := range planned {
-		options = append(options, huh.NewOption(modelImportReviewLabel(item), strconv.Itoa(index)))
+	for index := range planned {
+		options = append(options, huh.NewOption(modelImportReviewLabel(planned[index]), strconv.Itoa(index)))
 	}
 	form := huh.NewForm(huh.NewGroup(
 		huh.NewSelect[string]().
@@ -337,8 +337,8 @@ func validatePlannedModelAlias(value string, planned []plannedModelImport, curre
 	if _, ok := existing[value]; ok {
 		return fmt.Errorf("model alias %q already exists", value)
 	}
-	for index, item := range planned {
-		if index != current && item.alias == value {
+	for index := range planned {
+		if index != current && planned[index].alias == value {
 			return fmt.Errorf("model alias %q is already planned", value)
 		}
 	}
@@ -356,14 +356,16 @@ func modelCompatibilityOptions() []huh.Option[string] {
 
 func printPlannedModelReview(out io.Writer, planned []plannedModelImport) {
 	fmt.Fprintln(out, "Review model aliases before saving:")
-	for _, item := range planned {
-		fmt.Fprintf(out, "  %s -> %s (compat=%s)\n", item.alias, item.providerModel, plannedModelStatus(item))
+	for index := range planned {
+		item := &planned[index]
+		fmt.Fprintf(out, "  %s -> %s (compat=%s)\n", item.alias, item.providerModel, plannedModelStatus(*item))
 	}
 }
 
 func printModelImportDetails(out io.Writer, planned []plannedModelImport) {
-	for _, item := range planned {
-		fmt.Fprintf(out, "Alias %s -> %s (compat=%s)\n", item.alias, item.providerModel, plannedModelStatus(item))
+	for index := range planned {
+		item := &planned[index]
+		fmt.Fprintf(out, "Alias %s -> %s (compat=%s)\n", item.alias, item.providerModel, plannedModelStatus(*item))
 	}
 }
 
@@ -373,12 +375,15 @@ func printModelLaunchGuidance(out io.Writer, planned []plannedModelImport, provi
 	}
 	aliases := make([]string, 0, len(planned))
 	directLaunchAliases := make([]string, 0)
-	for _, item := range planned {
-		status := plannedModelStatus(item)
+	for index := range planned {
+		item := &planned[index]
+		status := plannedModelStatus(*item)
 		if status == "blocked" {
 			continue
 		}
-		if status == "chat-only" || providerToolDisabled {
+		modelToolDisabled := item.discoveredCapabilities.Values.SupportsTools != nil &&
+			!*item.discoveredCapabilities.Values.SupportsTools
+		if status == "chat-only" || providerToolDisabled || modelToolDisabled {
 			directLaunchAliases = append(directLaunchAliases, item.alias)
 			continue
 		}

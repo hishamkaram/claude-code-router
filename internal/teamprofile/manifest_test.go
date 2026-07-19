@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
@@ -57,7 +58,7 @@ func TestDecodeRejectsInvalidProfiles(t *testing.T) {
 	tests := map[string]string{
 		"unknown field":   `{"schema_version":1,"kind":"ccr-team-profile","providers":[],"models":[],"extra":true}`,
 		"duplicate field": `{"schema_version":1,"schema_version":1,"kind":"ccr-team-profile","providers":[],"models":[]}`,
-		"wrong version":   `{"schema_version":2,"kind":"ccr-team-profile","providers":[],"models":[]}`,
+		"wrong version":   `{"schema_version":3,"kind":"ccr-team-profile","providers":[],"models":[]}`,
 		"wrong kind":      `{"schema_version":1,"kind":"other","providers":[],"models":[]}`,
 		"trailing value":  valid + `{}`,
 		"empty":           "  \n",
@@ -70,6 +71,65 @@ func TestDecodeRejectsInvalidProfiles(t *testing.T) {
 				t.Fatalf("Decode(%q) succeeded", input)
 			}
 		})
+	}
+}
+
+func TestDecodeAcceptsVersionOneProfile(t *testing.T) {
+	t.Parallel()
+	input := `{"schema_version":1,"kind":"ccr-team-profile","providers":[],"models":[]}`
+	manifest, err := Decode(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if manifest.SchemaVersion != 1 {
+		t.Fatalf("SchemaVersion = %d, want 1", manifest.SchemaVersion)
+	}
+}
+
+func TestBuildPlanImportRoundTripsModelCapabilities(t *testing.T) {
+	t.Parallel()
+	discovered, err := modelcap.SnapshotFrom(modelcap.Values{
+		Kind:                modelcap.KindChat,
+		ContextWindowTokens: modelcap.Int64(1_000_000),
+		SupportsTools:       modelcap.Bool(true),
+	}, modelcap.SourceLiteLLMInfo)
+	if err != nil {
+		t.Fatalf("SnapshotFrom() error = %v", err)
+	}
+	discovered.Values.SupportsStreaming = modelcap.Bool(true)
+	discovered.Sources["supports_streaming"] = modelcap.SourceOpenAIAdapter
+	stored := store.Model{
+		Alias:                   "glm-5-2",
+		ProviderName:            "litellm",
+		ProviderModel:           "glm-5.2[1m]",
+		Status:                  "full",
+		DiscoveredCapabilities:  discovered,
+		CapabilityOverrides:     modelcap.Values{MaxOutputTokens: modelcap.Int64(64_000)},
+		CapabilitiesRefreshedAt: "2026-07-18T12:00:00Z",
+	}
+	manifest, err := Build(
+		[]store.Provider{profileProvider("litellm", "litellm", "http://localhost:4000", "")},
+		[]store.Model{stored},
+	)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if manifest.SchemaVersion != 2 || manifest.Models[0].DiscoveredCapabilities == nil || manifest.Models[0].CapabilityOverrides == nil {
+		t.Fatalf("Build() manifest = %#v", manifest)
+	}
+	plan, err := manifest.PlanImport(nil)
+	if err != nil {
+		t.Fatalf("PlanImport() error = %v", err)
+	}
+	got := plan.Models[0]
+	if got.DiscoveredCapabilities.Values.ContextWindowTokens == nil ||
+		*got.DiscoveredCapabilities.Values.ContextWindowTokens != 1_000_000 ||
+		got.DiscoveredCapabilities.Values.SupportsStreaming == nil ||
+		!*got.DiscoveredCapabilities.Values.SupportsStreaming ||
+		got.DiscoveredCapabilities.Sources["supports_streaming"] != modelcap.SourceOpenAIAdapter ||
+		got.CapabilityOverrides.MaxOutputTokens == nil || *got.CapabilityOverrides.MaxOutputTokens != 64_000 ||
+		got.CapabilitiesRefreshedAt != stored.CapabilitiesRefreshedAt {
+		t.Fatalf("PlanImport() model = %#v", got)
 	}
 }
 
@@ -166,6 +226,30 @@ func TestValidateRejectsInconsistentProviderSecurityAndCapabilities(t *testing.T
 	manifest.Providers[0].Capabilities.Tools = true
 	if validationErr := manifest.Validate(); validationErr == nil || !strings.Contains(validationErr.Error(), "cannot declare tools") {
 		t.Fatalf("Validate() error = %v, want chat-only tools error", validationErr)
+	}
+}
+
+func TestValidateRejectsControlModelsAndUnknownCapabilitySources(t *testing.T) {
+	t.Parallel()
+	manifest, err := Build(
+		[]store.Provider{profileProvider("litellm", "litellm", "http://localhost:4000", "")},
+		[]store.Model{{Alias: "chat", ProviderName: "litellm", ProviderModel: "chat-model", Status: "degraded"}},
+	)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	manifest.Models[0].ProviderModel = "all-proxy-models"
+	if validationErr := manifest.Validate(); validationErr == nil || !strings.Contains(validationErr.Error(), "control model") {
+		t.Fatalf("Validate() control-model error = %v", validationErr)
+	}
+
+	manifest.Models[0].ProviderModel = "chat-model"
+	manifest.Models[0].DiscoveredCapabilities = &modelcap.Snapshot{
+		Values:  modelcap.Values{SupportsTools: modelcap.Bool(true)},
+		Sources: map[string]string{"supports_tools": "untrusted:secret"},
+	}
+	if validationErr := manifest.Validate(); validationErr == nil || !strings.Contains(validationErr.Error(), "invalid discovered_capabilities source") {
+		t.Fatalf("Validate() capability-source error = %v", validationErr)
 	}
 }
 

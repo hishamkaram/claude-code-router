@@ -60,12 +60,20 @@ func (m Manifest) PlanImport(bindings map[string]string) (ImportPlan, error) {
 		})
 	}
 	for _, model := range m.Models {
-		plan.Models = append(plan.Models, store.Model{
-			Alias:         model.Alias,
-			ProviderName:  model.Provider,
-			ProviderModel: model.ProviderModel,
-			Status:        model.Compatibility,
-		})
+		storedModel := store.Model{
+			Alias:                   model.Alias,
+			ProviderName:            model.Provider,
+			ProviderModel:           model.ProviderModel,
+			Status:                  model.Compatibility,
+			CapabilitiesRefreshedAt: model.CapabilitiesRefreshedAt,
+		}
+		if model.DiscoveredCapabilities != nil {
+			storedModel.DiscoveredCapabilities = *model.DiscoveredCapabilities
+		}
+		if model.CapabilityOverrides != nil {
+			storedModel.CapabilityOverrides = *model.CapabilityOverrides
+		}
+		plan.Models = append(plan.Models, storedModel)
 	}
 	sort.Strings(plan.UnboundCredential)
 	return plan, nil

@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
@@ -25,9 +27,11 @@ const (
 )
 
 type plannedModelImport struct {
-	alias         string
-	providerModel string
-	status        string
+	alias                   string
+	providerModel           string
+	status                  string
+	discoveredCapabilities  modelcap.Snapshot
+	capabilitiesRefreshedAt string
 }
 
 type modelImportSummary struct {
@@ -59,16 +63,18 @@ func newProviderDiscoverModelsCommand(ctx context.Context, opts *options, deps D
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Discovering models for provider %q (%s)\n", provider.Name, provider.BaseURL)
-			models, err := discoverProviderModels(ctx, deps, provider)
+			discovery, err := discoverProviderModels(ctx, deps, provider)
 			if err != nil {
 				return err
 			}
+			writeDiscoveryDiagnostics(cmd.OutOrStdout(), discovery)
+			models := discovery.RoutableModels()
 			if len(models) == 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "No models discovered for provider %q.\n", provider.Name)
 				return nil
 			}
-			for _, model := range models {
-				fmt.Fprintln(cmd.OutOrStdout(), model)
+			for index := range models {
+				fmt.Fprintln(cmd.OutOrStdout(), models[index].ID)
 			}
 			return nil
 		},
@@ -111,10 +117,12 @@ func runProviderImportModels(ctx context.Context, cmd *cobra.Command, opts *opti
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Discovering models for provider %q (%s)\n", provider.Name, provider.BaseURL)
-	models, err := discoverProviderModels(ctx, deps, provider)
+	discovery, err := discoverProviderModels(ctx, deps, provider)
 	if err != nil {
 		return err
 	}
+	writeDiscoveryDiagnostics(cmd.OutOrStdout(), discovery)
+	models := discovery.RoutableModels()
 	if len(models) == 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "No models discovered for provider %q.\n", provider.Name)
 		return nil
@@ -123,10 +131,12 @@ func runProviderImportModels(ctx context.Context, cmd *cobra.Command, opts *opti
 	choice := modelImportSelect
 	selected := models
 	if !importAll {
-		selected, err = promptModelSelection(ctx, deps, models)
+		selectedIDs, selectionErr := promptModelSelection(ctx, deps, discoveredModelIDs(models))
+		err = selectionErr
 		if err != nil {
 			return err
 		}
+		selected = selectDiscoveredModels(models, selectedIDs)
 		if len(selected) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), "No models selected.")
 			return nil
@@ -158,18 +168,18 @@ func runProviderImportModels(ctx context.Context, cmd *cobra.Command, opts *opti
 	return nil
 }
 
-func discoverProviderModels(ctx context.Context, deps Dependencies, provider store.Provider) ([]string, error) {
+func discoverProviderModels(ctx context.Context, deps Dependencies, provider store.Provider) (providers.DiscoveryResult, error) {
 	return discoverProviderModelsWithPlan(ctx, deps, provider, secretPlan{ref: provider.SecretRef})
 }
 
-func discoverProviderModelsWithPlan(ctx context.Context, deps Dependencies, provider store.Provider, plan secretPlan) ([]string, error) {
+func discoverProviderModelsWithPlan(ctx context.Context, deps Dependencies, provider store.Provider, plan secretPlan) (providers.DiscoveryResult, error) {
 	caps := effectiveProviderCapabilities(provider)
 	if caps.Protocol != providers.ProtocolOpenAICompatible || !caps.SupportsModelDiscovery {
-		return nil, fmt.Errorf("provider %q uses protocol %q and does not support OpenAI-compatible model discovery", provider.Name, caps.Protocol)
+		return providers.DiscoveryResult{}, fmt.Errorf("provider %q uses protocol %q and does not support OpenAI-compatible model discovery", provider.Name, caps.Protocol)
 	}
 	apiKey, err := resolveDiscoveryAPIKey(ctx, deps, plan)
 	if err != nil {
-		return nil, fmt.Errorf("resolving API key for provider %q (secret=%s): %w", provider.Name, secret.RedactRef(plan.ref), err)
+		return providers.DiscoveryResult{}, fmt.Errorf("resolving API key for provider %q (secret=%s): %w", provider.Name, secret.RedactRef(plan.ref), err)
 	}
 	models, err := (providers.Discoverer{}).DiscoverOpenAICompatibleModels(ctx, providers.DiscoveryConfig{
 		Type:    provider.Type,
@@ -177,7 +187,7 @@ func discoverProviderModelsWithPlan(ctx context.Context, deps Dependencies, prov
 		APIKey:  apiKey,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("discovering models for provider %q (%s, secret=%s): %w", provider.Name, provider.BaseURL, secret.RedactRef(plan.ref), err)
+		return providers.DiscoveryResult{}, fmt.Errorf("discovering models for provider %q (%s, secret=%s): %w", provider.Name, provider.BaseURL, secret.RedactRef(plan.ref), err)
 	}
 	return models, nil
 }
@@ -196,15 +206,18 @@ func resolveDiscoveryAPIKey(ctx context.Context, deps Dependencies, plan secretP
 	return strings.TrimSpace(apiKey), nil
 }
 
-func planModelImports(ctx context.Context, deps Dependencies, s *store.Store, providerName string, modelIDs []string, choice modelImportChoice) ([]plannedModelImport, modelImportSummary, error) {
+func planModelImports(ctx context.Context, deps Dependencies, s *store.Store, providerName string, models []providers.DiscoveredModel, choice modelImportChoice) ([]plannedModelImport, modelImportSummary, error) {
 	existing, err := existingModelAliases(ctx, s)
 	if err != nil {
 		return nil, modelImportSummary{}, err
 	}
 
 	var summary modelImportSummary
-	planned := make([]plannedModelImport, 0, len(modelIDs))
-	for _, modelID := range modelIDs {
+	planned := make([]plannedModelImport, 0, len(models))
+	refreshedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	for index := range models {
+		discovered := &models[index]
+		modelID := discovered.ID
 		alias := generateProviderModelAlias(providerName, modelID)
 		if err := validateName("model alias", alias); err != nil {
 			return nil, modelImportSummary{}, err
@@ -227,18 +240,31 @@ func planModelImports(ctx context.Context, deps Dependencies, s *store.Store, pr
 			alias = renamedAlias
 		}
 		existing[alias] = struct{}{}
-		planned = append(planned, plannedModelImport{alias: alias, providerModel: modelID, status: "degraded"})
+		planned = append(planned, plannedModelImport{
+			alias: alias, providerModel: modelID, status: "degraded",
+			discoveredCapabilities: discovered.Capabilities, capabilitiesRefreshedAt: refreshedAt,
+		})
 	}
 	return planned, summary, nil
 }
 
 func addPlannedModelImports(ctx context.Context, s *store.Store, providerName string, planned []plannedModelImport, summary *modelImportSummary) error {
-	for _, item := range planned {
+	provider, err := s.GetProvider(ctx, providerName)
+	if err != nil {
+		return err
+	}
+	if err := validatePlannedProviderModels(provider, planned); err != nil {
+		return err
+	}
+	for index := range planned {
+		item := &planned[index]
 		err := s.AddModel(ctx, store.Model{
-			Alias:         item.alias,
-			ProviderName:  providerName,
-			ProviderModel: item.providerModel,
-			Status:        plannedModelStatus(item),
+			Alias:                   item.alias,
+			ProviderName:            providerName,
+			ProviderModel:           item.providerModel,
+			Status:                  plannedModelStatus(*item),
+			DiscoveredCapabilities:  item.discoveredCapabilities,
+			CapabilitiesRefreshedAt: item.capabilitiesRefreshedAt,
 		})
 		if err != nil {
 			return err
@@ -248,14 +274,55 @@ func addPlannedModelImports(ctx context.Context, s *store.Store, providerName st
 	return nil
 }
 
+func validatePlannedProviderModels(provider store.Provider, planned []plannedModelImport) error {
+	for index := range planned {
+		if providers.IsProviderControlModel(provider.Type, planned[index].providerModel) {
+			return fmt.Errorf("provider model %q is a LiteLLM control model and cannot be routed", planned[index].providerModel)
+		}
+	}
+	return nil
+}
+
+func discoveredModelIDs(models []providers.DiscoveredModel) []string {
+	ids := make([]string, 0, len(models))
+	for index := range models {
+		ids = append(ids, models[index].ID)
+	}
+	return ids
+}
+
+func selectDiscoveredModels(models []providers.DiscoveredModel, selectedIDs []string) []providers.DiscoveredModel {
+	byID := make(map[string]providers.DiscoveredModel, len(models))
+	for index := range models {
+		model := &models[index]
+		byID[model.ID] = *model
+	}
+	selected := make([]providers.DiscoveredModel, 0, len(selectedIDs))
+	for _, id := range selectedIDs {
+		if model, ok := byID[id]; ok {
+			selected = append(selected, model)
+		}
+	}
+	return selected
+}
+
+func writeDiscoveryDiagnostics(out io.Writer, discovery providers.DiscoveryResult) {
+	for _, warning := range discovery.Warnings {
+		fmt.Fprintf(out, "Warning: %s\n", warning)
+	}
+	if skipped := discovery.SkippedCount(); skipped > 0 {
+		fmt.Fprintf(out, "Skipped %d non-chat or provider-control models.\n", skipped)
+	}
+}
+
 func existingModelAliases(ctx context.Context, s *store.Store) (map[string]struct{}, error) {
 	models, err := s.ListModels(ctx)
 	if err != nil {
 		return nil, err
 	}
 	aliases := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		aliases[model.Alias] = struct{}{}
+	for index := range models {
+		aliases[models[index].Alias] = struct{}{}
 	}
 	return aliases, nil
 }

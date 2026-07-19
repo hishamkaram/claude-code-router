@@ -11,6 +11,11 @@ type providerMetadataColumn struct {
 	definition string
 }
 
+type migrationColumn struct {
+	name       string
+	definition string
+}
+
 func (s *Store) migrateV2ToV3(ctx context.Context) error {
 	columns := [...]providerMetadataColumn{
 		{name: "protocol", definition: "protocol TEXT NOT NULL DEFAULT ''"},
@@ -127,6 +132,68 @@ SET started_at = created_at, completed_at = created_at
 		return fmt.Errorf("committing v3 to v4 migration: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) migrateV4ToV5(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v4 to v5 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	columns := [...]migrationColumn{
+		{name: "discovered_capabilities", definition: "discovered_capabilities TEXT NOT NULL DEFAULT '{}'"},
+		{name: "capability_overrides", definition: "capability_overrides TEXT NOT NULL DEFAULT '{}'"},
+		{name: "capabilities_refreshed_at", definition: "capabilities_refreshed_at TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, column := range columns {
+		exists, err := tableColumnExists(ctx, tx, "models", column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE models ADD COLUMN "+column.definition); err != nil {
+			return fmt.Errorf("adding models.%s column: %w", column.name, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 5 WHERE id = 1 AND version = 4`); err != nil {
+		return fmt.Errorf("updating schema version to 5: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v4 to v5 migration: %w", err)
+	}
+	return nil
+}
+
+func tableColumnExists(ctx context.Context, tx *sql.Tx, table, name string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, fmt.Errorf("reading %s table columns: %w", table, err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, fmt.Errorf("scanning %s table column: %w", table, err)
+		}
+		if columnName == name {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterating %s table columns: %w", table, err)
+	}
+	return false, nil
 }
 
 func addMigrationColumns(ctx context.Context, tx *sql.Tx, table string, definitions []string) error {

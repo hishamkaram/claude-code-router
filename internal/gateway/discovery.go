@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 )
 
 func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -17,19 +20,118 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured model aliases: %v", err))
 		return
 	}
-	for _, model := range models {
+	configuredProviders, err := h.cfg.Store.ListProviders(r.Context())
+	if err != nil {
+		writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured providers: %v", err))
+		return
+	}
+	providerTypes := make(map[string]string, len(configuredProviders))
+	providerCapabilities := make(map[string]providers.Capabilities, len(configuredProviders))
+	for index := range configuredProviders {
+		provider := &configuredProviders[index]
+		providerTypes[provider.Name] = provider.Type
+		providerCapabilities[provider.Name] = effectiveProviderCapabilities(*provider)
+	}
+	for index := range models {
+		model := &models[index]
 		if model.Status == "blocked" {
 			continue
 		}
-		display := fmt.Sprintf("CCR %s (%s)", model.Alias, model.ProviderModel)
-		appendGatewayModelEntry(&entries, seen, gatewayModelEntry{ID: DiscoveryIDForAlias(model.Alias), DisplayName: display})
+		if providers.IsProviderControlModel(providerTypes[model.ProviderName], model.ProviderModel) {
+			continue
+		}
+		effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+		if err != nil {
+			writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("computing capabilities for model alias %q: %v", model.Alias, err))
+			return
+		}
+		if !modelcap.IsRoutableKind(effective.Values.Kind) {
+			continue
+		}
+		advertisedCapabilities := modelCapabilitiesForRoute(providerCapabilities[model.ProviderName], effective.Values)
+		id, err := DiscoveryIDForModel(*model)
+		if err != nil {
+			writeAnthropicError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		entry := gatewayModelEntry{
+			ID: id, DisplayName: fmt.Sprintf("CCR %s (%s)", model.Alias, model.ProviderModel), Type: "model",
+			MaxInputTokens: effective.Values.ContextWindowTokens, MaxTokens: effective.Values.MaxOutputTokens,
+			Capabilities: gatewayDiscoveryCapabilities(advertisedCapabilities),
+		}
+		if entry.MaxInputTokens == nil {
+			entry.MaxInputTokens = effective.Values.MaxInputTokens
+		}
+		appendGatewayModelEntry(&entries, seen, entry)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": entries})
+	firstID, lastID := "", ""
+	if len(entries) > 0 {
+		firstID, lastID = entries[0].ID, entries[len(entries)-1].ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": entries, "first_id": firstID, "last_id": lastID, "has_more": false,
+	})
 }
 
 type gatewayModelEntry struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"display_name,omitempty"`
+	ID             string                    `json:"id"`
+	DisplayName    string                    `json:"display_name,omitempty"`
+	Type           string                    `json:"type,omitempty"`
+	MaxInputTokens *int64                    `json:"max_input_tokens,omitempty"`
+	MaxTokens      *int64                    `json:"max_tokens,omitempty"`
+	Capabilities   *gatewayModelCapabilities `json:"capabilities,omitempty"`
+}
+
+type gatewayModelCapabilities struct {
+	ImageInput        *gatewayCapabilitySupport  `json:"image_input,omitempty"`
+	PDFInput          *gatewayCapabilitySupport  `json:"pdf_input,omitempty"`
+	StructuredOutputs *gatewayCapabilitySupport  `json:"structured_outputs,omitempty"`
+	Thinking          *gatewayThinkingCapability `json:"thinking,omitempty"`
+}
+
+type gatewayCapabilitySupport struct {
+	Supported bool `json:"supported"`
+}
+
+type gatewayThinkingCapability struct {
+	Supported bool                  `json:"supported"`
+	Types     *gatewayThinkingTypes `json:"types,omitempty"`
+}
+
+type gatewayThinkingTypes struct {
+	Enabled *gatewayCapabilitySupport `json:"enabled,omitempty"`
+}
+
+func gatewayDiscoveryCapabilities(values modelcap.Values) *gatewayModelCapabilities {
+	capabilities := &gatewayModelCapabilities{
+		ImageInput:        gatewayCapability(values.SupportsVision),
+		PDFInput:          gatewayCapability(values.SupportsPDFInput),
+		StructuredOutputs: gatewayCapability(values.SupportsResponseSchema),
+		Thinking:          gatewayThinking(values.SupportsThinking),
+	}
+	if capabilities.ImageInput == nil && capabilities.PDFInput == nil &&
+		capabilities.StructuredOutputs == nil && capabilities.Thinking == nil {
+		return nil
+	}
+	return capabilities
+}
+
+func gatewayThinking(value *bool) *gatewayThinkingCapability {
+	if value == nil {
+		return nil
+	}
+	capability := &gatewayThinkingCapability{Supported: *value}
+	if *value {
+		capability.Types = &gatewayThinkingTypes{Enabled: &gatewayCapabilitySupport{Supported: true}}
+	}
+	return capability
+}
+
+func gatewayCapability(value *bool) *gatewayCapabilitySupport {
+	if value == nil {
+		return nil
+	}
+	return &gatewayCapabilitySupport{Supported: *value}
 }
 
 func appendGatewayModelEntry(entries *[]gatewayModelEntry, seen map[string]struct{}, entry gatewayModelEntry) {
@@ -39,6 +141,9 @@ func appendGatewayModelEntry(entries *[]gatewayModelEntry, seen map[string]struc
 	}
 	if _, ok := seen[entry.ID]; ok {
 		return
+	}
+	if entry.Type == "" {
+		entry.Type = "model"
 	}
 	seen[entry.ID] = struct{}{}
 	*entries = append(*entries, entry)

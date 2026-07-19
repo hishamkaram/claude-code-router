@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -42,12 +41,18 @@ func (r checkRunner) run(ctx context.Context) []Check {
 	if r.config.SmokeOnly {
 		return checks
 	}
-	checks = append(checks, r.capabilityCheck(ctx, "stream", r.target.capabilities.SupportsStreaming, r.checkStream))
-	tools := r.target.capabilities.SupportsTools && r.target.model.Status != "chat-only"
+	streaming := modelCapabilityEnabled(r.target.capabilities.SupportsStreaming, r.target.modelCapabilities.SupportsStreaming)
+	checks = append(checks, r.capabilityCheck(ctx, "stream", streaming, r.checkStream))
+	tools := modelCapabilityEnabled(r.target.capabilities.SupportsTools, r.target.modelCapabilities.SupportsTools) && r.target.model.Status != "chat-only"
+	forcedTools := tools && modelCapabilityEnabled(true, r.target.modelCapabilities.SupportsToolChoice)
+	thinking := modelCapabilityEnabled(r.target.capabilities.SupportsThinking, r.target.modelCapabilities.SupportsThinking)
+	if r.target.modelCapabilities.MaxOutputTokens != nil && *r.target.modelCapabilities.MaxOutputTokens <= 1024 {
+		thinking = false
+	}
 	checks = append(
 		checks,
-		r.capabilityCheck(ctx, "forced_tool", tools, r.checkForcedTool),
-		r.capabilityCheck(ctx, "thinking", r.target.capabilities.SupportsThinking, r.checkThinking),
+		r.capabilityCheck(ctx, "forced_tool", forcedTools, r.checkForcedTool),
+		r.capabilityCheck(ctx, "thinking", thinking, r.checkThinking),
 		r.capabilityCheck(ctx, "count_tokens", r.target.capabilities.SupportsCountTokens, r.checkCountTokens),
 		r.execute(ctx, "cancellation", r.checkCancellation),
 		r.execute(ctx, "sanitized_error", r.checkSanitizedError),
@@ -61,9 +66,13 @@ func (r checkRunner) execute(ctx context.Context, name string, check func(contex
 	result := Check{Name: name, Status: StatusPassed, Latency: time.Since(started), Evidence: evidence}
 	if err != nil {
 		result.Status = StatusFailed
-		result.Evidence = "check failed without storing provider response content"
+		result.FailureKind, result.HTTPStatus, result.ProviderHTTPStatus, result.Evidence = classifyCheckFailure(name, err)
 	}
 	return result
+}
+
+func modelCapabilityEnabled(providerEnabled bool, modelValue *bool) bool {
+	return providerEnabled && (modelValue == nil || *modelValue)
 }
 
 func (r checkRunner) capabilityCheck(ctx context.Context, name string, enabled bool, check func(context.Context) (string, error)) Check {
@@ -89,7 +98,10 @@ func (r checkRunner) checkDiscovery(ctx context.Context) (string, error) {
 	if err := json.Unmarshal(response.Body, &payload); err != nil {
 		return "", fmt.Errorf("invalid gateway discovery response")
 	}
-	want := gateway.DiscoveryIDForAlias(r.config.Alias)
+	want, err := gateway.DiscoveryIDForModel(r.target.model)
+	if err != nil {
+		return "", err
+	}
 	found := false
 	for _, item := range payload.Data {
 		found = found || item.ID == want
@@ -109,9 +121,9 @@ func (r checkRunner) checkDiscovery(ctx context.Context) (string, error) {
 		Type: r.target.provider.Type, BaseURL: r.target.provider.BaseURL, APIKey: apiKey,
 	})
 	if err != nil {
-		return "", fmt.Errorf("provider discovery failed")
+		return "", fmt.Errorf("provider discovery failed: %w", err)
 	}
-	if !slices.Contains(models, r.target.model.ProviderModel) {
+	if !models.HasRoutableID(r.target.model.ProviderModel) {
 		return "", fmt.Errorf("provider model is absent from discovery")
 	}
 	return "gateway and provider discovery include the configured model", nil
@@ -119,7 +131,7 @@ func (r checkRunner) checkDiscovery(ctx context.Context) (string, error) {
 
 func (r checkRunner) checkText(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": 32,
+		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(32),
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
 	if err != nil {
@@ -140,7 +152,7 @@ func (r checkRunner) checkText(ctx context.Context) (string, error) {
 
 func (r checkRunner) checkStream(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": 32, "stream": true,
+		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(32), "stream": true,
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
 	if err != nil {
@@ -159,13 +171,15 @@ func (r checkRunner) checkStream(ctx context.Context) (string, error) {
 
 func (r checkRunner) checkForcedTool(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": 128,
+		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(128),
 		"messages": []map[string]string{{"role": "user", "content": "Call the required probe tool."}},
 		"tools": []map[string]any{{
 			"name": "ccr_probe", "description": "Conformance probe",
 			"input_schema": map[string]any{"type": "object", "properties": map[string]any{}},
 		}},
-		"tool_choice": map[string]string{"type": "tool", "name": "ccr_probe"},
+		"tool_choice": map[string]any{
+			"type": "tool", "name": "ccr_probe", "disable_parallel_tool_use": true,
+		},
 	})
 	if err != nil {
 		return "", err
@@ -181,7 +195,7 @@ func (r checkRunner) checkForcedTool(ctx context.Context) (string, error) {
 
 func (r checkRunner) checkThinking(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": 1200,
+		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(1200),
 		"thinking": map[string]any{"type": "enabled", "budget_tokens": 1024},
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
@@ -222,7 +236,7 @@ func (r checkRunner) checkCancellation(ctx context.Context) (string, error) {
 	timer := time.AfterFunc(20*time.Millisecond, cancel)
 	defer timer.Stop()
 	response, err := r.message(requestCtx, map[string]any{
-		"model": r.config.Alias, "max_tokens": 32,
+		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(32),
 		"messages": []map[string]string{{"role": "user", "content": "CCR_CONFORMANCE_CANCEL"}},
 	})
 	if errors.Is(err, context.Canceled) || errors.Is(requestCtx.Err(), context.Canceled) {
@@ -265,8 +279,8 @@ func (r checkRunner) absentProbeModel(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("listing models for error probe: %w", err)
 	}
 	configured := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		configured[model.Alias] = struct{}{}
+	for index := range models {
+		configured[models[index].Alias] = struct{}{}
 	}
 	const base = "ccr-conformance-unconfigured"
 	for suffix := 0; suffix <= len(models); suffix++ {
@@ -328,7 +342,53 @@ func (r checkRunner) providerSecret(ctx context.Context) (string, error) {
 
 func requireSuccess(response probeResponse) error {
 	if response.Status < http.StatusOK || response.Status >= http.StatusMultipleChoices {
-		return fmt.Errorf("gateway returned HTTP %d", response.Status)
+		return &probeHTTPStatusError{status: response.Status, providerStatus: providerHTTPStatusFromGatewayError(response.Body)}
 	}
 	return nil
+}
+
+type probeHTTPStatusError struct {
+	status         int
+	providerStatus int
+}
+
+func providerHTTPStatusFromGatewayError(body []byte) int {
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) != nil {
+		return 0
+	}
+	message := payload.Error.Message
+	for offset := 0; offset+8 <= len(message); offset++ {
+		if message[offset:offset+5] != "HTTP " {
+			continue
+		}
+		if message[offset+5] < '0' || message[offset+5] > '9' ||
+			message[offset+6] < '0' || message[offset+6] > '9' ||
+			message[offset+7] < '0' || message[offset+7] > '9' {
+			continue
+		}
+		status := int(message[offset+5]-'0')*100 + int(message[offset+6]-'0')*10 + int(message[offset+7]-'0')
+		if status >= 100 && status <= 599 {
+			return status
+		}
+	}
+	return 0
+}
+
+func (err *probeHTTPStatusError) Error() string {
+	return fmt.Sprintf("gateway returned HTTP %d", err.status)
+}
+
+func (r checkRunner) probeMaxTokens(preferred int) int {
+	if r.target.modelCapabilities.MaxOutputTokens == nil || *r.target.modelCapabilities.MaxOutputTokens >= int64(preferred) {
+		return preferred
+	}
+	if *r.target.modelCapabilities.MaxOutputTokens < 1 {
+		return 1
+	}
+	return int(*r.target.modelCapabilities.MaxOutputTokens)
 }

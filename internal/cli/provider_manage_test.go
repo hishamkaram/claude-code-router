@@ -1,10 +1,14 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 func TestProviderRemoveDeletesProviderAndModels(t *testing.T) {
@@ -136,6 +140,60 @@ func TestProviderUpdateWithFlags(t *testing.T) {
 	}
 	if !strings.Contains(out, "http://localhost:5000") || !strings.Contains(out, "env:LITELLM_API_KEY") {
 		t.Fatalf("provider list output = %q", out)
+	}
+}
+
+func TestProviderUpdateInvalidatesDiscoveredModelCapabilities(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", "http://localhost:4000", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "glm", "--provider", "litellm", "--model", "glm-5.2"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	model, err := s.GetModel(ctx, "glm")
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("GetModel() error = %v", err)
+	}
+	model.DiscoveredCapabilities, err = modelcap.SnapshotFrom(
+		modelcap.Values{ContextWindowTokens: modelcap.Int64(1_000_000)}, "litellm:/model/info",
+	)
+	if err != nil {
+		_ = s.Close()
+		t.Fatalf("SnapshotFrom() error = %v", err)
+	}
+	model.CapabilityOverrides.MaxOutputTokens = modelcap.Int64(64_000)
+	model.CapabilitiesRefreshedAt = "2026-07-18T12:00:00Z"
+	if updateErr := s.UpdateModel(ctx, model); updateErr != nil {
+		_ = s.Close()
+		t.Fatalf("UpdateModel() error = %v", updateErr)
+	}
+	if closeErr := s.Close(); closeErr != nil {
+		t.Fatalf("Close() error = %v", closeErr)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "update", "litellm", "--base-url", "http://localhost:5000")
+	if err != nil {
+		t.Fatalf("provider update error = %v", err)
+	}
+	for _, want := range []string{"Cleared discovered capabilities for 1 model alias(es)", "Next: ccr model refresh --all"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("provider update output missing %q:\n%s", want, out)
+		}
+	}
+	document := readModelShowDocument(t, dbPath, "glm")
+	if !modelcap.IsZeroSnapshot(document.Discovered) || document.RefreshedAt != "" {
+		t.Fatalf("provider update retained stale capabilities: %#v", document)
+	}
+	if document.Overrides.MaxOutputTokens == nil || *document.Overrides.MaxOutputTokens != 64_000 {
+		t.Fatalf("provider update cleared overrides: %#v", document.Overrides)
 	}
 }
 
@@ -418,7 +476,7 @@ func TestProviderTestOpenAICompatibleAndAnthropic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provider test error = %v", err)
 	}
-	if !strings.Contains(out, "discovered 1 models") {
+	if !strings.Contains(out, "discovered 1 routable models") {
 		t.Fatalf("provider test output = %q", out)
 	}
 

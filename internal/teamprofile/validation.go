@@ -5,7 +5,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 )
 
@@ -15,8 +17,19 @@ const (
 )
 
 func (m Manifest) Validate() error {
-	if m.SchemaVersion != SchemaVersion {
-		return fmt.Errorf("unsupported schema_version %d; expected %d", m.SchemaVersion, SchemaVersion)
+	if err := validateManifestHeader(m); err != nil {
+		return err
+	}
+	providerTypes, err := validateManifestProviders(m.Providers)
+	if err != nil {
+		return err
+	}
+	return validateManifestModels(m.SchemaVersion, m.Models, providerTypes)
+}
+
+func validateManifestHeader(m Manifest) error {
+	if m.SchemaVersion < MinSchemaVersion || m.SchemaVersion > SchemaVersion {
+		return fmt.Errorf("unsupported schema_version %d; supported versions are %d through %d", m.SchemaVersion, MinSchemaVersion, SchemaVersion)
 	}
 	if m.Kind != Kind {
 		return fmt.Errorf("invalid kind %q; expected %q", m.Kind, Kind)
@@ -27,19 +40,32 @@ func (m Manifest) Validate() error {
 	if len(m.Models) > MaxModels {
 		return fmt.Errorf("model count %d exceeds limit %d", len(m.Models), MaxModels)
 	}
-	providerNames := make(map[string]struct{}, len(m.Providers))
-	for index, provider := range m.Providers {
-		if err := validateProvider(provider); err != nil {
-			return fmt.Errorf("providers[%d]: %w", index, err)
+	return nil
+}
+
+func validateManifestProviders(configuredProviders []Provider) (map[string]string, error) {
+	providerTypes := make(map[string]string, len(configuredProviders))
+	for index := range configuredProviders {
+		provider := &configuredProviders[index]
+		if err := validateProvider(*provider); err != nil {
+			return nil, fmt.Errorf("providers[%d]: %w", index, err)
 		}
-		if _, duplicate := providerNames[provider.Name]; duplicate {
-			return fmt.Errorf("providers[%d]: duplicate provider name %q", index, provider.Name)
+		if _, duplicate := providerTypes[provider.Name]; duplicate {
+			return nil, fmt.Errorf("providers[%d]: duplicate provider name %q", index, provider.Name)
 		}
-		providerNames[provider.Name] = struct{}{}
+		providerTypes[provider.Name] = provider.Type
 	}
-	modelAliases := make(map[string]struct{}, len(m.Models))
-	for index, model := range m.Models {
-		if err := validateModel(model, providerNames); err != nil {
+	return providerTypes, nil
+}
+
+func validateManifestModels(schemaVersion int, models []Model, providerTypes map[string]string) error {
+	modelAliases := make(map[string]struct{}, len(models))
+	for index := range models {
+		model := &models[index]
+		if schemaVersion == 1 && modelUsesCapabilityMetadata(*model) {
+			return fmt.Errorf("models[%d]: capability metadata requires schema_version 2", index)
+		}
+		if err := validateModel(*model, providerTypes); err != nil {
 			return fmt.Errorf("models[%d]: %w", index, err)
 		}
 		if _, duplicate := modelAliases[model.Alias]; duplicate {
@@ -48,6 +74,11 @@ func (m Manifest) Validate() error {
 		modelAliases[model.Alias] = struct{}{}
 	}
 	return nil
+}
+
+func modelUsesCapabilityMetadata(model Model) bool {
+	return model.DiscoveredCapabilities != nil || model.CapabilityOverrides != nil ||
+		model.CapabilitiesRefreshedAt != ""
 }
 
 func validateProvider(provider Provider) error {
@@ -87,24 +118,89 @@ func validateProvider(provider Provider) error {
 	return nil
 }
 
-func validateModel(model Model, providerNames map[string]struct{}) error {
-	if err := validateName("model alias", model.Alias); err != nil {
+func validateModel(model Model, providerTypes map[string]string) error {
+	providerType, err := validateModelIdentity(model, providerTypes)
+	if err != nil {
 		return err
 	}
-	if _, ok := providerNames[model.Provider]; !ok {
-		return fmt.Errorf("model %q references unknown provider %q", model.Alias, model.Provider)
+	if providers.IsProviderControlModel(providerType, model.ProviderModel) {
+		return fmt.Errorf("provider_model for %q is a LiteLLM control model and cannot be routed", model.Alias)
+	}
+	if err := validateDiscoveredCapabilities(model.Alias, model.DiscoveredCapabilities); err != nil {
+		return err
+	}
+	if err := validateCapabilityOverrides(model.Alias, model.CapabilityOverrides); err != nil {
+		return err
+	}
+	if err := validateCapabilitiesRefreshedAt(model.Alias, model.CapabilitiesRefreshedAt); err != nil {
+		return err
+	}
+	return validateCompatibility(model.Compatibility)
+}
+
+func validateModelIdentity(model Model, providerTypes map[string]string) (string, error) {
+	if err := validateName("model alias", model.Alias); err != nil {
+		return "", err
+	}
+	providerType, ok := providerTypes[model.Provider]
+	if !ok {
+		return "", fmt.Errorf("model %q references unknown provider %q", model.Alias, model.Provider)
 	}
 	if strings.TrimSpace(model.ProviderModel) == "" || strings.TrimSpace(model.ProviderModel) != model.ProviderModel {
-		return fmt.Errorf("provider_model for %q must be non-empty without surrounding whitespace", model.Alias)
+		return "", fmt.Errorf("provider_model for %q must be non-empty without surrounding whitespace", model.Alias)
 	}
 	if len(model.ProviderModel) > 512 {
-		return fmt.Errorf("provider_model for %q exceeds 512 characters", model.Alias)
+		return "", fmt.Errorf("provider_model for %q exceeds 512 characters", model.Alias)
 	}
-	switch model.Compatibility {
+	return providerType, nil
+}
+
+func validateDiscoveredCapabilities(alias string, capabilities *modelcap.Snapshot) error {
+	if capabilities == nil {
+		return nil
+	}
+	normalized, err := modelcap.NormalizeSnapshot(*capabilities)
+	if err != nil {
+		return fmt.Errorf("invalid discovered_capabilities for %q: %w", alias, err)
+	}
+	for field, source := range normalized.Sources {
+		if source != modelcap.SourceOpenAIModels && source != modelcap.SourceLiteLLMInfo &&
+			source != modelcap.SourceOpenAIAdapter {
+			return fmt.Errorf("invalid discovered_capabilities source %q for field %q", source, field)
+		}
+	}
+	return nil
+}
+
+func validateCapabilityOverrides(alias string, overrides *modelcap.Values) error {
+	if overrides == nil {
+		return nil
+	}
+	if _, err := modelcap.NormalizeValues(*overrides); err != nil {
+		return fmt.Errorf("invalid capability_overrides for %q: %w", alias, err)
+	}
+	return nil
+}
+
+func validateCapabilitiesRefreshedAt(alias, refreshedAt string) error {
+	if refreshedAt == "" {
+		return nil
+	}
+	if strings.TrimSpace(refreshedAt) != refreshedAt {
+		return fmt.Errorf("capabilities_refreshed_at for %q has surrounding whitespace", alias)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, refreshedAt); err != nil {
+		return fmt.Errorf("invalid capabilities_refreshed_at for %q: %w", alias, err)
+	}
+	return nil
+}
+
+func validateCompatibility(compatibility string) error {
+	switch compatibility {
 	case providers.ModeFull, providers.ModeDegraded, providers.ModeChatOnly, "blocked":
 		return nil
 	default:
-		return fmt.Errorf("invalid compatibility %q", model.Compatibility)
+		return fmt.Errorf("invalid compatibility %q", compatibility)
 	}
 }
 

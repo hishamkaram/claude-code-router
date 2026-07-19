@@ -18,12 +18,13 @@ permissions:
 
 jobs:
   fixture:
-    name: Fixture / Claude ${{ matrix.claude-version }} / ${{ matrix.protocol }}
-    runs-on: ubuntu-latest
+    name: Fixture / ${{ matrix.os }} / Claude ${{ matrix.claude-version }} / ${{ matrix.protocol }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         claude-version: ["2.1.209", "latest"]
         protocol: [openai, anthropic]
     env:

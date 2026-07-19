@@ -90,9 +90,13 @@ func buildClaudeConformancePlan(ctx context.Context, s *store.Store, alias strin
 	if err != nil {
 		return claudeConformancePlan{}, err
 	}
+	toolsDisabled, err := modelDisablesClaudeTools(model, provider)
+	if err != nil {
+		return claudeConformancePlan{}, err
+	}
 	plan := claudeConformancePlan{
 		targetAlias: alias, includeAnthropic: includeAnthropic,
-		requireWorkers: model.Status != "chat-only" && !providerDisablesClaudeTools(provider),
+		requireWorkers: !toolsDisabled,
 	}
 	if !includeAnthropic {
 		plan.streamAliases = []string{alias}
@@ -102,11 +106,11 @@ func buildClaudeConformancePlan(ctx context.Context, s *store.Store, alias strin
 		return plan, nil
 	}
 
-	safeAliases, _, err := routableModelAliases(ctx, s, false)
+	safeAliases, err := routableModelAliases(ctx, s, false)
 	if err != nil {
 		return claudeConformancePlan{}, err
 	}
-	allAliases, _, err := routableModelAliases(ctx, s, true)
+	allAliases, err := routableModelAliases(ctx, s, true)
 	if err != nil {
 		return claudeConformancePlan{}, err
 	}
@@ -124,11 +128,19 @@ func buildClaudeConformancePlan(ctx context.Context, s *store.Store, alias strin
 	)
 	plan.markers = append(plan.markers, "CCR_CONFORMANCE_ANTHROPIC_INITIAL")
 	for index, routeAlias := range safeAliases {
+		routeModel, err := s.GetModel(ctx, routeAlias)
+		if err != nil {
+			return claudeConformancePlan{}, err
+		}
+		routeID, err := gateway.DiscoveryIDForModel(routeModel)
+		if err != nil {
+			return claudeConformancePlan{}, err
+		}
 		routeMarker := fmt.Sprintf("CCR_CONFORMANCE_ALIAS_%d", index)
 		returnMarker := fmt.Sprintf("CCR_CONFORMANCE_ANTHROPIC_RETURN_%d", index)
 		plan.messages = append(
 			plan.messages,
-			"/model "+gateway.DiscoveryIDForAlias(routeAlias),
+			"/model "+routeID,
 			"Reply exactly "+routeMarker+" and do not use tools.",
 		)
 		plan.markers = append(plan.markers, routeMarker)

@@ -11,10 +11,13 @@ import (
 )
 
 type conformanceCheckView struct {
-	Name      string `json:"name"`
-	Status    string `json:"status"`
-	LatencyMS int64  `json:"latency_ms"`
-	Evidence  string `json:"evidence"`
+	Name               string `json:"name"`
+	Status             string `json:"status"`
+	LatencyMS          int64  `json:"latency_ms"`
+	Evidence           string `json:"evidence"`
+	FailureKind        string `json:"failure_kind,omitempty"`
+	HTTPStatus         int    `json:"http_status,omitempty"`
+	ProviderHTTPStatus int    `json:"provider_http_status,omitempty"`
 }
 
 type conformanceDocument struct {
@@ -48,17 +51,24 @@ type conformanceRunOptions struct {
 	claude           bool
 	includeAnthropic bool
 	jsonOutput       bool
+	all              bool
 }
 
 func newConformanceCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	cmd := &cobra.Command{Use: "conformance", Short: "Run and inspect compatibility checks"}
 	runOptions := conformanceRunOptions{}
 	run := &cobra.Command{
-		Use:   "run <alias>",
+		Use:   "run [alias]",
 		Short: "Run provider checks through the production gateway",
 		Args: func(cmd *cobra.Command, args []string) error {
+			if runOptions.all {
+				if len(args) != 0 {
+					return fmt.Errorf("conformance run accepts either one alias or --all, not both")
+				}
+				return nil
+			}
 			if len(args) != 1 {
-				return fmt.Errorf("model alias is required; example: ccr conformance run qwen")
+				return fmt.Errorf("model alias is required; use ccr conformance run <alias> or ccr conformance run --all")
 			}
 			return validateName("model alias", args[0])
 		},
@@ -66,12 +76,16 @@ func newConformanceCommand(ctx context.Context, opts *options, deps Dependencies
 			if runOptions.includeAnthropic && !runOptions.claude {
 				return fmt.Errorf("--include-anthropic requires --claude")
 			}
+			if runOptions.all {
+				return runConformanceAll(ctx, cmd, opts, deps, runOptions)
+			}
 			return runConformance(ctx, cmd, opts, deps, args[0], runOptions)
 		},
 	}
 	run.Flags().BoolVar(&runOptions.claude, "claude", false, "Also verify the installed Claude Code CLI")
 	run.Flags().BoolVar(&runOptions.includeAnthropic, "include-anthropic", false, "Include first-party Anthropic in the Claude CLI matrix")
 	run.Flags().BoolVar(&runOptions.jsonOutput, "json", false, "Emit schema-versioned JSON")
+	run.Flags().BoolVar(&runOptions.all, "all", false, "Run conformance for every registered non-blocked model alias")
 	cmd.AddCommand(run, newConformanceListCommand(ctx, opts))
 	return cmd
 }
@@ -149,6 +163,8 @@ func persistConformanceResult(ctx context.Context, s *store.Store, runID int64, 
 		view := conformanceCheckView{
 			Name: check.Name, Status: check.Status,
 			LatencyMS: check.Latency.Milliseconds(), Evidence: check.Evidence,
+			FailureKind: check.FailureKind, HTTPStatus: check.HTTPStatus,
+			ProviderHTTPStatus: check.ProviderHTTPStatus,
 		}
 		document.Checks = append(document.Checks, view)
 		if _, err := s.AddConformanceCheck(ctx, store.ConformanceCheck{

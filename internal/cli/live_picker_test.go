@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -119,19 +118,12 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 		"anthropic.ccr.h%61iku",
 	)
 
-	row, err := livePickerModelRow(transcript.String(), "anthropic.ccr.gpt")
-	if err != nil {
-		t.Fatalf("finding CCR model row: %v\ntranscript:\n%s", err, ansi.Strip(transcript.String()))
+	if _, err := session.pty.Write([]byte("\x1b")); err != nil {
+		t.Fatalf("closing /model picker: %v", err)
 	}
-	for currentRow := 1; currentRow < row; currentRow++ {
-		if _, err := session.pty.Write([]byte("\x1b[B")); err != nil {
-			t.Fatalf("moving to CCR picker row: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	time.Sleep(250 * time.Millisecond)
-	if _, err := session.pty.Write([]byte("s")); err != nil {
-		t.Fatalf("selecting CCR picker row: %v", err)
+	time.Sleep(500 * time.Millisecond)
+	if _, err := session.pty.Write([]byte("/model anthropic.ccr.gpt\r")); err != nil {
+		t.Fatalf("selecting registered model by ID: %v", err)
 	}
 	waitForLivePickerText(t, ctx, transcript, commandDone, "Set model to anthropic.ccr.gpt")
 	if _, err := session.pty.Write([]byte("Reply with the routed test response.\r")); err != nil {
@@ -350,17 +342,4 @@ func waitForLivePickerText(t *testing.T, ctx context.Context, transcript *synchr
 		case <-ticker.C:
 		}
 	}
-}
-
-func livePickerModelRow(transcript, modelID string) (int, error) {
-	pattern := regexp.MustCompile(`(?m)([0-9]+)\.\s*` + regexp.QuoteMeta(modelID))
-	matches := pattern.FindAllStringSubmatch(ansi.Strip(transcript), -1)
-	if len(matches) == 0 {
-		return 0, fmt.Errorf("model %q has no numbered picker row", modelID)
-	}
-	var row int
-	if _, err := fmt.Sscanf(matches[len(matches)-1][1], "%d", &row); err != nil {
-		return 0, fmt.Errorf("parsing picker row for %q: %w", modelID, err)
-	}
-	return row, nil
 }

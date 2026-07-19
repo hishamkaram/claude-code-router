@@ -8,16 +8,18 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 const (
-	SchemaVersion = 1
-	Kind          = "ccr-team-profile"
-	MaxBytes      = 1 << 20
-	MaxProviders  = 256
-	MaxModels     = 10_000
+	SchemaVersion    = 2
+	MinSchemaVersion = 1
+	Kind             = "ccr-team-profile"
+	MaxBytes         = 1 << 20
+	MaxProviders     = 256
+	MaxModels        = 10_000
 )
 
 type Manifest struct {
@@ -51,10 +53,13 @@ type Credential struct {
 }
 
 type Model struct {
-	Alias         string `json:"alias"`
-	Provider      string `json:"provider"`
-	ProviderModel string `json:"provider_model"`
-	Compatibility string `json:"compatibility"`
+	Alias                   string             `json:"alias"`
+	Provider                string             `json:"provider"`
+	ProviderModel           string             `json:"provider_model"`
+	Compatibility           string             `json:"compatibility"`
+	DiscoveredCapabilities  *modelcap.Snapshot `json:"discovered_capabilities,omitempty"`
+	CapabilityOverrides     *modelcap.Values   `json:"capability_overrides,omitempty"`
+	CapabilitiesRefreshedAt string             `json:"capabilities_refreshed_at,omitempty"`
 }
 
 func Build(storedProviders []store.Provider, storedModels []store.Model) (Manifest, error) {
@@ -69,12 +74,22 @@ func Build(storedProviders []store.Provider, storedModels []store.Model) (Manife
 	}
 	for index := range storedModels {
 		model := &storedModels[index]
-		manifest.Models = append(manifest.Models, Model{
-			Alias:         model.Alias,
-			Provider:      model.ProviderName,
-			ProviderModel: model.ProviderModel,
-			Compatibility: model.Status,
-		})
+		exported := Model{
+			Alias:                   model.Alias,
+			Provider:                model.ProviderName,
+			ProviderModel:           model.ProviderModel,
+			Compatibility:           model.Status,
+			CapabilitiesRefreshedAt: model.CapabilitiesRefreshedAt,
+		}
+		if !modelcap.IsZeroSnapshot(model.DiscoveredCapabilities) {
+			discovered := model.DiscoveredCapabilities
+			exported.DiscoveredCapabilities = &discovered
+		}
+		if !modelcap.IsZeroValues(model.CapabilityOverrides) {
+			overrides := model.CapabilityOverrides
+			exported.CapabilityOverrides = &overrides
+		}
+		manifest.Models = append(manifest.Models, exported)
 	}
 	sort.Slice(manifest.Providers, func(i, j int) bool {
 		return manifest.Providers[i].Name < manifest.Providers[j].Name

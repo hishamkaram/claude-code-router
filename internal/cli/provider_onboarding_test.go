@@ -1,9 +1,15 @@
 package cli
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 func TestProviderHelpShowsGuidedInteractiveAndImportReview(t *testing.T) {
@@ -128,7 +134,7 @@ func TestProviderImportModelsGuidedReviewRenamesAlias(t *testing.T) {
 		t.Fatalf("provider add error = %v", err)
 	}
 	input := strings.Join([]string{
-		"1",          // select first discovered model
+		"2",          // select gpt-5 from the sorted discovery list
 		"0",          // finish multiselect
 		"2",          // rename an alias during review
 		"1",          // choose first planned alias
@@ -164,6 +170,10 @@ func TestModelImportOutputRespectsEditedCompatibility(t *testing.T) {
 		{alias: "blocked-alias", providerModel: "blocked-model", status: "blocked"},
 		{alias: "chat-alias", providerModel: "chat-model", status: "chat-only"},
 		{alias: "full-alias", providerModel: "full-model", status: "full"},
+		{
+			alias: "no-tools-alias", providerModel: "no-tools-model", status: "degraded",
+			discoveredCapabilities: modelcap.Snapshot{Values: modelcap.Values{SupportsTools: modelcap.Bool(false)}},
+		},
 	}
 	var out strings.Builder
 
@@ -173,21 +183,24 @@ func TestModelImportOutputRespectsEditedCompatibility(t *testing.T) {
 
 	got := out.String()
 	for _, want := range []string{
-		`Imported 3 model aliases for provider "litellm".`,
+		`Imported 4 model aliases for provider "litellm".`,
 		"Alias blocked-alias -> blocked-model (compat=blocked)",
 		"Alias chat-alias -> chat-model (compat=chat-only)",
 		"Alias full-alias -> full-model (compat=full)",
+		"Alias no-tools-alias -> no-tools-model (compat=degraded)",
 		"/model: choose CCR full-alias",
 		"Launch command: ccr launch --model chat-alias",
+		"Launch command: ccr launch --model no-tools-alias",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("model import output missing %q:\n%s", want, got)
 		}
 	}
 	for _, unwanted := range []string{
-		"Imported 3 model aliases for provider \"litellm\" (compat=degraded)",
+		"Imported 4 model aliases for provider \"litellm\" (compat=degraded)",
 		"CCR blocked-alias",
 		"CCR chat-alias",
+		"CCR no-tools-alias",
 	} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("model import output contains %q:\n%s", unwanted, got)
@@ -272,6 +285,58 @@ func TestProviderAddInteractiveManualModelFormSavesAlias(t *testing.T) {
 	}
 	if !strings.Contains(out, "claude-manual\tprovider=anthropic\tmodel=claude-opus\tcompat=degraded") {
 		t.Fatalf("model list output = %q", out)
+	}
+}
+
+func TestSaveInteractiveProviderAddValidatesAllModelsBeforeWrites(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if migrateErr := s.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("Migrate() error = %v", migrateErr)
+	}
+	provider := store.Provider{
+		Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:4000",
+		SecretRef: "keyring:provider/litellm/api-key",
+	}
+	planned := []plannedModelImport{
+		{alias: "valid", providerModel: "chat-model", status: "degraded"},
+		{alias: "control", providerModel: "all-proxy-models", status: "degraded"},
+	}
+	secrets := &fakeSecrets{}
+	cmd := &cobra.Command{}
+	var out strings.Builder
+	cmd.SetOut(&out)
+	err = saveInteractiveProviderAdd(ctx, cmd, Dependencies{Secrets: secrets}, s, provider, secretPlan{
+		ref: provider.SecretRef, value: "must-not-be-stored", store: true,
+	}, planned, modelImportSummary{})
+	if err == nil || !strings.Contains(err.Error(), "control model") {
+		t.Fatalf("saveInteractiveProviderAdd() error = %v", err)
+	}
+	if len(secrets.values) != 0 {
+		t.Fatalf("secrets were stored before validation: %#v", secrets.values)
+	}
+	exists, err := s.ProviderExists(ctx, provider.Name)
+	if err != nil {
+		t.Fatalf("ProviderExists() error = %v", err)
+	}
+	if exists {
+		t.Fatal("provider was stored before planned models were validated")
+	}
+	models, err := s.ListModels(ctx)
+	if err != nil {
+		t.Fatalf("ListModels() error = %v", err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("models were stored before validation: %#v", models)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("success output was written before validation: %q", out.String())
 	}
 }
 

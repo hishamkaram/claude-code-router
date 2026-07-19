@@ -137,13 +137,18 @@ func redactCommonSecretPatterns(detail string) string {
 }
 
 type openAIModelRoute struct {
-	alias         string
-	providerName  string
-	providerModel string
-	requestModel  string
+	alias                         string
+	providerName                  string
+	providerModel                 string
+	requestModel                  string
+	suppressIdentitySystemMessage bool
+	forceDisableParallelTools     bool
 }
 
 func (route openAIModelRoute) identityMessage() (openAIMessage, bool) {
+	if route.suppressIdentitySystemMessage {
+		return openAIMessage{}, false
+	}
 	alias := strings.TrimSpace(route.alias)
 	providerName := strings.TrimSpace(route.providerName)
 	providerModel := strings.TrimSpace(route.providerModel)
@@ -175,6 +180,10 @@ func toOpenAIChatRequest(req anthropicRequest, route openAIModelRoute) (openAICh
 	if err != nil {
 		return openAIChatRequest{}, err
 	}
+	if route.forceDisableParallelTools && len(tools) > 0 {
+		parallelDisabled := false
+		parallelTools = &parallelDisabled
+	}
 	messages, err := openAIMessagesFromRequest(req, route)
 	if err != nil {
 		return openAIChatRequest{}, err
@@ -188,6 +197,7 @@ func toOpenAIChatRequest(req anthropicRequest, route openAIModelRoute) (openAICh
 		Stream:          false,
 		User:            options.user,
 		ReasoningEffort: options.reasoningEffort,
+		ResponseFormat:  options.responseFormat,
 		Tools:           tools,
 		ToolChoice:      toolChoice,
 		ParallelTools:   parallelTools,
@@ -393,6 +403,7 @@ func openAIParallelToolCallsFromAnthropic(payload map[string]json.RawMessage) (*
 type openAIRequestOptions struct {
 	user            string
 	reasoningEffort string
+	responseFormat  *openAIResponseFormat
 }
 
 func openAIOptionsFromAnthropic(req anthropicRequest) (openAIRequestOptions, error) {
@@ -410,7 +421,15 @@ func openAIOptionsFromAnthropic(req anthropicRequest) (openAIRequestOptions, err
 			return openAIRequestOptions{}, err
 		}
 	}
-	return openAIRequestOptions{user: user, reasoningEffort: reasoningEffort}, nil
+	responseFormat, err := openAIResponseFormatFromOutputConfig(req.OutputConfig)
+	if err != nil {
+		return openAIRequestOptions{}, err
+	}
+	return openAIRequestOptions{
+		user:            user,
+		reasoningEffort: reasoningEffort,
+		responseFormat:  responseFormat,
+	}, nil
 }
 
 func openAIUserFromMetadata(raw json.RawMessage) (string, error) {
@@ -449,6 +468,43 @@ func openAIReasoningEffortFromOutputConfig(raw json.RawMessage) (string, error) 
 		}
 	}
 	return openAIReasoningEffortFromClaudeEffort(effort)
+}
+
+func openAIResponseFormatFromOutputConfig(raw json.RawMessage) (*openAIResponseFormat, error) {
+	if !rawJSONPresent(raw) {
+		return nil, nil
+	}
+	var outputConfig struct {
+		Format json.RawMessage `json:"format"`
+	}
+	if err := json.Unmarshal(raw, &outputConfig); err != nil {
+		return nil, fmt.Errorf("unsupported output_config: %w", err)
+	}
+	if !rawJSONPresent(outputConfig.Format) {
+		return nil, nil
+	}
+	var format struct {
+		Type   string          `json:"type"`
+		Schema json.RawMessage `json:"schema"`
+	}
+	if err := json.Unmarshal(outputConfig.Format, &format); err != nil {
+		return nil, fmt.Errorf("output_config.format must be an object")
+	}
+	if format.Type != "json_schema" {
+		return nil, fmt.Errorf("output_config.format.type %q is not supported by the OpenAI-compatible gateway path", format.Type)
+	}
+	var schema map[string]any
+	if !rawJSONPresent(format.Schema) || json.Unmarshal(format.Schema, &schema) != nil || schema == nil {
+		return nil, fmt.Errorf("output_config.format.schema must be a JSON object")
+	}
+	return &openAIResponseFormat{
+		Type: "json_schema",
+		JSONSchema: openAIJSONSchema{
+			Name:   "claude_output",
+			Schema: format.Schema,
+			Strict: true,
+		},
+	}, nil
 }
 
 func openAIReasoningEffortFromThinking(raw json.RawMessage) (string, error) {

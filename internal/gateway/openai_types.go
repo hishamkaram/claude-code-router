@@ -27,17 +27,29 @@ type anthropicMessage struct {
 }
 
 type openAIChatRequest struct {
-	Model           string          `json:"model"`
-	Messages        []openAIMessage `json:"messages"`
-	MaxTokens       int             `json:"max_tokens,omitempty"`
-	Temperature     *float64        `json:"temperature,omitempty"`
-	Stop            []string        `json:"stop,omitempty"`
-	Stream          bool            `json:"stream"`
-	User            string          `json:"user,omitempty"`
-	ReasoningEffort string          `json:"reasoning_effort,omitempty"`
-	Tools           []openAITool    `json:"tools,omitempty"`
-	ToolChoice      any             `json:"tool_choice,omitempty"`
-	ParallelTools   *bool           `json:"parallel_tool_calls,omitempty"`
+	Model           string                `json:"model"`
+	Messages        []openAIMessage       `json:"messages"`
+	MaxTokens       int                   `json:"max_tokens,omitempty"`
+	Temperature     *float64              `json:"temperature,omitempty"`
+	Stop            []string              `json:"stop,omitempty"`
+	Stream          bool                  `json:"stream"`
+	User            string                `json:"user,omitempty"`
+	ReasoningEffort string                `json:"reasoning_effort,omitempty"`
+	ResponseFormat  *openAIResponseFormat `json:"response_format,omitempty"`
+	Tools           []openAITool          `json:"tools,omitempty"`
+	ToolChoice      any                   `json:"tool_choice,omitempty"`
+	ParallelTools   *bool                 `json:"parallel_tool_calls,omitempty"`
+}
+
+type openAIResponseFormat struct {
+	Type       string           `json:"type"`
+	JSONSchema openAIJSONSchema `json:"json_schema"`
+}
+
+type openAIJSONSchema struct {
+	Name   string          `json:"name"`
+	Schema json.RawMessage `json:"schema"`
+	Strict bool            `json:"strict"`
 }
 
 type openAIMessage struct {

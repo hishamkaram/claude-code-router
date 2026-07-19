@@ -88,6 +88,51 @@ func rewriteAnthropicRequestModel(body []byte, model string) ([]byte, error) {
 	return rewritten, nil
 }
 
+func rewriteAnthropicMessageBody(body []byte, providerModel string, disableParallelTools bool) ([]byte, error) {
+	rewritten := body
+	var err error
+	if disableParallelTools {
+		rewritten, err = rewriteAnthropicDisableParallelTools(rewritten)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if providerModel != "" {
+		rewritten, err = rewriteAnthropicRequestModel(rewritten, providerModel)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return rewritten, nil
+}
+
+func rewriteAnthropicDisableParallelTools(body []byte) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("enforcing Anthropic serial tool use: %w", err)
+	}
+	toolChoice := make(map[string]json.RawMessage)
+	if raw, ok := payload["tool_choice"]; ok && rawJSONPresent(raw) {
+		if err := json.Unmarshal(raw, &toolChoice); err != nil || toolChoice == nil {
+			return nil, fmt.Errorf("enforcing Anthropic serial tool use: tool_choice must be an object")
+		}
+	}
+	if _, ok := toolChoice["type"]; !ok {
+		toolChoice["type"] = json.RawMessage(`"auto"`)
+	}
+	toolChoice["disable_parallel_tool_use"] = json.RawMessage("true")
+	encodedChoice, err := json.Marshal(toolChoice)
+	if err != nil {
+		return nil, fmt.Errorf("enforcing Anthropic serial tool use: %w", err)
+	}
+	payload["tool_choice"] = encodedChoice
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("enforcing Anthropic serial tool use: %w", err)
+	}
+	return rewritten, nil
+}
+
 func anthropicResourceFromPath(path string) string {
 	path = strings.Trim(path, "/")
 	path = strings.TrimPrefix(path, "v1/")

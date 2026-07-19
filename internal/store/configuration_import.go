@@ -74,10 +74,18 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		if !ok {
 			return ConfigurationImportResult{}, fmt.Errorf("store.ImportConfiguration: model %q references provider %q outside the import", model.Alias, model.ProviderName)
 		}
+		discoveredJSON, overridesJSON, err := encodeModelCapabilities(*model)
+		if err != nil {
+			return ConfigurationImportResult{}, fmt.Errorf("store.ImportConfiguration: encoding capabilities for model %q: %w", model.Alias, err)
+		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO models (alias, provider_id, provider_model, status, created_at)
-VALUES (?, ?, ?, ?, ?)
-`, model.Alias, providerID, model.ProviderModel, model.Status, now); err != nil {
+INSERT INTO models (
+  alias, provider_id, provider_model, status, discovered_capabilities,
+  capability_overrides, capabilities_refreshed_at, created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, model.Alias, providerID, model.ProviderModel, model.Status, discoveredJSON,
+			overridesJSON, model.CapabilitiesRefreshedAt, now); err != nil {
 			return ConfigurationImportResult{}, fmt.Errorf("store.ImportConfiguration: inserting model %q: %w", model.Alias, err)
 		}
 	}

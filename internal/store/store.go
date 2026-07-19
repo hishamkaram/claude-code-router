@@ -10,10 +10,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 
 type Store struct {
 	db *sql.DB
@@ -35,13 +36,20 @@ type Provider struct {
 	CreatedAt              string
 }
 
+type ProviderUpdateResult struct {
+	CapabilitySnapshotsInvalidated int64
+}
+
 type Model struct {
-	ID            int64
-	Alias         string
-	ProviderName  string
-	ProviderModel string
-	Status        string
-	CreatedAt     string
+	ID                      int64
+	Alias                   string
+	ProviderName            string
+	ProviderModel           string
+	Status                  string
+	DiscoveredCapabilities  modelcap.Snapshot
+	CapabilityOverrides     modelcap.Values
+	CapabilitiesRefreshedAt string
+	CreatedAt               string
 }
 
 type Session struct {
@@ -172,6 +180,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return s.migrateFromV2(ctx)
 	case 3:
 		return s.migrateFromV3(ctx)
+	case 4:
+		return s.migrateFromV4(ctx)
 	case CurrentSchemaVersion:
 		return s.ensureCurrentSchema(ctx)
 	default:
@@ -189,6 +199,9 @@ func (s *Store) migrateFromV1(ctx context.Context) error {
 	if err := s.migrateV3ToV4(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 4: %w", err)
 	}
+	if err := s.migrateV4ToV5(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 5: %w", err)
+	}
 	return nil
 }
 
@@ -199,12 +212,25 @@ func (s *Store) migrateFromV2(ctx context.Context) error {
 	if err := s.migrateV3ToV4(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 4: %w", err)
 	}
+	if err := s.migrateV4ToV5(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 5: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) migrateFromV3(ctx context.Context) error {
 	if err := s.migrateV3ToV4(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 4: %w", err)
+	}
+	if err := s.migrateV4ToV5(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 5: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateFromV4(ctx context.Context) error {
+	if err := s.migrateV4ToV5(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 4 to 5: %w", err)
 	}
 	return nil
 }
@@ -242,9 +268,28 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	return nil
 }
 
-func (s *Store) UpdateProvider(ctx context.Context, provider Provider) error {
+func (s *Store) UpdateProvider(ctx context.Context, provider Provider) (ProviderUpdateResult, error) {
 	provider = providerWithMetadataDefaults(provider)
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: starting transaction for provider %q: %w", provider.Name, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var existing Provider
+	err = tx.QueryRowContext(ctx, `
+SELECT id, type, base_url, secret_ref, protocol
+FROM providers
+WHERE name = ?
+`, provider.Name).Scan(&existing.ID, &existing.Type, &existing.BaseURL, &existing.SecretRef, &existing.Protocol)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: provider %q does not exist", provider.Name)
+	}
+	if err != nil {
+		return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: reading provider %q before update: %w", provider.Name, err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
 UPDATE providers
 SET type = ?, base_url = ?, secret_ref = ?, protocol = ?, supports_tools = ?,
   supports_streaming = ?, supports_thinking = ?, supports_model_discovery = ?,
@@ -254,16 +299,41 @@ WHERE name = ?
 		boolToInt(provider.SupportsStreaming), boolToInt(provider.SupportsThinking), boolToInt(provider.SupportsModelDiscovery),
 		boolToInt(provider.SupportsCountTokens), provider.Mode, provider.Name)
 	if err != nil {
-		return fmt.Errorf("store.UpdateProvider: updating provider %q: %w", provider.Name, err)
+		return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: updating provider %q: %w", provider.Name, err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("store.UpdateProvider: reading rows affected for provider %q: %w", provider.Name, err)
+		return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: reading rows affected for provider %q: %w", provider.Name, err)
 	}
 	if affected == 0 {
-		return fmt.Errorf("store.UpdateProvider: provider %q does not exist", provider.Name)
+		return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: provider %q does not exist", provider.Name)
 	}
-	return nil
+
+	updateResult := ProviderUpdateResult{}
+	if providerCapabilitySourceChanged(existing, provider) {
+		invalidated, invalidateErr := tx.ExecContext(ctx, `
+UPDATE models
+SET discovered_capabilities = '{}', capabilities_refreshed_at = ''
+WHERE provider_id = ?
+  AND (capabilities_refreshed_at <> '' OR discovered_capabilities NOT IN ('{}', '{"values":{}}'))
+`, existing.ID)
+		if invalidateErr != nil {
+			return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: invalidating model capabilities for provider %q: %w", provider.Name, invalidateErr)
+		}
+		updateResult.CapabilitySnapshotsInvalidated, err = invalidated.RowsAffected()
+		if err != nil {
+			return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: reading invalidated model count for provider %q: %w", provider.Name, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return ProviderUpdateResult{}, fmt.Errorf("store.UpdateProvider: committing provider %q update: %w", provider.Name, err)
+	}
+	return updateResult, nil
+}
+
+func providerCapabilitySourceChanged(existing, updated Provider) bool {
+	return existing.Type != updated.Type || existing.BaseURL != updated.BaseURL ||
+		existing.SecretRef != updated.SecretRef || existing.Protocol != updated.Protocol
 }
 
 func (s *Store) GetProvider(ctx context.Context, name string) (Provider, error) {
@@ -388,13 +458,21 @@ func (s *Store) RemoveProvider(ctx context.Context, name string) (int64, error) 
 }
 
 func (s *Store) AddModel(ctx context.Context, model Model) error {
+	discoveredJSON, overridesJSON, err := encodeModelCapabilities(model)
+	if err != nil {
+		return fmt.Errorf("store.AddModel: encoding capabilities for model %q: %w", model.Alias, err)
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO models (alias, provider_id, provider_model, status, created_at)
-SELECT ?, providers.id, ?, ?, ?
+INSERT INTO models (
+  alias, provider_id, provider_model, status, discovered_capabilities,
+  capability_overrides, capabilities_refreshed_at, created_at
+)
+SELECT ?, providers.id, ?, ?, ?, ?, ?, ?
 FROM providers
 WHERE providers.name = ?
-`, model.Alias, model.ProviderModel, model.Status, now, model.ProviderName)
+`, model.Alias, model.ProviderModel, model.Status, discoveredJSON, overridesJSON,
+		model.CapabilitiesRefreshedAt, now, model.ProviderName)
 	if err != nil {
 		return fmt.Errorf("store.AddModel: inserting model %q: %w", model.Alias, err)
 	}
@@ -410,19 +488,30 @@ WHERE providers.name = ?
 
 func (s *Store) GetModel(ctx context.Context, alias string) (Model, error) {
 	var model Model
+	var discoveredJSON, overridesJSON string
 	err := s.db.QueryRowContext(ctx, `
-SELECT models.id, models.alias, providers.name, models.provider_model, models.status, models.created_at
+SELECT models.id, models.alias, providers.name, models.provider_model, models.status,
+  models.discovered_capabilities, models.capability_overrides,
+  models.capabilities_refreshed_at, models.created_at
 FROM models
 JOIN providers ON providers.id = models.provider_id
 WHERE models.alias = ?
-`, alias).Scan(&model.ID, &model.Alias, &model.ProviderName, &model.ProviderModel, &model.Status, &model.CreatedAt)
+`, alias).Scan(&model.ID, &model.Alias, &model.ProviderName, &model.ProviderModel, &model.Status,
+		&discoveredJSON, &overridesJSON, &model.CapabilitiesRefreshedAt, &model.CreatedAt)
 	if err != nil {
 		return Model{}, fmt.Errorf("store.GetModel: reading model %q: %w", alias, err)
+	}
+	if err := decodeModelCapabilities(&model, discoveredJSON, overridesJSON); err != nil {
+		return Model{}, fmt.Errorf("store.GetModel: decoding capabilities for model %q: %w", alias, err)
 	}
 	return model, nil
 }
 
 func (s *Store) UpdateModel(ctx context.Context, model Model) error {
+	discoveredJSON, overridesJSON, err := encodeModelCapabilities(model)
+	if err != nil {
+		return fmt.Errorf("store.UpdateModel: encoding capabilities for model %q: %w", model.Alias, err)
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store.UpdateModel: beginning transaction for model %q: %w", model.Alias, err)
@@ -442,9 +531,11 @@ func (s *Store) UpdateModel(ctx context.Context, model Model) error {
 
 	result, err := tx.ExecContext(ctx, `
 UPDATE models
-SET provider_id = ?, provider_model = ?, status = ?
+SET provider_id = ?, provider_model = ?, status = ?, discovered_capabilities = ?,
+  capability_overrides = ?, capabilities_refreshed_at = ?
 WHERE alias = ?
-`, providerID, model.ProviderModel, model.Status, model.Alias)
+`, providerID, model.ProviderModel, model.Status, discoveredJSON, overridesJSON,
+		model.CapabilitiesRefreshedAt, model.Alias)
 	if err != nil {
 		return fmt.Errorf("store.UpdateModel: updating model %q: %w", model.Alias, err)
 	}
@@ -495,7 +586,9 @@ WHERE alias = ?
 
 func (s *Store) ListModels(ctx context.Context) ([]Model, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT models.id, models.alias, providers.name, models.provider_model, models.status, models.created_at
+SELECT models.id, models.alias, providers.name, models.provider_model, models.status,
+  models.discovered_capabilities, models.capability_overrides,
+  models.capabilities_refreshed_at, models.created_at
 FROM models
 JOIN providers ON providers.id = models.provider_id
 ORDER BY models.alias
@@ -510,8 +603,13 @@ ORDER BY models.alias
 	var models []Model
 	for rows.Next() {
 		var model Model
-		if err := rows.Scan(&model.ID, &model.Alias, &model.ProviderName, &model.ProviderModel, &model.Status, &model.CreatedAt); err != nil {
+		var discoveredJSON, overridesJSON string
+		if err := rows.Scan(&model.ID, &model.Alias, &model.ProviderName, &model.ProviderModel, &model.Status,
+			&discoveredJSON, &overridesJSON, &model.CapabilitiesRefreshedAt, &model.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store.ListModels: scanning model: %w", err)
+		}
+		if err := decodeModelCapabilities(&model, discoveredJSON, overridesJSON); err != nil {
+			return nil, fmt.Errorf("store.ListModels: decoding capabilities for model %q: %w", model.Alias, err)
 		}
 		models = append(models, model)
 	}

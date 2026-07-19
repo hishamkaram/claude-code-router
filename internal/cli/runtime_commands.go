@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/session"
@@ -209,8 +210,19 @@ func resolveLaunch(ctx context.Context, deps Dependencies, s *store.Store, invoc
 	if err != nil {
 		return resolvedLaunch{}, err
 	}
+	claudeModelID := ""
+	if modelAlias != "" {
+		model, err := s.GetModel(ctx, modelAlias)
+		if err != nil {
+			return resolvedLaunch{}, err
+		}
+		claudeModelID, err = launchClaudeModelID(model)
+		if err != nil {
+			return resolvedLaunch{}, err
+		}
+	}
 	return resolvedLaunch{
-		modelAlias: modelAlias, claudeModelID: launchClaudeModelID(modelAlias),
+		modelAlias: modelAlias, claudeModelID: claudeModelID,
 		disableTools: disableTools,
 	}, nil
 }
@@ -395,11 +407,8 @@ func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
 	return env
 }
 
-func launchClaudeModelID(modelAlias string) string {
-	if modelAlias == "" {
-		return ""
-	}
-	return gateway.DiscoveryIDForAlias(modelAlias)
+func launchClaudeModelID(model store.Model) (string, error) {
+	return gateway.DiscoveryIDForModel(model)
 }
 
 func claudeAvailableModels() (models []string, configured bool, err error) {
@@ -502,12 +511,27 @@ func launchShouldDisableTools(ctx context.Context, s *store.Store, modelAlias st
 	if err != nil {
 		return false, fmt.Errorf("checking provider %q launch compatibility: %w", model.ProviderName, err)
 	}
-	return model.Status == "chat-only" || providerDisablesClaudeTools(provider), nil
+	disabled, err := modelDisablesClaudeTools(model, provider)
+	if err != nil {
+		return false, fmt.Errorf("checking model alias %q capabilities: %w", modelAlias, err)
+	}
+	return disabled, nil
 }
 
 func providerDisablesClaudeTools(provider store.Provider) bool {
 	caps := effectiveProviderCapabilities(provider)
 	return caps.Mode == providers.ModeChatOnly || !caps.SupportsTools
+}
+
+func modelDisablesClaudeTools(model store.Model, provider store.Provider) (bool, error) {
+	if model.Status == "chat-only" || providerDisablesClaudeTools(provider) {
+		return true, nil
+	}
+	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if err != nil {
+		return false, err
+	}
+	return effective.Values.SupportsTools != nil && !*effective.Values.SupportsTools, nil
 }
 
 func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool, authMode, permissionMode string) {
@@ -534,17 +558,23 @@ func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gate
 }
 
 func writePreserveAuthModelGuidance(ctx context.Context, out io.Writer, s *store.Store, includeToolDisabled bool) {
-	aliases, _, err := routableModelAliases(ctx, s, includeToolDisabled)
+	models, _, err := routableModels(ctx, s, includeToolDisabled)
 	if err != nil {
 		fmt.Fprintf(out, "Registered ccr model guidance unavailable: %v\n", err)
 		return
 	}
-	if len(aliases) == 0 {
+	if len(models) == 0 {
 		return
 	}
 	fmt.Fprintln(out, "Registered ccr models are available in Claude Code's /model picker:")
-	for _, alias := range aliases {
-		fmt.Fprintf(out, "  /model %s\n", gateway.DiscoveryIDForAlias(alias))
+	for index := range models {
+		model := &models[index]
+		id, err := gateway.DiscoveryIDForModel(*model)
+		if err != nil {
+			fmt.Fprintf(out, "  %s unavailable: %v\n", model.Alias, err)
+			continue
+		}
+		fmt.Fprintf(out, "  /model %s\n", id)
 	}
 }
 
@@ -596,40 +626,102 @@ func (w synchronizedWriter) Write(p []byte) (int, error) {
 
 func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.Store, requested string) (string, error) {
 	if requested != "" {
-		if _, _, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, requested, true); validateErr != nil {
+		model, provider, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, requested, true)
+		if validateErr != nil {
 			return "", validateErr
+		}
+		effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+		if err != nil {
+			return "", fmt.Errorf("checking model alias %q launch capabilities: %w", requested, err)
+		}
+		if !supportsClaudeStreaming(effectiveProviderCapabilities(provider), effective.Values) {
+			return "", fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective provider/model capabilities do not support streaming; it is excluded from /model", requested)
+		}
+		if !supportsClaudeSystemMessages(effective.Values) {
+			return "", fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective model capabilities do not support system messages; it is excluded from /model", requested)
 		}
 		return requested, nil
 	}
 	return "", nil
 }
 
-func routableModelAliases(ctx context.Context, s *store.Store, includeToolDisabled bool) (aliases []string, hasRoutable bool, err error) {
-	models, err := s.ListModels(ctx)
+func routableModelAliases(ctx context.Context, s *store.Store, includeToolDisabled bool) ([]string, error) {
+	models, _, err := routableModels(ctx, s, includeToolDisabled)
+	if err != nil {
+		return nil, err
+	}
+	aliases := make([]string, 0, len(models))
+	for index := range models {
+		aliases = append(aliases, models[index].Alias)
+	}
+	return aliases, nil
+}
+
+func routableModels(ctx context.Context, s *store.Store, includeToolDisabled bool) (models []store.Model, hasRoutable bool, err error) {
+	storedModels, err := s.ListModels(ctx)
 	if err != nil {
 		return nil, false, err
 	}
-	aliases = make([]string, 0, len(models))
-	for _, model := range models {
-		if model.Status == "blocked" {
-			continue
+	routable := make([]store.Model, 0, len(storedModels))
+	for index := range storedModels {
+		model := &storedModels[index]
+		eligible, toolsDisabled, eligibilityErr := modelLaunchEligibility(ctx, s, model)
+		if eligibilityErr != nil {
+			return nil, false, eligibilityErr
 		}
-		provider, err := s.GetProvider(ctx, model.ProviderName)
-		if err != nil {
-			return nil, false, err
-		}
-		caps := effectiveProviderCapabilities(provider)
-		if caps.Protocol != providers.ProtocolOpenAICompatible && caps.Protocol != providers.ProtocolAnthropicCompatible {
+		if !eligible {
 			continue
 		}
 		hasRoutable = true
-		if !includeToolDisabled && (model.Status == "chat-only" || providerDisablesClaudeTools(provider)) {
+		if !includeToolDisabled && toolsDisabled {
 			continue
 		}
-		aliases = append(aliases, model.Alias)
+		routable = append(routable, *model)
 	}
-	slices.Sort(aliases)
-	return aliases, hasRoutable, nil
+	slices.SortFunc(routable, func(a, b store.Model) int { return strings.Compare(a.Alias, b.Alias) })
+	return routable, hasRoutable, nil
+}
+
+func modelLaunchEligibility(ctx context.Context, s *store.Store, model *store.Model) (eligible, toolsDisabled bool, err error) {
+	if model.Status == "blocked" {
+		return false, false, nil
+	}
+	provider, err := s.GetProvider(ctx, model.ProviderName)
+	if err != nil {
+		return false, false, err
+	}
+	caps := effectiveProviderCapabilities(provider)
+	if caps.Protocol != providers.ProtocolOpenAICompatible && caps.Protocol != providers.ProtocolAnthropicCompatible {
+		return false, false, nil
+	}
+	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+		return false, false, nil
+	}
+	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if err != nil {
+		return false, false, err
+	}
+	if !modelcap.IsRoutableKind(effective.Values.Kind) {
+		return false, false, nil
+	}
+	if !supportsClaudeStreaming(caps, effective.Values) {
+		return false, false, nil
+	}
+	if !supportsClaudeSystemMessages(effective.Values) {
+		return false, false, nil
+	}
+	toolsDisabled = model.Status == "chat-only" || providerDisablesClaudeTools(provider) ||
+		effective.Values.SupportsTools != nil && !*effective.Values.SupportsTools
+	return true, toolsDisabled, nil
+}
+
+func supportsClaudeStreaming(provider providers.Capabilities, model modelcap.Values) bool {
+	return provider.SupportsStreaming &&
+		(model.SupportsStreaming == nil || *model.SupportsStreaming)
+}
+
+func supportsClaudeSystemMessages(model modelcap.Values) bool {
+	return model.SupportsSystemMessages == nil || *model.SupportsSystemMessages
 }
 
 func cleanupStartedClaudeProcess(process ClaudeProcess) error {

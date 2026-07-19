@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
@@ -112,6 +113,123 @@ func TestGatewayCountTokensTreatsStoredLiteLLMAsProviderBacked(t *testing.T) {
 	assertCountTokensResponse(t, resp, 7, tokenCountModeProvider, "")
 	if !called {
 		t.Fatalf("stored LiteLLM provider was not called for exact count_tokens")
+	}
+}
+
+func TestGatewayCountTokensRejectsNonRoutableModelKind(t *testing.T) {
+	ctx := context.Background()
+	providerCalled := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalled = true
+		http.Error(w, "must not route embedding aliases", http.StatusInternalServerError)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL},
+		store.Model{
+			Alias: "gpt", ProviderName: "litellm", ProviderModel: "embedding-model", Status: "degraded",
+			CapabilityOverrides: modelcap.Values{Kind: modelcap.KindEmbedding},
+		},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages/count_tokens", strings.NewReader(countTokensTestBody))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway count_tokens request error = %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading response: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(raw), "kind embedding") {
+		t.Fatalf("gateway response = HTTP %d %s", resp.StatusCode, raw)
+	}
+	if providerCalled {
+		t.Fatal("provider was called for a non-routable model kind")
+	}
+}
+
+func TestGatewayCountTokensEnforcesModelCapabilityRestrictions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		overrides modelcap.Values
+		body      string
+		want      string
+	}{
+		{
+			name:      "tools",
+			overrides: modelcap.Values{SupportsTools: modelcap.Bool(false)},
+			body:      `{"model":"gpt","tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`,
+			want:      "does not support tools",
+		},
+		{
+			name:      "vision",
+			overrides: modelcap.Values{SupportsVision: modelcap.Bool(false)},
+			body:      `{"model":"gpt","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
+			want:      "does not support image input",
+		},
+		{
+			name:      "system messages",
+			overrides: modelcap.Values{SupportsSystemMessages: modelcap.Bool(false)},
+			body:      `{"model":"gpt","system":"instructions","messages":[{"role":"user","content":"hello"}]}`,
+			want:      "does not support system messages",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			providerCalled := false
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				providerCalled = true
+				http.Error(w, "must not receive unsupported count request", http.StatusInternalServerError)
+			}))
+			defer provider.Close()
+
+			ctx := context.Background()
+			s := newGatewayStore(t,
+				store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL},
+				store.Model{
+					Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded",
+					CapabilityOverrides: test.overrides,
+				},
+			)
+			server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+			defer func() { _ = server.Shutdown(ctx) }()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages/count_tokens", strings.NewReader(test.body))
+			if err != nil {
+				t.Fatalf("NewRequest() error = %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer local-token")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("gateway count_tokens request error = %v", err)
+			}
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("reading gateway response: %v", err)
+			}
+			if resp.StatusCode != http.StatusNotImplemented || !strings.Contains(string(raw), test.want) {
+				t.Fatalf("gateway response = HTTP %d %s", resp.StatusCode, raw)
+			}
+			if providerCalled {
+				t.Fatal("provider was called for an unsupported count_tokens request")
+			}
+		})
 	}
 }
 

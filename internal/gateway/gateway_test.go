@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -47,7 +48,10 @@ func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: "env:PROVIDER_KEY"}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: "env:PROVIDER_KEY"}, store.Model{
+		Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded",
+		CapabilityOverrides: modelcap.Values{SupportsThinking: modelcap.Bool(false)},
+	})
 	server := startGateway(t, ctx, s, fakeGatewaySecrets{"env:PROVIDER_KEY": "provider-secret"})
 	defer func() {
 		if err := server.Shutdown(ctx); err != nil {
@@ -58,7 +62,7 @@ func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 		t.Fatalf("gateway URL = %q, want loopback", server.URL())
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","max_tokens":20,"messages":[{"role":"user","content":"hello"}]}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","max_tokens":20,"thinking":{"type":"disabled"},"messages":[{"role":"user","content":"hello"}]}`))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
@@ -93,6 +97,50 @@ func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 	}
 	if gotModel != "gpt-5" || gotContent != "hello" {
 		t.Fatalf("provider received model=%q content=%q", gotModel, gotContent)
+	}
+}
+
+func TestGatewayRejectsLegacyLiteLLMControlModel(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	providerCalled := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providerCalled = true
+		http.Error(w, "control model must not reach provider", http.StatusInternalServerError)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL},
+		store.Model{Alias: "legacy-control", ProviderName: "litellm", ProviderModel: "all-proxy-models", Status: "degraded"},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages",
+		strings.NewReader(`{"model":"legacy-control","max_tokens":20,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "control model") {
+		t.Fatalf("gateway response = status %d body %s", resp.StatusCode, raw)
+	}
+	if providerCalled {
+		t.Fatal("legacy LiteLLM control model reached provider")
 	}
 }
 
@@ -609,6 +657,96 @@ func TestGatewayRejectsToolsForChatOnlyAliasWithoutProviderCall(t *testing.T) {
 	}
 }
 
+func TestGatewayEnforcesExplicitModelCapabilityRestrictions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		overrides  modelcap.Values
+		body       string
+		wantStatus int
+	}{
+		{
+			name: "tools", overrides: modelcap.Values{SupportsTools: modelcap.Bool(false)},
+			body:       `{"model":"gpt","tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+		{
+			name: "explicit parallel tools", overrides: modelcap.Values{SupportsParallelTools: modelcap.Bool(false)},
+			body:       `{"model":"gpt","tools":[{"name":"bash","input_schema":{"type":"object"}}],"tool_choice":{"type":"auto","disable_parallel_tool_use":false},"messages":[{"role":"user","content":"hello"}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+		{
+			name: "thinking", overrides: modelcap.Values{SupportsThinking: modelcap.Bool(false)},
+			body:       `{"model":"gpt","thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hello"}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+		{
+			name: "reasoning effort", overrides: modelcap.Values{SupportsThinking: modelcap.Bool(false)},
+			body:       `{"model":"gpt","output_config":{"effort":"high"},"messages":[{"role":"user","content":"hello"}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+		{
+			name: "max output", overrides: modelcap.Values{MaxOutputTokens: modelcap.Int64(32)},
+			body:       `{"model":"gpt","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "vision", overrides: modelcap.Values{SupportsVision: modelcap.Bool(false)},
+			body:       `{"model":"gpt","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+		{
+			name: "OpenAI adapter vision gap", overrides: modelcap.Values{SupportsVision: modelcap.Bool(true)},
+			body:       `{"model":"gpt","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+		{
+			name: "system messages", overrides: modelcap.Values{SupportsSystemMessages: modelcap.Bool(false)},
+			body:       `{"model":"gpt","system":"instructions","messages":[{"role":"user","content":"hello"}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+		{
+			name: "system role messages", overrides: modelcap.Values{SupportsSystemMessages: modelcap.Bool(false)},
+			body:       `{"model":"gpt","messages":[{"role":"system","content":"instructions"},{"role":"user","content":"hello"}]}`,
+			wantStatus: http.StatusNotImplemented,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			called := false
+			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				http.Error(w, "should not be called", http.StatusInternalServerError)
+			}))
+			defer provider.Close()
+			model := store.Model{
+				Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded",
+				CapabilityOverrides: test.overrides,
+			}
+			s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL}, model)
+			server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+			defer func() { _ = server.Shutdown(ctx) }()
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(test.body))
+			if err != nil {
+				t.Fatalf("NewRequest() error = %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer local-token")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("gateway request error = %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != test.wantStatus {
+				t.Fatalf("gateway status = %d, want %d", resp.StatusCode, test.wantStatus)
+			}
+			if called {
+				t.Fatal("provider was called for unsupported model capability")
+			}
+		})
+	}
+}
+
 func TestGatewayTranslatesToolsForOpenAICompatibleProviders(t *testing.T) {
 	ctx := context.Background()
 	var gotToolName string
@@ -638,7 +776,10 @@ func TestGatewayTranslatesToolsForOpenAICompatibleProviders(t *testing.T) {
 	}))
 	defer provider.Close()
 
-	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{
+		Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded",
+		CapabilityOverrides: modelcap.Values{SupportsParallelTools: modelcap.Bool(false)},
+	})
 	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
 	defer func() {
 		if err := server.Shutdown(ctx); err != nil {
@@ -646,7 +787,7 @@ func TestGatewayTranslatesToolsForOpenAICompatibleProviders(t *testing.T) {
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","tools":[{"name":"bash","description":"run shell","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"bash","disable_parallel_tool_use":true},"messages":[{"role":"user","content":"hello"}]}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"gpt","tools":[{"name":"bash","description":"run shell","input_schema":{"type":"object"}}],"tool_choice":{"type":"tool","name":"bash"},"messages":[{"role":"user","content":"hello"}]}`))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
@@ -1067,6 +1208,9 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	if err := s.AddModel(ctx, store.Model{Alias: "sonnet", ProviderName: "litellm", ProviderModel: "third-party-sonnet", Status: "degraded"}); err != nil {
 		t.Fatalf("AddModel(sonnet) error = %v", err)
 	}
+	if err := s.AddModel(ctx, store.Model{Alias: "glm", ProviderName: "litellm", ProviderModel: "glm-5.2[1m]", Status: "degraded"}); err != nil {
+		t.Fatalf("AddModel(glm) error = %v", err)
+	}
 	if err := s.AddModel(ctx, store.Model{Alias: "blocked", ProviderName: "litellm", ProviderModel: "blocked-model", Status: "blocked"}); err != nil {
 		t.Fatalf("AddModel(blocked) error = %v", err)
 	}
@@ -1103,7 +1247,7 @@ func TestGatewayModelDiscoveryIncludesConfiguredAliases(t *testing.T) {
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"default", "sonnet", "opus", "haiku", "anthropic.ccr.gpt", "anthropic.ccr.claude-custom", "anthropic.ccr.s%6fnnet"} {
+	for _, want := range []string{"default", "sonnet", "opus", "haiku", "anthropic.ccr.gpt", "anthropic.ccr.claude-custom", "anthropic.ccr.s%6fnnet", "anthropic.ccr.glm[1m]"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}

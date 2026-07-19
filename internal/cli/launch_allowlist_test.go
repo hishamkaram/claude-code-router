@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 func TestLaunchExtendsExistingClaudeAvailableModelsForCCRAliases(t *testing.T) {
@@ -31,6 +34,21 @@ func TestLaunchExtendsExistingClaudeAvailableModelsForCCRAliases(t *testing.T) {
 	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "blocked", "--provider", "litellm", "--model", "blocked-model", "--compat", "blocked"); err != nil {
 		t.Fatalf("blocked model add error = %v", err)
 	}
+	legacyStore, err := store.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	if err := legacyStore.Migrate(context.Background()); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if err := legacyStore.AddModel(context.Background(), store.Model{
+		Alias: "legacy-control", ProviderName: "litellm", ProviderModel: "all-proxy-models", Status: "degraded",
+	}); err != nil {
+		t.Fatalf("AddModel(legacy-control) error = %v", err)
+	}
+	if err := legacyStore.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	if _, _, err := runCommandWithDeps(t, Dependencies{
@@ -47,6 +65,153 @@ func TestLaunchExtendsExistingClaudeAvailableModelsForCCRAliases(t *testing.T) {
 	}
 	if slices.Contains(payload.AvailableModels, "anthropic.ccr.blocked") {
 		t.Fatalf("availableModels includes blocked alias: %#v", payload.AvailableModels)
+	}
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.legacy-control") {
+		t.Fatalf("availableModels includes legacy LiteLLM control alias: %#v", payload.AvailableModels)
+	}
+}
+
+func TestLaunchUsesCapabilityAwareOneMillionClaudeModelID(t *testing.T) {
+	t.Parallel()
+	server := newModelsServer(t, []string{"glm-5.2[1m]"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "glm", "--provider", "litellm", "--model", "glm-5.2[1m]"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch", "--model", "glm"); err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	if got, ok := launcher.envValue("ANTHROPIC_CUSTOM_MODEL_OPTION"); !ok || got != "anthropic.ccr.glm[1m]" {
+		t.Fatalf("ANTHROPIC_CUSTOM_MODEL_OPTION = %q, present=%v", got, ok)
+	}
+	payload := launchSettingsPayload(t, launcher)
+	if !slices.Contains(payload.AvailableModels, "anthropic.ccr.glm[1m]") ||
+		slices.Contains(payload.AvailableModels, "anthropic.ccr.glm") {
+		t.Fatalf("availableModels = %#v", payload.AvailableModels)
+	}
+}
+
+func TestLaunchExcludesModelsWithoutStreamingSupport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	server := newModelsServer(t, []string{"stream-model", "non-stream-model"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	for _, model := range []struct {
+		alias     string
+		provider  string
+		streaming string
+	}{
+		{alias: "stream", provider: "stream-model", streaming: "true"},
+		{alias: "non-stream", provider: "non-stream-model", streaming: "false"},
+	} {
+		if _, _, err := runCommand(t, "--db", dbPath, "model", "add", model.alias, "--provider", "litellm", "--model", model.provider); err != nil {
+			t.Fatalf("model add %q error = %v", model.alias, err)
+		}
+		if _, _, err := runCommand(t, "--db", dbPath, "model", "update", model.alias, "--streaming", model.streaming); err != nil {
+			t.Fatalf("model update %q error = %v", model.alias, err)
+		}
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch"); err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	payload := launchSettingsPayload(t, launcher)
+	if !slices.Contains(payload.AvailableModels, "anthropic.ccr.stream") {
+		t.Fatalf("availableModels = %#v, want streaming alias", payload.AvailableModels)
+	}
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.non-stream") {
+		t.Fatalf("availableModels includes non-streaming alias: %#v", payload.AvailableModels)
+	}
+}
+
+func TestLaunchRejectsExplicitNonStreamingStartupModel(t *testing.T) {
+	server := newModelsServer(t, []string{"non-stream-model"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "non-stream", "--provider", "litellm", "--model", "non-stream-model"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "update", "non-stream", "--streaming", "false"); err != nil {
+		t.Fatalf("model update error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch", "--model", "non-stream")
+	if err == nil || !strings.Contains(err.Error(), "do not support streaming") || !strings.Contains(err.Error(), "excluded from /model") {
+		t.Fatalf("launch error = %v", err)
+	}
+	if launcher.starts != 0 {
+		t.Fatalf("launcher starts = %d, want 0", launcher.starts)
+	}
+}
+
+func TestLaunchExcludesModelsWithoutSystemMessageSupport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	server := newModelsServer(t, []string{"system-model", "no-system-model"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	for _, model := range []struct {
+		alias          string
+		provider       string
+		systemMessages string
+	}{
+		{alias: "system", provider: "system-model", systemMessages: "true"},
+		{alias: "no-system", provider: "no-system-model", systemMessages: "false"},
+	} {
+		if _, _, err := runCommand(t, "--db", dbPath, "model", "add", model.alias, "--provider", "litellm", "--model", model.provider); err != nil {
+			t.Fatalf("model add %q error = %v", model.alias, err)
+		}
+		if _, _, err := runCommand(t, "--db", dbPath, "model", "update", model.alias, "--system-messages", model.systemMessages); err != nil {
+			t.Fatalf("model update %q error = %v", model.alias, err)
+		}
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch"); err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	payload := launchSettingsPayload(t, launcher)
+	if !slices.Contains(payload.AvailableModels, "anthropic.ccr.system") {
+		t.Fatalf("availableModels = %#v, want system-message alias", payload.AvailableModels)
+	}
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.no-system") {
+		t.Fatalf("availableModels includes alias without system-message support: %#v", payload.AvailableModels)
+	}
+}
+
+func TestLaunchRejectsExplicitModelWithoutSystemMessageSupport(t *testing.T) {
+	server := newModelsServer(t, []string{"no-system-model"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "no-system", "--provider", "litellm", "--model", "no-system-model"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "update", "no-system", "--system-messages", "false"); err != nil {
+		t.Fatalf("model update error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch", "--model", "no-system")
+	if err == nil || !strings.Contains(err.Error(), "do not support system messages") || !strings.Contains(err.Error(), "excluded from /model") {
+		t.Fatalf("launch error = %v", err)
+	}
+	if launcher.starts != 0 {
+		t.Fatalf("launcher starts = %d, want 0", launcher.starts)
 	}
 }
 
