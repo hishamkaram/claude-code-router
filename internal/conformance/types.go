@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
@@ -25,10 +26,13 @@ type Config struct {
 }
 
 type Check struct {
-	Name     string
-	Status   string
-	Latency  time.Duration
-	Evidence string
+	Name               string
+	Status             string
+	Latency            time.Duration
+	Evidence           string
+	FailureKind        string
+	HTTPStatus         int
+	ProviderHTTPStatus int
 }
 
 type Result struct {
@@ -43,7 +47,8 @@ type Result struct {
 }
 
 type target struct {
-	model        store.Model
-	provider     store.Provider
-	capabilities providers.Capabilities
+	model             store.Model
+	provider          store.Provider
+	capabilities      providers.Capabilities
+	modelCapabilities modelcap.Values
 }

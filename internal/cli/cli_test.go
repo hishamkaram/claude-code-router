@@ -795,10 +795,14 @@ func runCommandWithDeps(t *testing.T, deps Dependencies, args ...string) (string
 func newModelsServer(t *testing.T, models []string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/models" {
-			t.Fatalf("path = %q, want /v1/models", r.URL.Path)
-		}
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/model/info" {
+			_, _ = w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("path = %q, want /v1/models or /model/info", r.URL.Path)
+		}
 		parts := make([]string, 0, len(models))
 		for _, model := range models {
 			parts = append(parts, fmt.Sprintf(`{"id":%q}`, model))

@@ -70,11 +70,11 @@ func runLiveFixtureProtocol(t *testing.T, ctx context.Context, protocol string) 
 
 	input := liveStreamInput(
 		t,
-		"/model anthropic.ccr.fixture-full",
+		"/model anthropic.ccr.fixture-full[1m]",
 		"Reply with the configured alias fixture response.",
 		"/model sonnet",
 		"Reply exactly CCR_LIVE_ANTHROPIC.",
-		"/model anthropic.ccr.fixture-full",
+		"/model anthropic.ccr.fixture-full[1m]",
 		"Reply with the configured alias fixture response again.",
 	)
 	launchDeps := deps
@@ -187,6 +187,10 @@ func configureLiveMatrixModels(t *testing.T, ctx context.Context, deps Dependenc
 		commands := [][]string{
 			{"--db", dbPath, "provider", "add", entry.name, "--type", providerType, "--base-url", baseURL, "--no-api-key", "--mode", entry.mode},
 			{"--db", dbPath, "model", "add", entry.name, "--provider", entry.name, "--model", entry.name + "-model", "--compat", entry.mode},
+		}
+		if entry.name == "fixture-full" {
+			commands = append(commands,
+				[]string{"--db", dbPath, "model", "update", entry.name, "--context-window", "1000000"})
 		}
 		for _, args := range commands {
 			out, errOut, err := runLiveCommand(ctx, deps, args...)

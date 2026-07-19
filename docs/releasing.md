@@ -22,6 +22,7 @@ From a clean, synchronized `main` branch:
 make check
 make test-live-fixture
 CCR_LIVE_REAL_MATRIX=1 make test-live-real
+CCR_LIVE_REAL_MATRIX=1 make test-live-matrix
 go test -tags=live -count=1 -p 1 ./...
 goreleaser check
 goreleaser release --snapshot --clean
@@ -34,13 +35,13 @@ non-blocked alias in the selected database; set `CCR_LIVE_CONFIGURED_DB` when
 the release matrix is not in the default data directory. If a required live
 target skips or cannot run, do not claim that the routing change is verified.
 
-Pull-request CI also runs the fixture target through a four-job matrix:
-OpenAI-compatible and Anthropic-compatible protocols against pinned Claude Code
-2.1.209 and the current npm release. The workflow runs on pull requests, `main`,
-and a daily schedule.
+Pull-request CI also runs the fixture target through an eight-job matrix: Linux
+and macOS, OpenAI-compatible and Anthropic-compatible protocols, and pinned
+Claude Code 2.1.209 and the current npm release. The workflow runs on pull
+requests, `main`, and a daily schedule.
 
-For v0.2.0, record every gate in
-[`docs/acceptance/v0.2.0.md`](acceptance/v0.2.0.md). A checked item requires
+For v0.2.1, record every gate in
+[`docs/acceptance/v0.2.1.md`](acceptance/v0.2.1.md). A checked item requires
 reproducible PR evidence.
 
 Run the required review gate before committing the release-related change:
@@ -62,8 +63,8 @@ After `main` contains the approved release commit:
 ```bash
 git switch main
 git pull --ff-only origin main
-git tag -a v0.2.0 -m 'Release v0.2.0'
-git push origin v0.2.0
+git tag -a v0.2.1 -m 'Release v0.2.1'
+git push origin v0.2.1
 ```
 
 The tag workflow runs deterministic checks, creates macOS and Linux release

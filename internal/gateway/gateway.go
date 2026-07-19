@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
@@ -193,14 +194,16 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if route.kind == routeAnthropic {
-		passBody := body
-		if route.model.Alias != "" && route.model.ProviderModel != "" {
-			rewritten, err := rewriteAnthropicRequestModel(body, route.model.ProviderModel)
-			if err != nil {
-				writeAnthropicError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			passBody = rewritten
+		passBody, err := rewriteAnthropicMessageBody(
+			body,
+			route.model.ProviderModel,
+			len(req.Tools) > 0 &&
+				explicitlyFalse(route.modelCapabilities.SupportsParallelTools) &&
+				!explicitlyFalse(route.modelCapabilities.SupportsToolChoice),
+		)
+		if err != nil {
+			writeAnthropicError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
 		return
@@ -217,10 +220,12 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	openAIReq, err := toOpenAIChatRequest(req, openAIModelRoute{
-		alias:         route.model.Alias,
-		providerName:  route.provider.Name,
-		providerModel: route.model.ProviderModel,
-		requestModel:  route.responseModel,
+		alias:                         route.model.Alias,
+		providerName:                  route.provider.Name,
+		providerModel:                 route.model.ProviderModel,
+		requestModel:                  route.responseModel,
+		suppressIdentitySystemMessage: explicitlyFalse(route.modelCapabilities.SupportsSystemMessages),
+		forceDisableParallelTools:     explicitlyFalse(route.modelCapabilities.SupportsParallelTools),
 	})
 	if err != nil {
 		writeAnthropicError(w, http.StatusNotImplemented, err.Error())
@@ -358,14 +363,18 @@ type messageRoute struct {
 	anthropicProvider *store.Provider
 	anthropicAuth     anthropicAuthMode
 	capabilities      providers.Capabilities
+	modelCapabilities modelcap.Values
 	responseModel     string
 }
 
 func validateRouteMessageCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {
+	if validationErr := validateModelMessageCapabilities(route.model, route.modelCapabilities, req); validationErr != nil {
+		return validationErr
+	}
 	if req.Stream && !route.capabilities.SupportsStreaming {
 		return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("streaming is not supported for model %q with provider protocol %q", req.Model, route.capabilities.Protocol)}
 	}
-	if rawJSONPresent(req.Thinking) && !route.capabilities.SupportsThinking {
+	if requestUsesThinkingFeature(req) && !route.capabilities.SupportsThinking {
 		return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("thinking is not supported for model %q with provider protocol %q", req.Model, route.capabilities.Protocol)}
 	}
 	if !anthropicRequestUsesTools(req) {
@@ -446,13 +455,26 @@ func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel
 	if providerErr != nil {
 		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("provider %q for model alias %q is not configured", model.ProviderName, alias)}
 	}
+	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+		return messageRoute{}, &requestValidationError{
+			status:  http.StatusBadRequest,
+			message: fmt.Sprintf("model alias %q targets LiteLLM control model %q and cannot be routed", alias, model.ProviderModel),
+		}
+	}
+	effectiveModel, capabilityErr := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if capabilityErr != nil {
+		return messageRoute{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("computing capabilities for model alias %q: %v", alias, capabilityErr)}
+	}
+	if !modelcap.IsRoutableKind(effectiveModel.Values.Kind) {
+		return messageRoute{}, unsupportedModelCapability(model, "kind "+effectiveModel.Values.Kind)
+	}
 	caps := effectiveProviderCapabilities(provider)
 	if caps.Protocol == providers.ProtocolOpenAICompatible {
-		return messageRoute{kind: routeOpenAI, model: model, provider: provider, capabilities: caps, responseModel: responseModel}, nil
+		return messageRoute{kind: routeOpenAI, model: model, provider: provider, capabilities: caps, modelCapabilities: modelCapabilitiesForRoute(caps, effectiveModel.Values), responseModel: responseModel}, nil
 	}
 	if caps.Protocol == providers.ProtocolAnthropicCompatible {
 		rewrittenProvider := provider
-		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, responseModel: responseModel}, nil
+		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, modelCapabilities: effectiveModel.Values, responseModel: responseModel}, nil
 	}
 	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q with protocol %q is not supported by the gateway path", provider.Type, caps.Protocol)}
 }

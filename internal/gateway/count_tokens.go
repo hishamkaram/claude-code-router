@@ -44,6 +44,10 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.observeRoute(r.Context(), span, route)
+	if capabilityErr := validateModelMessageCapabilities(route.model, route.modelCapabilities, req); capabilityErr != nil {
+		writeAnthropicError(w, capabilityErr.status, capabilityErr.message)
+		return
+	}
 	if route.kind == routeAnthropic {
 		usage = h.handleAnthropicCountTokens(w, r, route, body)
 		return

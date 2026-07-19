@@ -2,8 +2,10 @@
 
 A provider is a connection definition. A model alias is the stable name used by
 `ccr launch --model <alias>` and the matching `/model` picker row. Picker model
-IDs use `anthropic.ccr.<alias>`. In gateway-token sessions, authenticated
-discovery can additionally supply the friendly `CCR <alias>` display name.
+IDs use `anthropic.ccr.<alias>`. An effective context window of at least one
+million tokens adds the terminal `[1m]` marker. In gateway-token sessions,
+authenticated discovery can additionally supply the friendly `CCR <alias>`
+display name.
 
 Keeping providers and aliases separate lets you change a provider model without
 changing workflows that use the alias.
@@ -106,6 +108,41 @@ ccr provider import-models openrouter --all
 `--all` imports every discovered model with generated aliases and skips aliases
 that already exist.
 
+CCR keeps only normalized capability fields from provider discovery. Standard
+OpenAI-compatible `/v1/models` metadata is used where present; LiteLLM can add
+safe `/model/info` fields. Provider implementation settings and raw response
+bodies are not stored. Virtual control rows such as `all-proxy-models` and rows
+explicitly identified as non-chat models are not importable or routable.
+
+Refresh and inspect registered aliases with:
+
+```bash
+ccr model refresh code-review
+ccr model refresh --all
+ccr model show code-review
+ccr model show code-review --json
+```
+
+A failed or partial refresh preserves the last complete facts. Explicit model
+overrides take precedence over discovered values, which take precedence over a
+recognized provider-model hint such as a terminal `[1m]` suffix. Unknown is
+distinct from `false`; missing metadata does not invent a limitation.
+
+Use `model update` when the provider cannot report a capability accurately:
+
+```bash
+ccr model update code-review --context-window 1000000
+ccr model update code-review --tools false --streaming true
+ccr model update code-review --tools auto
+ccr model update code-review --clear-capabilities
+```
+
+Boolean overrides accept `true`, `false`, or `auto`. `auto` clears that one
+override. CCR also supports normalized input/output limits, modalities, tool
+choice and parallel tools, thinking, prompt caching, system messages, vision,
+PDF and audio input, audio output, and response-schema support. Run
+`ccr model update --help` for the exact flags.
+
 ## Manual Model Entry
 
 Profiles without OpenAI-compatible discovery validate config and credential
@@ -150,12 +187,21 @@ Provider capabilities also gate tools, streaming, thinking, model discovery, and
 token counting. CCR reports safe degradation and rejects unsafe translations; it
 does not silently change providers.
 
+Model capabilities refine that provider-level contract. In gateway-token
+sessions, CCR's authenticated `/v1/models` response exposes known standardized
+input/output limits and image, PDF, structured-output, and thinking support.
+Picker IDs also carry Claude Code's terminal `[1m]` context marker when
+applicable. CCR still enforces every effective restriction at its gateway before
+a provider request is sent, regardless of which metadata the installed Claude
+Code version consumes.
+
 ## Conformance and Diagnostics
 
 Run the protocol matrix through CCR's production gateway path:
 
 ```bash
 ccr conformance run code-review
+ccr conformance run --all
 ccr conformance run code-review --claude --include-anthropic
 ccr conformance list code-review --json
 ```
@@ -172,15 +218,20 @@ tool-compatible alias and back in one launch. Tool-disabled aliases are checked
 in explicit launches because Claude cannot safely change tool availability in
 the middle of a session.
 
-`ccr doctor` is offline by default. Use `ccr doctor --live` to probe one alias
-per provider or `ccr doctor --live --all` to probe every non-blocked alias.
+`ccr conformance run --all` runs every non-blocked alias with bounded provider
+concurrency, continues after individual failures, and returns nonzero when any
+required alias fails. `ccr doctor` is offline by default. Use `ccr doctor
+--live` to probe one alias per provider or `ccr doctor --live --all` to probe
+every non-blocked alias. Live Doctor failures identify the failed check, safe
+HTTP status details, bounded evidence, and a command to run next.
 
 ## Team Profiles
 
-`ccr profile export` creates deterministic provider and model configuration for
-review or team distribution. It excludes raw credentials, keychain identifiers,
-and key-file paths. On import, bind each required provider to an environment
-variable on the destination machine:
+`ccr profile export` creates deterministic provider and model configuration,
+including normalized discovered capabilities and explicit overrides, for review
+or team distribution. It excludes raw credentials, keychain identifiers, and
+key-file paths. On import, bind each required provider to an environment variable
+on the destination machine:
 
 ```bash
 ccr profile import team.json --dry-run

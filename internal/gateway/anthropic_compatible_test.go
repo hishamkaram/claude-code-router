@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -34,7 +36,10 @@ func TestGatewayRoutesZAIAnthropicCompatibleProvider(t *testing.T) {
 	}))
 	defer zai.Close()
 
-	s := newGatewayStore(t, store.Provider{Name: "zai", Type: "zai", BaseURL: zai.URL, SecretRef: "env:ZAI_API_KEY"}, store.Model{Alias: "glm", ProviderName: "zai", ProviderModel: "glm-4.7", Status: "full"})
+	s := newGatewayStore(t, store.Provider{Name: "zai", Type: "zai", BaseURL: zai.URL, SecretRef: "env:ZAI_API_KEY"}, store.Model{
+		Alias: "glm", ProviderName: "zai", ProviderModel: "glm-4.7", Status: "full",
+		CapabilityOverrides: modelcap.Values{SupportsParallelTools: modelcap.Bool(false)},
+	})
 	server := startGateway(t, ctx, s, fakeGatewaySecrets{"env:ZAI_API_KEY": "zai-secret"})
 	defer func() {
 		if err := server.Shutdown(ctx); err != nil {
@@ -74,6 +79,69 @@ func TestGatewayRoutesZAIAnthropicCompatibleProvider(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, `"model":"glm-4.7"`) || !strings.Contains(gotBody, `"future_field"`) {
 		t.Fatalf("Z.AI body = %s", gotBody)
+	}
+	var forwarded struct {
+		ToolChoice struct {
+			Type            string `json:"type"`
+			DisableParallel bool   `json:"disable_parallel_tool_use"`
+		} `json:"tool_choice"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &forwarded); err != nil {
+		t.Fatalf("decoding Z.AI body: %v", err)
+	}
+	if forwarded.ToolChoice.Type != "auto" || !forwarded.ToolChoice.DisableParallel {
+		t.Fatalf("Z.AI tool choice = %#v, want serial auto mode", forwarded.ToolChoice)
+	}
+}
+
+func TestGatewayDoesNotInjectUnsupportedAnthropicToolChoice(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var gotBody []byte
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		gotBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("reading provider body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","model":"glm-4.7","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "zai", Type: "zai", BaseURL: provider.URL},
+		store.Model{
+			Alias: "glm", ProviderName: "zai", ProviderModel: "glm-4.7", Status: "full",
+			CapabilityOverrides: modelcap.Values{
+				SupportsToolChoice:    modelcap.Bool(false),
+				SupportsParallelTools: modelcap.Bool(false),
+			},
+		},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"glm","tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("gateway response = HTTP %d %s", resp.StatusCode, raw)
+	}
+	var forwarded map[string]json.RawMessage
+	if err := json.Unmarshal(gotBody, &forwarded); err != nil {
+		t.Fatalf("decoding provider body: %v", err)
+	}
+	if _, exists := forwarded["tool_choice"]; exists {
+		t.Fatalf("provider body contains unsupported tool_choice: %s", gotBody)
 	}
 }
 

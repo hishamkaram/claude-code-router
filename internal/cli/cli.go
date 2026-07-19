@@ -416,6 +416,8 @@ Examples:
 	cmd.AddCommand(
 		newModelAddCommand(ctx, opts),
 		newModelListCommand(ctx, opts),
+		newModelShowCommand(ctx, opts),
+		newModelRefreshCommand(ctx, opts, deps),
 		newModelUpdateCommand(ctx, opts, deps),
 		newModelTestCommand(ctx, opts, deps),
 		newModelRemoveCommand(ctx, opts, deps),
@@ -441,7 +443,8 @@ func newModelAddCommand(ctx context.Context, opts *options) *cobra.Command {
 			if err := validateName("provider", providerName); err != nil {
 				return err
 			}
-			if strings.TrimSpace(providerModel) == "" {
+			providerModel = strings.TrimSpace(providerModel)
+			if providerModel == "" {
 				return fmt.Errorf("--model is required")
 			}
 			if err := validateCompatibilityStatus(status); err != nil {
@@ -452,8 +455,12 @@ func newModelAddCommand(ctx context.Context, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(s)
-			if _, err := s.GetProvider(ctx, providerName); err != nil {
+			provider, err := s.GetProvider(ctx, providerName)
+			if err != nil {
 				return err
+			}
+			if providers.IsProviderControlModel(provider.Type, providerModel) {
+				return fmt.Errorf("provider model %q is a LiteLLM control model and cannot be routed", providerModel)
 			}
 			if err := s.AddModel(ctx, store.Model{Alias: alias, ProviderName: providerName, ProviderModel: providerModel, Status: status}); err != nil {
 				return err
@@ -488,7 +495,8 @@ func newModelListCommand(ctx context.Context, opts *options) *cobra.Command {
 				fmt.Fprintln(cmd.OutOrStdout(), "No model aliases configured.")
 				return nil
 			}
-			for _, model := range models {
+			for index := range models {
+				model := &models[index]
 				fmt.Fprintf(cmd.OutOrStdout(), "%s\tprovider=%s\tmodel=%s\tcompat=%s\n", model.Alias, model.ProviderName, model.ProviderModel, model.Status)
 			}
 			return nil

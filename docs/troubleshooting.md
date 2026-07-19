@@ -34,6 +34,7 @@ Use bounded live diagnostics when configuration checks pass but routing fails:
 ccr doctor --live
 ccr doctor --live --all
 ccr conformance run <alias>
+ccr conformance run --all
 ```
 
 ## The Desired Model Is Missing from `/model`
@@ -54,6 +55,12 @@ tools-enabled session to the visual picker. It also prints their model IDs:
 /model anthropic.ccr.<alias>
 ```
 
+An alias with a one-million-token effective context window is printed as:
+
+```text
+/model anthropic.ccr.<alias>[1m]
+```
+
 You can switch back to `opus`, `sonnet`, or another subscription model in the
 same session. If an alias is absent, check that it is not `blocked`, that its
 provider still exists, and that the provider protocol is Anthropic-compatible
@@ -71,6 +78,34 @@ do not use it when first-party subscription routes must remain available.
 This includes current Claude Code auto-mode safety classification for some
 Agent and Workflow actions. Use `--auth-mode preserve`; CCR does not reroute or
 bypass a safety classifier that cannot reach its required Anthropic model.
+
+## The Picker Shows the Wrong Context Window
+
+Inspect the effective value and where it came from:
+
+```bash
+ccr model show <alias> --json
+ccr model refresh <alias>
+```
+
+If discovery is unavailable or incorrect, set a reviewed local override:
+
+```bash
+ccr model update <alias> --context-window 1000000
+```
+
+Relaunch Claude Code after changing capabilities because the picker allowlist is
+created once per launch. Context below one million tokens intentionally has no
+`[1m]` suffix. Use `--context-window 0` to clear the override.
+
+## Doctor Reports a Live Failure
+
+Doctor now prints the failed check, failure kind, safe gateway/provider HTTP
+statuses, and an `action:` command. A provider control row such as
+`all-proxy-models` is not a chat model; remove the alias using the exact command
+Doctor prints. Authentication and provider HTTP failures point to
+`ccr provider test <provider>`, while missing models point to fresh discovery.
+Provider response bodies and credentials are never included in the diagnosis.
 
 ## CCR Starts on an Unexpected Model
 

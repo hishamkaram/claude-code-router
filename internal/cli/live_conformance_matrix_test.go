@@ -174,6 +174,18 @@ func runLiveClaudeConformanceProtocol(t *testing.T, ctx context.Context, protoco
 			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
 		}
 	}
+	allOut, allErrOut, allErr := runLiveCommand(ctx, deps,
+		"--db", dbPath, "conformance", "run", "--all", "--json")
+	if allErr != nil {
+		t.Fatalf("all-model conformance error = %v\nstdout:\n%s\nstderr:\n%s", allErr, allOut, allErrOut)
+	}
+	var aggregate conformanceAllDocument
+	if err := json.Unmarshal([]byte(allOut), &aggregate); err != nil {
+		t.Fatalf("all-model conformance JSON error = %v\n%s", err, allOut)
+	}
+	if aggregate.SchemaVersion != 1 || aggregate.Status != "passed" || aggregate.Total != 2 || aggregate.Passed != 2 {
+		t.Fatalf("all-model conformance document = %#v", aggregate)
+	}
 	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "conformance", "run",
 		"fixture-sonnet", "--claude", "--include-anthropic", "--json")
 	if err != nil {

@@ -64,13 +64,100 @@ func TestConformanceCommandPersistsChecksAndEmitsVersionedJSON(t *testing.T) {
 	}
 }
 
+func TestConformanceRunAllContinuesFailuresAndEmitsAggregateJSON(t *testing.T) {
+	t.Parallel()
+	server := newCLIConformanceOpenAIServer(t, "model-a")
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "fixture",
+		"--type", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	models := []struct {
+		alias, providerModel, status string
+	}{
+		{alias: "alpha", providerModel: "model-a"},
+		{alias: "beta", providerModel: "model-b"},
+		{alias: "blocked", providerModel: "model-c", status: "blocked"},
+	}
+	for _, model := range models {
+		args := []string{"--db", dbPath, "model", "add", model.alias, "--provider", "fixture", "--model", model.providerModel}
+		if model.status != "" {
+			args = append(args, "--compat", model.status)
+		}
+		if _, _, err := runCommand(t, args...); err != nil {
+			t.Fatalf("model add error = %v", err)
+		}
+	}
+	out, errOut, err := runCommand(t, "--db", dbPath, "conformance", "run", "--all", "--json")
+	if err == nil || !strings.Contains(err.Error(), "failed for 1 of 3 aliases") {
+		t.Fatalf("conformance --all error = %v\nstdout=%s\nstderr=%s", err, out, errOut)
+	}
+	var document conformanceAllDocument
+	if decodeErr := json.Unmarshal([]byte(out), &document); decodeErr != nil {
+		t.Fatalf("aggregate JSON error = %v\n%s", decodeErr, out)
+	}
+	if document.SchemaVersion != 1 || document.Status != "failed" || document.Total != 3 ||
+		document.Passed != 1 || document.Failed != 1 || document.Skipped != 1 || len(document.Results) != 3 {
+		t.Fatalf("aggregate document = %#v", document)
+	}
+	if document.Results[0].Alias != "alpha" || document.Results[0].Status != "passed" ||
+		document.Results[1].Alias != "beta" || document.Results[1].Status != "failed" ||
+		document.Results[2].Alias != "blocked" || document.Results[2].Status != "skipped" {
+		t.Fatalf("aggregate results = %#v", document.Results)
+	}
+	if !strings.Contains(errOut, "alias=alpha") || !strings.Contains(errOut, "alias=beta") {
+		t.Fatalf("aggregate diagnostics = %s", errOut)
+	}
+}
+
+func TestConformanceRunAllStrictlyValidatesScopeBeforeDatabaseOpen(t *testing.T) {
+	t.Parallel()
+	missingDB := filepath.Join(t.TempDir(), "missing", "ccr.db")
+	_, _, err := runCommand(t, "--db", missingDB, "conformance", "run", "alpha", "--all")
+	if err == nil || !strings.Contains(err.Error(), "either one alias or --all") {
+		t.Fatalf("alias plus --all error = %v", err)
+	}
+	_, _, err = runCommand(t, "--db", missingDB, "conformance", "run")
+	if err == nil || !strings.Contains(err.Error(), "use ccr conformance run <alias> or ccr conformance run --all") {
+		t.Fatalf("missing scope error = %v", err)
+	}
+}
+
+func TestConformanceRunAllFailsWhenNothingIsRunnable(t *testing.T) {
+	t.Parallel()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	out, _, err := runCommand(t, "--db", dbPath, "conformance", "run", "--all", "--json")
+	if err == nil || !strings.Contains(err.Error(), "no runnable non-blocked model aliases") {
+		t.Fatalf("empty conformance error = %v", err)
+	}
+	var document conformanceAllDocument
+	if decodeErr := json.Unmarshal([]byte(out), &document); decodeErr != nil {
+		t.Fatalf("empty conformance JSON error = %v\n%s", decodeErr, out)
+	}
+	if document.Status != "failed" || document.Total != 0 || len(document.Results) != 0 {
+		t.Fatalf("empty conformance document = %#v", document)
+	}
+}
+
 func newCLIConformanceOpenAIServer(t *testing.T, model string) *httptest.Server {
+	t.Helper()
+	return newCLIConformanceOpenAIModelsServer(t, []string{model})
+}
+
+func newCLIConformanceOpenAIModelsServer(t *testing.T, models []string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w, `{"data":[{"id":%q}]}`, model)
+			entries := make([]string, 0, len(models))
+			for _, model := range models {
+				entries = append(entries, fmt.Sprintf(`{"id":%q}`, model))
+			}
+			_, _ = fmt.Fprintf(w, `{"data":[%s]}`, strings.Join(entries, ","))
+		case "/model/info":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"data":[]}`)
 		case "/v1/messages/count_tokens":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"input_tokens":9}`)

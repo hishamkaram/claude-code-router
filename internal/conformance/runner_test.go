@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -88,6 +89,50 @@ func TestRunProviderFailsDeclaredCapabilityWithoutChangingCompatibility(t *testi
 	model, err := s.GetModel(context.Background(), "coder")
 	if err != nil || model.Status != "degraded" {
 		t.Fatalf("GetModel() = %#v, %v", model, err)
+	}
+}
+
+func TestRunProviderSkipsForcedToolWhenToolChoiceIsUnsupported(t *testing.T) {
+	t.Parallel()
+	provider := newOpenAIConformanceFixture(t, false)
+	s := conformanceStore(t, store.Provider{
+		Name: "fixture", Type: "litellm", BaseURL: provider.URL,
+	}, store.Model{
+		Alias: "coder", ProviderName: "fixture", ProviderModel: "model-v1", Status: "degraded",
+		CapabilityOverrides: modelcap.Values{SupportsToolChoice: modelcap.Bool(false)},
+	})
+	result, err := RunProvider(context.Background(), Config{Store: s, Alias: "coder", Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("RunProvider() error = %v", err)
+	}
+	if result.Status != StatusPassed {
+		t.Fatalf("result = %#v", result)
+	}
+	forcedTool := findCheck(t, result.Checks, "forced_tool")
+	if forcedTool.Status != StatusNotApplicable {
+		t.Fatalf("forced_tool check = %#v", forcedTool)
+	}
+}
+
+func TestRunProviderDisablesParallelCallsForForcedToolProbe(t *testing.T) {
+	t.Parallel()
+	provider := newOpenAIConformanceFixture(t, false)
+	s := conformanceStore(t, store.Provider{
+		Name: "fixture", Type: "litellm", BaseURL: provider.URL,
+	}, store.Model{
+		Alias: "coder", ProviderName: "fixture", ProviderModel: "model-v1", Status: "degraded",
+		CapabilityOverrides: modelcap.Values{SupportsParallelTools: modelcap.Bool(false)},
+	})
+	result, err := RunProvider(context.Background(), Config{Store: s, Alias: "coder", Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("RunProvider() error = %v", err)
+	}
+	if result.Status != StatusPassed {
+		t.Fatalf("result = %#v", result)
+	}
+	forcedTool := findCheck(t, result.Checks, "forced_tool")
+	if forcedTool.Status != StatusPassed {
+		t.Fatalf("forced_tool check = %#v", forcedTool)
 	}
 }
 

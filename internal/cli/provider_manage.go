@@ -94,11 +94,21 @@ func runProviderUpdate(ctx context.Context, cmd *cobra.Command, opts *options, d
 			return fmt.Errorf("storing API key for provider %q: %w", name, err)
 		}
 	}
-	if err := s.UpdateProvider(ctx, updated); err != nil {
-		return err
+	updateResult, updateErr := s.UpdateProvider(ctx, updated)
+	if updateErr != nil {
+		return updateErr
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, protocol=%s, mode=%s, token-count=%s, %s, secret=%s)\n", name, updated.Type, updated.Protocol, updated.Mode, providerTokenCountMode(updated), updated.BaseURL, secret.RedactRef(updated.SecretRef))
+	writeProviderCapabilityInvalidation(cmd, updateResult)
 	return nil
+}
+
+func writeProviderCapabilityInvalidation(cmd *cobra.Command, result store.ProviderUpdateResult) {
+	if result.CapabilitySnapshotsInvalidated == 0 {
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Cleared discovered capabilities for %d model alias(es) because the provider source changed.\n", result.CapabilitySnapshotsInvalidated)
+	fmt.Fprintln(cmd.OutOrStdout(), "Next: ccr model refresh --all")
 }
 
 type providerUpdateChanges struct {
@@ -303,10 +313,12 @@ func runProviderUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts 
 			return fmt.Errorf("storing API key for provider %q: %w", name, err)
 		}
 	}
-	if err := s.UpdateProvider(ctx, updated); err != nil {
-		return err
+	updateResult, updateErr := s.UpdateProvider(ctx, updated)
+	if updateErr != nil {
+		return updateErr
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q updated (%s, protocol=%s, mode=%s, %s, secret=%s)\n", name, updated.Type, updated.Protocol, updated.Mode, updated.BaseURL, secret.RedactRef(updated.SecretRef))
+	writeProviderCapabilityInvalidation(cmd, updateResult)
 	return nil
 }
 
@@ -332,11 +344,12 @@ func runProviderTest(ctx context.Context, cmd *cobra.Command, opts *options, dep
 		return nil
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Checking %s/v1/models-compatible endpoint.\n", strings.TrimRight(provider.BaseURL, "/"))
-	models, err := discoverProviderModelsWithPlan(ctx, deps, provider, secretPlan{ref: provider.SecretRef, value: apiKey})
+	discovery, err := discoverProviderModelsWithPlan(ctx, deps, provider, secretPlan{ref: provider.SecretRef, value: apiKey})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q test passed; discovered %d models.\n", provider.Name, len(models))
+	writeDiscoveryDiagnostics(cmd.OutOrStdout(), discovery)
+	fmt.Fprintf(cmd.OutOrStdout(), "Provider %q test passed; discovered %d routable models.\n", provider.Name, len(discovery.RoutableModels()))
 	return nil
 }
 

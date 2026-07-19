@@ -71,9 +71,10 @@ ccr launch
 `ccr launch` keeps Claude Code's normal startup model, preserves subscription
 authentication, and adds safe registered aliases to the `/model` picker beside
 the permitted Anthropic models. CCR also prints each picker ID, such as
-`/model anthropic.ccr.<alias>`, for scripted selection. To start directly on one
-alias, including a `chat-only` alias that disables tools for the launch, pass it
-explicitly:
+`/model anthropic.ccr.<alias>`, for scripted selection. Models with an effective
+context window of at least one million tokens are advertised with Claude Code's
+terminal `[1m]` marker. To start directly on one alias, including a `chat-only`
+alias that disables tools for the launch, pass it explicitly:
 
 ```bash
 ccr launch --model <alias> --chrome
@@ -138,8 +139,11 @@ Workflow actions. CCR surfaces classifier denial instead of bypassing it.
 ```bash
 ccr provider list                 # show configured providers
 ccr model list                    # show model aliases
+ccr model refresh --all           # refresh discoverable model capabilities
+ccr model show <alias> --json     # inspect sources, overrides, and effective values
 ccr model test <alias>            # validate a route against its provider
 ccr conformance run <alias>       # record compatibility checks
+ccr conformance run --all         # check every registered non-blocked alias
 ccr launch                        # preserve subscription; expose aliases in /model
 ccr launch --model <alias>        # start directly on one CCR alias
 ccr status                        # show the latest observed route and health
@@ -147,6 +151,7 @@ ccr trace --follow                # follow redacted route and lifecycle events
 ccr sessions --active             # list active launches and Claude sessions
 ccr agents --active               # list active agents, teammates, and tasks
 ccr doctor --live                 # probe one model per configured provider
+ccr doctor --live --all           # diagnose every registered non-blocked alias
 ccr profile export team.json      # export routing config without credentials
 ```
 
@@ -203,14 +208,16 @@ make test
 make check
 make test-live-fixture
 CCR_LIVE_REAL_MATRIX=1 make test-live-real
+CCR_LIVE_REAL_MATRIX=1 make test-live-matrix
 ```
 
 The required fixture target needs an installed Claude Code CLI but no provider
-credential. CI runs it without skips through OpenAI-compatible and
-Anthropic-compatible fixtures against pinned Claude Code 2.1.209 and the latest
-npm release. The real target uses first-party Anthropic authentication and every
-configured non-blocked alias in the selected database. A skipped live test is
-not equivalent to a verified runtime route.
+credential. CI runs it without skips on Linux and macOS through OpenAI-compatible
+and Anthropic-compatible fixtures against pinned Claude Code 2.1.209 and the
+latest npm release. The real target uses first-party Anthropic authentication
+and every configured non-blocked alias in the selected database.
+`test-live-matrix` runs both fixture and real targets locally. A skipped live
+test is not equivalent to a verified runtime route.
 
 ## Contributing and Security
 

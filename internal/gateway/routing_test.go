@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -175,6 +176,28 @@ func TestGatewayModelDiscoveryIncludesFirstPartyWithoutNativeShim(t *testing.T) 
 	defer anthropic.Close()
 
 	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	if err := s.AddModel(ctx, store.Model{
+		Alias: "embed", ProviderName: "litellm", ProviderModel: "embedding-model", Status: "degraded",
+		CapabilityOverrides: modelcap.Values{Kind: modelcap.KindEmbedding},
+	}); err != nil {
+		t.Fatalf("AddModel(embed) error = %v", err)
+	}
+	if err := s.AddModel(ctx, store.Model{
+		Alias: "legacy-control", ProviderName: "litellm", ProviderModel: "all-proxy-models", Status: "degraded",
+	}); err != nil {
+		t.Fatalf("AddModel(legacy-control) error = %v", err)
+	}
+	if err := s.AddModel(ctx, store.Model{
+		Alias: "capable", ProviderName: "litellm", ProviderModel: "capable-model", Status: "full",
+		CapabilityOverrides: modelcap.Values{
+			ContextWindowTokens: modelcap.Int64(1_000_000), MaxInputTokens: modelcap.Int64(900_000),
+			MaxOutputTokens: modelcap.Int64(64_000), SupportsVision: modelcap.Bool(true),
+			SupportsPDFInput: modelcap.Bool(false), SupportsResponseSchema: modelcap.Bool(true),
+			SupportsThinking: modelcap.Bool(true),
+		},
+	}); err != nil {
+		t.Fatalf("AddModel(capable) error = %v", err)
+	}
 	if err := s.AddProvider(ctx, store.Provider{Name: "anthropic", Type: "anthropic", BaseURL: anthropic.URL, SecretRef: ""}); err != nil {
 		t.Fatalf("AddProvider(anthropic) error = %v", err)
 	}
@@ -200,10 +223,7 @@ func TestGatewayModelDiscoveryIncludesFirstPartyWithoutNativeShim(t *testing.T) 
 		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
 	}
 	var decoded struct {
-		Data []struct {
-			ID          string `json:"id"`
-			DisplayName string `json:"display_name"`
-		} `json:"data"`
+		Data []gatewayModelEntry `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		t.Fatalf("gateway model decode error = %v", err)
@@ -212,10 +232,32 @@ func TestGatewayModelDiscoveryIncludesFirstPartyWithoutNativeShim(t *testing.T) 
 	for _, item := range decoded.Data {
 		ids = append(ids, item.ID)
 	}
-	for _, want := range []string{"default", "sonnet", "opus", "haiku", "opusplan", "opusplan[1m]", "anthropic.ccr.gpt"} {
+	for _, want := range []string{"default", "sonnet", "opus", "haiku", "opusplan", "opusplan[1m]", "anthropic.ccr.gpt", "anthropic.ccr.capable[1m]"} {
 		if !containsString(ids, want) {
 			t.Fatalf("discovery ids = %#v, missing %q", ids, want)
 		}
+	}
+	if containsString(ids, "anthropic.ccr.embed") {
+		t.Fatalf("discovery advertised explicitly non-chat alias: %#v", ids)
+	}
+	if containsString(ids, "anthropic.ccr.legacy-control") {
+		t.Fatalf("discovery advertised legacy LiteLLM control alias: %#v", ids)
+	}
+	for _, entry := range decoded.Data {
+		if entry.ID != "anthropic.ccr.capable[1m]" {
+			continue
+		}
+		if entry.Type != "model" || entry.MaxInputTokens == nil || *entry.MaxInputTokens != 1_000_000 ||
+			entry.MaxTokens == nil || *entry.MaxTokens != 64_000 || entry.Capabilities == nil ||
+			entry.Capabilities.ImageInput == nil || entry.Capabilities.ImageInput.Supported ||
+			entry.Capabilities.PDFInput == nil || entry.Capabilities.PDFInput.Supported ||
+			entry.Capabilities.StructuredOutputs == nil || !entry.Capabilities.StructuredOutputs.Supported ||
+			entry.Capabilities.Thinking == nil || !entry.Capabilities.Thinking.Supported ||
+			entry.Capabilities.Thinking.Types == nil || entry.Capabilities.Thinking.Types.Enabled == nil ||
+			!entry.Capabilities.Thinking.Types.Enabled.Supported {
+			t.Fatalf("capable discovery entry = %#v", entry)
+		}
+		break
 	}
 	if containsString(ids, "claude-native-claude-opus-4-7") {
 		t.Fatalf("discovery ids = %#v, want no stale native-prefixed Anthropic model", ids)

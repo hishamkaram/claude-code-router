@@ -34,8 +34,10 @@ explicit no-key mode.
 
 For OpenAI-compatible profiles that support discovery, CCR verifies connectivity
 with `/v1/models`, shows a searchable model multi-select, and lets you review
-aliases before saving. For non-discoverable profiles, CCR validates the provider
-config and credential resolution, then offers a manual repeating model form.
+aliases before saving. Safe capability metadata is retained when supplied;
+LiteLLM can augment it from `/model/info`. For non-discoverable profiles, CCR
+validates the provider config and credential resolution, then offers a manual
+repeating model form.
 
 New imported aliases default to `degraded`. CCR never promotes compatibility
 automatically.
@@ -53,6 +55,8 @@ an ephemeral allowlist that adds configured, non-blocked aliases to the visual
 `/model` picker beside the permitted Anthropic models. Subscription or API-key
 authentication remains available for first-party routes. Launch output also
 prints each `/model anthropic.ccr.<alias>` ID for scripted selection.
+An effective context window of at least one million tokens is printed and shown
+with a terminal `[1m]` marker.
 
 Pass ordinary Claude Code options after `launch`:
 
@@ -111,6 +115,8 @@ For manual aliases:
 ```bash
 ccr model add coding-model --provider openrouter --model <provider-model-id>
 ccr model test coding-model
+ccr model refresh coding-model
+ccr model show coding-model --json
 ```
 
 ## Multiple Providers
@@ -119,6 +125,8 @@ You can configure several providers and many aliases before launching. A normal
 `ccr launch` preserves Claude Code's default startup model and adds every
 non-blocked, tool-compatible alias to `/model`. Use the picker or the printed
 `/model anthropic.ccr.<alias>` IDs to switch providers in the same session.
+Use the exact printed ID when it includes `[1m]` or selective family-name
+escaping.
 Start directly with `--model <alias>` when an alias is `chat-only` or otherwise
 requires tools to be disabled for the launch.
 

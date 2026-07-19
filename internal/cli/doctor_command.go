@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	conformancecheck "github.com/hishamkaram/claude-code-router/internal/conformance"
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -22,12 +23,18 @@ type doctorCheckView struct {
 }
 
 type doctorProbeView struct {
-	Alias         string `json:"alias"`
-	ProviderName  string `json:"provider_name"`
-	ProviderModel string `json:"provider_model"`
-	Protocol      string `json:"protocol"`
-	Status        string `json:"status"`
-	LatencyMS     int64  `json:"latency_ms"`
+	Alias              string `json:"alias"`
+	ProviderName       string `json:"provider_name"`
+	ProviderModel      string `json:"provider_model"`
+	Protocol           string `json:"protocol"`
+	Status             string `json:"status"`
+	LatencyMS          int64  `json:"latency_ms"`
+	FailedCheck        string `json:"failed_check,omitempty"`
+	FailureKind        string `json:"failure_kind,omitempty"`
+	HTTPStatus         int    `json:"http_status,omitempty"`
+	ProviderHTTPStatus int    `json:"provider_http_status,omitempty"`
+	Evidence           string `json:"evidence,omitempty"`
+	Action             string `json:"action,omitempty"`
 }
 
 type doctorDocument struct {
@@ -97,7 +104,7 @@ func runDoctor(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 		Name: "sqlite", Status: "passed",
 		Evidence: fmt.Sprintf("schema %d is readable", document.StoreSchema),
 	})
-	providers, err := s.ListProviders(ctx)
+	configuredProviders, err := s.ListProviders(ctx)
 	if err != nil {
 		return doctorDocument{}, err
 	}
@@ -105,8 +112,8 @@ func runDoctor(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	if err != nil {
 		return doctorDocument{}, err
 	}
-	document.ProviderCount, document.ModelCount = len(providers), len(models)
-	document.Checks = append(document.Checks, offlineProviderChecks(providers)...)
+	document.ProviderCount, document.ModelCount = len(configuredProviders), len(models)
+	document.Checks = append(document.Checks, offlineProviderChecks(configuredProviders)...)
 	document.Checks = append(document.Checks, localDependencyChecks(ctx, deps, s)...)
 	if options.live {
 		targets := selectDoctorTargets(models, options.all)
@@ -124,12 +131,14 @@ func runDoctor(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 			document.Probes = runDoctorProbes(ctx, s, deps, targets)
 		}
 	}
-	for _, check := range document.Checks {
+	for index := range document.Checks {
+		check := &document.Checks[index]
 		if check.Status == "failed" {
 			document.Status = "failed"
 		}
 	}
-	for _, probe := range document.Probes {
+	for index := range document.Probes {
+		probe := &document.Probes[index]
 		if probe.Status == conformancecheck.StatusFailed {
 			document.Status = "failed"
 		}
@@ -137,10 +146,10 @@ func runDoctor(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	return document, nil
 }
 
-func offlineProviderChecks(providers []store.Provider) []doctorCheckView {
-	checks := make([]doctorCheckView, 0, len(providers))
-	for index := range providers {
-		provider := &providers[index]
+func offlineProviderChecks(configuredProviders []store.Provider) []doctorCheckView {
+	checks := make([]doctorCheckView, 0, len(configuredProviders))
+	for index := range configuredProviders {
+		provider := &configuredProviders[index]
 		status := "passed"
 		evidence := fmt.Sprintf("protocol=%s mode=%s token-count=%s",
 			effectiveProviderCapabilities(*provider).Protocol,
@@ -214,7 +223,8 @@ func runDoctorProbes(ctx context.Context, s *store.Store, deps Dependencies, tar
 	results := make([]doctorProbeView, len(targets))
 	semaphore := make(chan struct{}, 4)
 	var wait sync.WaitGroup
-	for index, model := range targets {
+	for index := range targets {
+		model := &targets[index]
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
@@ -222,10 +232,25 @@ func runDoctorProbes(ctx context.Context, s *store.Store, deps Dependencies, tar
 			case semaphore <- struct{}{}:
 				defer func() { <-semaphore }()
 			case <-ctx.Done():
-				results[index] = doctorProbeView{Alias: model.Alias, Status: "failed"}
+				results[index] = doctorProbeView{
+					Alias: model.Alias, ProviderName: model.ProviderName, ProviderModel: model.ProviderModel,
+					Status: conformancecheck.StatusFailed, FailureKind: "canceled",
+					Evidence: "live diagnostic was canceled before it could start",
+					Action:   fmt.Sprintf("ccr conformance run %s", model.Alias),
+				}
 				return
 			}
 			started := time.Now()
+			provider, providerErr := s.GetProvider(ctx, model.ProviderName)
+			if providerErr != nil {
+				results[index] = doctorProbeView{
+					Alias: model.Alias, ProviderName: model.ProviderName, ProviderModel: model.ProviderModel,
+					Status: conformancecheck.StatusFailed, FailureKind: "configuration",
+					Evidence: "configured provider is unreadable", Action: "ccr doctor",
+					LatencyMS: time.Since(started).Milliseconds(),
+				}
+				return
+			}
 			result, err := conformancecheck.RunProvider(ctx, conformancecheck.Config{
 				Store: s, Secrets: deps.Secrets, Alias: model.Alias,
 				Timeout: 15 * time.Second, SmokeOnly: true,
@@ -234,9 +259,26 @@ func runDoctorProbes(ctx context.Context, s *store.Store, deps Dependencies, tar
 				Alias: model.Alias, ProviderName: model.ProviderName,
 				ProviderModel: model.ProviderModel, Status: conformancecheck.StatusFailed,
 				LatencyMS: time.Since(started).Milliseconds(),
+				Protocol:  effectiveProviderCapabilities(provider).Protocol,
 			}
-			if err == nil {
+			if err != nil {
+				view.FailureKind = "suite_start"
+				view.Evidence = safeConformanceStartEvidence(err)
+				view.Action = doctorProbeAction(*model, provider, view.FailureKind)
+			} else {
 				view.Protocol, view.Status = result.Protocol, result.Status
+				for _, check := range result.Checks {
+					if check.Status != conformancecheck.StatusFailed {
+						continue
+					}
+					view.FailedCheck = check.Name
+					view.FailureKind = check.FailureKind
+					view.HTTPStatus = check.HTTPStatus
+					view.ProviderHTTPStatus = check.ProviderHTTPStatus
+					view.Evidence = check.Evidence
+					view.Action = doctorProbeAction(*model, provider, check.FailureKind)
+					break
+				}
 			}
 			results[index] = view
 		}()
@@ -246,10 +288,25 @@ func runDoctorProbes(ctx context.Context, s *store.Store, deps Dependencies, tar
 	return results
 }
 
+func doctorProbeAction(model store.Model, provider store.Provider, failureKind string) string {
+	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+		return fmt.Sprintf("ccr model remove %s --yes", model.Alias)
+	}
+	switch failureKind {
+	case "model_absent", "alias_absent":
+		return fmt.Sprintf("ccr provider discover-models %s", provider.Name)
+	case "credential", "provider_http_status":
+		return fmt.Sprintf("ccr provider test %s", provider.Name)
+	default:
+		return fmt.Sprintf("ccr conformance run %s", model.Alias)
+	}
+}
+
 func writeHumanDoctor(cmd *cobra.Command, document doctorDocument) {
 	fmt.Fprintf(cmd.OutOrStdout(), "SQLite: ok (%s, schema=%d)\n", document.Database, document.StoreSchema)
 	fmt.Fprintf(cmd.OutOrStdout(), "Providers: %d\nModels: %d\n", document.ProviderCount, document.ModelCount)
-	for _, check := range document.Checks {
+	for index := range document.Checks {
+		check := &document.Checks[index]
 		if providerName, ok := strings.CutPrefix(check.Name, "provider:"); ok {
 			fmt.Fprintf(cmd.OutOrStdout(), "Provider %s: %s\n", providerName, check.Evidence)
 			continue
@@ -267,9 +324,16 @@ func writeHumanDoctor(cmd *cobra.Command, document doctorDocument) {
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s)\n", check.Name, check.Status, check.Evidence)
 		}
 	}
-	for _, probe := range document.Probes {
+	for index := range document.Probes {
+		probe := &document.Probes[index]
 		fmt.Fprintf(cmd.OutOrStdout(), "Live %s: %s provider=%s model=%s protocol=%s latency=%dms\n",
 			probe.Alias, probe.Status, probe.ProviderName, probe.ProviderModel,
 			probe.Protocol, probe.LatencyMS)
+		if probe.Status == conformancecheck.StatusFailed {
+			fmt.Fprintf(cmd.OutOrStdout(), "  failure: check=%s kind=%s gateway_http=%d provider_http=%d\n",
+				probe.FailedCheck, probe.FailureKind, probe.HTTPStatus, probe.ProviderHTTPStatus)
+			fmt.Fprintf(cmd.OutOrStdout(), "  evidence: %s\n", probe.Evidence)
+			fmt.Fprintf(cmd.OutOrStdout(), "  action: %s\n", probe.Action)
+		}
 	}
 }

@@ -290,11 +290,15 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 	messages := make([]string, 0, 2+4*len(models))
 	messages = append(messages, "/model sonnet", "Reply exactly CCR_LIVE_REAL_ANTHROPIC_INITIAL.")
 	for index, model := range models {
+		discoveryID, err := gateway.DiscoveryIDForModel(model)
+		if err != nil {
+			t.Fatalf("DiscoveryIDForModel(%s) error = %v", model.Alias, err)
+		}
 		aliasSentinel := fmt.Sprintf("CCR_LIVE_REAL_ALIAS_%d", index)
 		returnSentinel := fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index)
 		messages = append(
 			messages,
-			"/model "+gateway.DiscoveryIDForAlias(model.Alias),
+			"/model "+discoveryID,
 			"Reply exactly "+aliasSentinel+".",
 			"/model sonnet",
 			"Reply exactly "+returnSentinel+".",

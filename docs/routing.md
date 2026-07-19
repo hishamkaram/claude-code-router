@@ -10,6 +10,8 @@ allowlist for that launch:
 - if no user allowlist exists, CCR includes known first-party Claude model IDs;
 - every configured, non-blocked alias that is safe for the launch tool mode is
   added as `anthropic.ccr.<alias>`;
+- an alias with an effective context window of at least 1,000,000 tokens gets a
+  terminal `[1m]` picker marker;
 - `~/.claude/settings.json` is never written.
 
 Without `--model`, Claude Code keeps its normal startup model. In the default
@@ -25,6 +27,11 @@ as native model-family signals. CCR selectively percent-escapes those substrings
 in picker IDs so native rows remain visible. For example, an alias named
 `my-sonnet` appears as `anthropic.ccr.my-s%6fnnet`; the stored CCR alias remains
 `my-sonnet`.
+
+The family escape and context marker are independent. CCR accepts the canonical
+escaped picker ID and the legacy gateway ID, with or without the valid context
+suffix, for the same registered alias. Malformed context suffixes are rejected
+instead of falling through to another route.
 
 ## Route Selection
 
@@ -42,8 +49,9 @@ want it to override that route.
 
 ## Model Switching and Workers
 
-Open `/model` and select the `anthropic.ccr.<alias>` row to use a registered
-route. CCR also prints the exact ID for direct or scripted selection. Legacy
+Open `/model` and select the printed `anthropic.ccr.<alias>` row, including its
+terminal `[1m]` marker when present, to use a registered route. CCR also prints
+the exact ID for direct or scripted selection. Legacy
 `claude-ccr-<alias>` IDs remain gateway-routable but are not placed in new
 allowlists. Future work in the same session uses the selected route where safely
 possible. Subagents, workflow agents, and teammates created after a switch
@@ -108,8 +116,8 @@ its friendly discovery metadata. See Anthropic's
 ## Capability Handling
 
 CCR translates between Anthropic-compatible and OpenAI-compatible provider
-protocols. It checks a provider's declared capabilities before forwarding tool
-use, streaming, thinking, model discovery, and token-count operations.
+protocols. It combines provider capabilities with normalized per-model
+discovery and explicit overrides before forwarding a request.
 
 - Safe limitations are surfaced in launch and response metadata.
 - Chat-only routes disable Claude Code tools.
@@ -117,6 +125,12 @@ use, streaming, thinking, model discovery, and token-count operations.
 - CCR never silently falls back to Claude or another provider.
 - Observed token counts are recorded when supplied; monetary cost is not
   estimated.
+
+Known per-model restrictions are enforced for context-sensitive output limits,
+tools and tool choice, parallel tools, streaming, thinking, prompt caching,
+system messages, structured responses, and input modalities. Unknown metadata
+remains unknown rather than being treated as unsupported. Inspect the effective
+values and their sources with `ccr model show <alias> --json`.
 
 Built-in `WebSearch` and `WebFetch` are Claude Code host tools. CCR forwards the
 model's tool protocol but cannot redirect those host-owned web operations to a

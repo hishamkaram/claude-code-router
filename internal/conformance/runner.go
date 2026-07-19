@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
@@ -84,6 +85,9 @@ func loadTarget(ctx context.Context, s *store.Store, alias string) (target, erro
 	if err != nil {
 		return target{}, fmt.Errorf("conformance.loadTarget: reading provider %q: %w", model.ProviderName, err)
 	}
+	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+		return target{}, fmt.Errorf("conformance.loadTarget: alias %q targets LiteLLM control model %q and cannot be routed", alias, model.ProviderModel)
+	}
 	caps := providers.NormalizeCapabilities(provider.Type, providers.Capabilities{
 		Protocol: provider.Protocol, SupportsTools: provider.SupportsTools,
 		SupportsStreaming: provider.SupportsStreaming, SupportsThinking: provider.SupportsThinking,
@@ -93,5 +97,12 @@ func loadTarget(ctx context.Context, s *store.Store, alias string) (target, erro
 	if caps.Protocol != providers.ProtocolOpenAICompatible && caps.Protocol != providers.ProtocolAnthropicCompatible {
 		return target{}, fmt.Errorf("conformance.loadTarget: provider protocol %q is unsupported", caps.Protocol)
 	}
-	return target{model: model, provider: provider, capabilities: caps}, nil
+	effectiveModel, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if err != nil {
+		return target{}, fmt.Errorf("conformance.loadTarget: computing model capabilities: %w", err)
+	}
+	if !modelcap.IsRoutableKind(effectiveModel.Values.Kind) {
+		return target{}, fmt.Errorf("conformance.loadTarget: alias %q has non-routable model kind %q", alias, effectiveModel.Values.Kind)
+	}
+	return target{model: model, provider: provider, capabilities: caps, modelCapabilities: effectiveModel.Values}, nil
 }

@@ -3,12 +3,12 @@ package cli
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/cobra"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
@@ -18,6 +18,7 @@ func newModelUpdateCommand(ctx context.Context, opts *options, deps Dependencies
 	var providerModel string
 	var status string
 	var interactive bool
+	var capabilityFlags modelCapabilityFlags
 	cmd := &cobra.Command{
 		Use:   "update <alias>",
 		Short: "Update a model alias",
@@ -30,28 +31,29 @@ func newModelUpdateCommand(ctx context.Context, opts *options, deps Dependencies
 		RunE: func(cmd *cobra.Command, args []string) error {
 			changes := modelUpdateChangesFromCommand(cmd)
 			if interactive {
-				defaultProviderModel, err := validateModelUpdateStaticFlags(providerName, providerModel, status, changes)
+				defaultProviderModel, err := validateModelUpdateStaticFlags(cmd, capabilityFlags, providerName, providerModel, status, changes)
 				if err != nil {
 					return err
 				}
-				return runModelUpdateInteractive(ctx, cmd, opts, deps, args[0], providerName, defaultProviderModel, status, changes)
+				return runModelUpdateInteractive(ctx, cmd, opts, deps, args[0], providerName, defaultProviderModel, status, changes, capabilityFlags)
 			}
-			return runModelUpdate(ctx, cmd, opts, args[0], providerName, providerModel, status)
+			return runModelUpdate(ctx, cmd, opts, args[0], providerName, providerModel, status, capabilityFlags)
 		},
 	}
 	cmd.Flags().StringVar(&providerName, "provider", "", "Configured provider name")
 	cmd.Flags().StringVar(&providerModel, "model", "", "Provider-specific model name")
 	cmd.Flags().StringVar(&status, "compat", "", "Compatibility status: full, degraded, chat-only, or blocked")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Guide model alias updates with prompts")
+	capabilityFlags.bind(cmd)
 	return cmd
 }
 
-func runModelUpdate(ctx context.Context, cmd *cobra.Command, opts *options, alias, providerName, providerModel, status string) error {
+func runModelUpdate(ctx context.Context, cmd *cobra.Command, opts *options, alias, providerName, providerModel, status string, capabilityFlags modelCapabilityFlags) error {
 	changes := modelUpdateChangesFromCommand(cmd)
 	if !changes.any() {
 		return fmt.Errorf("model update requires at least one change flag or --interactive")
 	}
-	providerModel, err := validateModelUpdateStaticFlags(providerName, providerModel, status, changes)
+	providerModel, err := validateModelUpdateStaticFlags(cmd, capabilityFlags, providerName, providerModel, status, changes)
 	if err != nil {
 		return err
 	}
@@ -66,7 +68,7 @@ func runModelUpdate(ctx context.Context, cmd *cobra.Command, opts *options, alia
 	if err != nil {
 		return err
 	}
-	model, err = applyModelUpdateChanges(ctx, s, model, providerName, providerModel, status, changes)
+	model, err = applyModelUpdateChanges(ctx, cmd, s, model, providerName, providerModel, status, changes, capabilityFlags)
 	if err != nil {
 		return err
 	}
@@ -78,25 +80,27 @@ func runModelUpdate(ctx context.Context, cmd *cobra.Command, opts *options, alia
 }
 
 type modelUpdateChanges struct {
-	provider bool
-	model    bool
-	status   bool
+	provider     bool
+	model        bool
+	status       bool
+	capabilities bool
 }
 
 func (c modelUpdateChanges) any() bool {
-	return c.provider || c.model || c.status
+	return c.provider || c.model || c.status || c.capabilities
 }
 
 func modelUpdateChangesFromCommand(cmd *cobra.Command) modelUpdateChanges {
 	flags := cmd.Flags()
 	return modelUpdateChanges{
-		provider: flags.Changed("provider"),
-		model:    flags.Changed("model"),
-		status:   flags.Changed("compat"),
+		provider:     flags.Changed("provider"),
+		model:        flags.Changed("model"),
+		status:       flags.Changed("compat"),
+		capabilities: capabilityFlagsChanged(cmd),
 	}
 }
 
-func validateModelUpdateStaticFlags(providerName, providerModel, status string, changes modelUpdateChanges) (string, error) {
+func validateModelUpdateStaticFlags(cmd *cobra.Command, capabilityFlags modelCapabilityFlags, providerName, providerModel, status string, changes modelUpdateChanges) (string, error) {
 	if changes.provider {
 		if err := validateName("provider", providerName); err != nil {
 			return "", err
@@ -113,10 +117,16 @@ func validateModelUpdateStaticFlags(providerName, providerModel, status string, 
 			return "", err
 		}
 	}
+	if changes.capabilities {
+		if _, err := capabilityFlags.apply(cmd, modelcap.Values{}); err != nil {
+			return "", err
+		}
+	}
 	return providerModel, nil
 }
 
-func applyModelUpdateChanges(ctx context.Context, s *store.Store, model store.Model, providerName, providerModel, status string, changes modelUpdateChanges) (store.Model, error) {
+func applyModelUpdateChanges(ctx context.Context, cmd *cobra.Command, s *store.Store, model store.Model, providerName, providerModel, status string, changes modelUpdateChanges, capabilityFlags modelCapabilityFlags) (store.Model, error) {
+	originalProvider, originalProviderModel := model.ProviderName, model.ProviderModel
 	if changes.provider {
 		if _, err := s.GetProvider(ctx, providerName); err != nil {
 			return store.Model{}, err
@@ -129,10 +139,29 @@ func applyModelUpdateChanges(ctx context.Context, s *store.Store, model store.Mo
 	if changes.status {
 		model.Status = status
 	}
+	targetChanged := model.ProviderName != originalProvider || model.ProviderModel != originalProviderModel
+	provider, err := s.GetProvider(ctx, model.ProviderName)
+	if err != nil {
+		return store.Model{}, err
+	}
+	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+		return store.Model{}, fmt.Errorf("provider model %q is a LiteLLM control model and cannot be routed", model.ProviderModel)
+	}
+	if targetChanged {
+		model.DiscoveredCapabilities = modelcap.Snapshot{}
+		model.CapabilitiesRefreshedAt = ""
+	}
+	if changes.capabilities {
+		overrides, err := capabilityFlags.apply(cmd, model.CapabilityOverrides)
+		if err != nil {
+			return store.Model{}, err
+		}
+		model.CapabilityOverrides = overrides
+	}
 	return model, nil
 }
 
-func runModelUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, alias, providerName, providerModel, status string, changes modelUpdateChanges) error {
+func runModelUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, alias, providerName, providerModel, status string, changes modelUpdateChanges, capabilityFlags modelCapabilityFlags) error {
 	s, _, err := openMigratedStore(ctx, opts)
 	if err != nil {
 		return err
@@ -143,7 +172,8 @@ func runModelUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts *op
 	if err != nil {
 		return err
 	}
-	model, err = applyInteractiveModelUpdateDefaults(model, providerName, providerModel, status, changes)
+	originalProvider, originalProviderModel := model.ProviderName, model.ProviderModel
+	model, err = applyInteractiveModelUpdateDefaults(cmd, model, providerName, providerModel, status, changes, capabilityFlags)
 	if err != nil {
 		return err
 	}
@@ -151,8 +181,16 @@ func runModelUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts *op
 	if err != nil {
 		return err
 	}
-	if _, err := s.GetProvider(ctx, updated.ProviderName); err != nil {
+	provider, err := s.GetProvider(ctx, updated.ProviderName)
+	if err != nil {
 		return err
+	}
+	if providers.IsProviderControlModel(provider.Type, updated.ProviderModel) {
+		return fmt.Errorf("provider model %q is a LiteLLM control model and cannot be routed", updated.ProviderModel)
+	}
+	if updated.ProviderName != originalProvider || updated.ProviderModel != originalProviderModel {
+		updated.DiscoveredCapabilities = modelcap.Snapshot{}
+		updated.CapabilitiesRefreshedAt = ""
 	}
 	if err := s.UpdateModel(ctx, updated); err != nil {
 		return err
@@ -161,7 +199,7 @@ func runModelUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts *op
 	return nil
 }
 
-func applyInteractiveModelUpdateDefaults(model store.Model, providerName, providerModel, status string, changes modelUpdateChanges) (store.Model, error) {
+func applyInteractiveModelUpdateDefaults(cmd *cobra.Command, model store.Model, providerName, providerModel, status string, changes modelUpdateChanges, capabilityFlags modelCapabilityFlags) (store.Model, error) {
 	if changes.provider {
 		model.ProviderName = providerName
 	}
@@ -173,6 +211,13 @@ func applyInteractiveModelUpdateDefaults(model store.Model, providerName, provid
 			return store.Model{}, err
 		}
 		model.Status = status
+	}
+	if changes.capabilities {
+		overrides, err := capabilityFlags.apply(cmd, model.CapabilityOverrides)
+		if err != nil {
+			return store.Model{}, err
+		}
+		model.CapabilityOverrides = overrides
 	}
 	return model, nil
 }
@@ -339,6 +384,18 @@ func rejectBlockedModelAlias(model store.Model) error {
 }
 
 func validateLoadedModelAliasTarget(ctx context.Context, deps Dependencies, model store.Model, provider store.Provider, requireExactProviderModel bool) (store.Model, store.Provider, int, error) {
+	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+		return store.Model{}, store.Provider{}, 0,
+			fmt.Errorf("model alias %q targets LiteLLM control model %q and cannot be routed", model.Alias, model.ProviderModel)
+	}
+	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if err != nil {
+		return store.Model{}, store.Provider{}, 0, fmt.Errorf("computing capabilities for model alias %q: %w", model.Alias, err)
+	}
+	if !modelcap.IsRoutableKind(effective.Values.Kind) {
+		return store.Model{}, store.Provider{}, 0,
+			fmt.Errorf("model alias %q has non-routable model kind %q", model.Alias, effective.Values.Kind)
+	}
 	apiKey, err := validateProviderConfigAndSecret(ctx, deps, provider)
 	if err != nil {
 		return store.Model{}, store.Provider{}, 0, err
@@ -347,12 +404,12 @@ func validateLoadedModelAliasTarget(ctx context.Context, deps Dependencies, mode
 	if caps.Protocol != providers.ProtocolOpenAICompatible || !caps.SupportsModelDiscovery {
 		return model, provider, 0, nil
 	}
-	models, err := discoverProviderModelsWithPlan(ctx, deps, provider, secretPlan{ref: provider.SecretRef, value: apiKey})
+	discovery, err := discoverProviderModelsWithPlan(ctx, deps, provider, secretPlan{ref: provider.SecretRef, value: apiKey})
 	if err != nil {
 		return store.Model{}, store.Provider{}, 0, err
 	}
-	if requireExactProviderModel && !slices.Contains(models, model.ProviderModel) {
+	if requireExactProviderModel && !discovery.HasRoutableID(model.ProviderModel) {
 		return store.Model{}, store.Provider{}, 0, fmt.Errorf("model alias %q targets provider model %q, but provider %q did not return that exact model from /v1/models", model.Alias, model.ProviderModel, provider.Name)
 	}
-	return model, provider, len(models), nil
+	return model, provider, len(discovery.RoutableModels()), nil
 }
