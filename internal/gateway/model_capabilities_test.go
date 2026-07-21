@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
@@ -31,15 +32,18 @@ func TestModelInputModalitiesIgnoreTypesInsideToolInput(t *testing.T) {
 	}
 }
 
-func TestModelCapabilitiesForRouteMasksOnlyOpenAIMultimodalInput(t *testing.T) {
+func TestModelCapabilitiesForRouteMasksOnlyUntranslatableOpenAIInput(t *testing.T) {
 	t.Parallel()
 	values := modelcap.Values{
 		SupportsVision: modelcap.Bool(true), SupportsPDFInput: modelcap.Bool(true),
 		SupportsAudioInput: modelcap.Bool(true), SupportsTools: modelcap.Bool(true),
 	}
 	openAI := modelCapabilitiesForRoute(providers.Capabilities{Protocol: providers.ProtocolOpenAICompatible}, values)
-	if !explicitlyFalse(openAI.SupportsVision) || !explicitlyFalse(openAI.SupportsPDFInput) ||
-		!explicitlyFalse(openAI.SupportsAudioInput) || explicitlyFalse(openAI.SupportsTools) {
+	// The adapter can translate images, so vision is preserved; it still cannot
+	// serialize document or audio input, so those stay masked off.
+	if openAI.SupportsVision == nil || !*openAI.SupportsVision ||
+		!explicitlyFalse(openAI.SupportsPDFInput) || !explicitlyFalse(openAI.SupportsAudioInput) ||
+		explicitlyFalse(openAI.SupportsTools) {
 		t.Fatalf("OpenAI route capabilities = %#v", openAI)
 	}
 	anthropic := modelCapabilitiesForRoute(providers.Capabilities{Protocol: providers.ProtocolAnthropicCompatible}, values)
@@ -47,6 +51,53 @@ func TestModelCapabilitiesForRouteMasksOnlyOpenAIMultimodalInput(t *testing.T) {
 		anthropic.SupportsPDFInput == nil || !*anthropic.SupportsPDFInput ||
 		anthropic.SupportsAudioInput == nil || !*anthropic.SupportsAudioInput {
 		t.Fatalf("Anthropic route capabilities = %#v", anthropic)
+	}
+}
+
+func TestModelCapabilitiesForRoutePreservesExplicitOpenAIVisionFalse(t *testing.T) {
+	t.Parallel()
+	values := modelcap.Values{SupportsVision: modelcap.Bool(false)}
+	openAI := modelCapabilitiesForRoute(providers.Capabilities{Protocol: providers.ProtocolOpenAICompatible}, values)
+	if !explicitlyFalse(openAI.SupportsVision) {
+		t.Fatalf("OpenAI route vision = %#v, want explicit false preserved", openAI.SupportsVision)
+	}
+}
+
+func TestValidateModelInputModalitiesGatesImageOnVision(t *testing.T) {
+	t.Parallel()
+	req := anthropicRequest{Messages: []anthropicMessage{{
+		Role: "user",
+		Content: []any{map[string]any{
+			"type":   "image",
+			"source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AAAA"},
+		}},
+	}}}
+	supported := modelcap.Values{SupportsVision: modelcap.Bool(true)}
+	if validationErr := validateModelInputModalities(store.Model{Alias: "vision"}, supported, req); validationErr != nil {
+		t.Fatalf("validateModelInputModalities() with vision error = %v", validationErr)
+	}
+	unsupported := modelcap.Values{SupportsVision: modelcap.Bool(false)}
+	validationErr := validateModelInputModalities(store.Model{Alias: "text-only"}, unsupported, req)
+	if validationErr == nil || validationErr.status != http.StatusNotImplemented {
+		t.Fatalf("validateModelInputModalities() without vision = %#v, want 501 rejection", validationErr)
+	}
+}
+
+func TestValidateModelInputModalitiesForwardsImageWhenVisionUnknown(t *testing.T) {
+	t.Parallel()
+	// The point of dropping the OpenAI-compat vision mask: when vision is neither
+	// declared nor denied (nil, no modality list), the image is forwarded so the
+	// provider decides, rather than being pre-emptively 501'd.
+	req := anthropicRequest{Messages: []anthropicMessage{{
+		Role: "user",
+		Content: []any{map[string]any{
+			"type":   "image",
+			"source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AAAA"},
+		}},
+	}}}
+	capabilities := modelcap.Values{} // SupportsVision nil, InputModalities empty
+	if validationErr := validateModelInputModalities(store.Model{Alias: "unknown-vision"}, capabilities, req); validationErr != nil {
+		t.Fatalf("validateModelInputModalities() with unknown vision error = %v", validationErr)
 	}
 }
 

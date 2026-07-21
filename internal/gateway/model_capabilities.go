@@ -12,11 +12,17 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
+// modelCapabilitiesForRoute narrows advertised capabilities to what the gateway
+// can actually deliver over a given provider protocol. The OpenAI-compatible
+// adapter can translate Anthropic image blocks into image_url content parts, so
+// vision follows the discovered/override capability (a downstream proxy such as
+// LiteLLM may report vision support, or a fallback, that we now honor). The
+// adapter still cannot serialize document or audio input, so those modalities
+// stay unsupported regardless of what discovery reports.
 func modelCapabilitiesForRoute(provider providers.Capabilities, model modelcap.Values) modelcap.Values {
 	if provider.Protocol != providers.ProtocolOpenAICompatible {
 		return model
 	}
-	model.SupportsVision = modelcap.Bool(false)
 	model.SupportsPDFInput = modelcap.Bool(false)
 	model.SupportsAudioInput = modelcap.Bool(false)
 	return model

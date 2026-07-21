@@ -150,3 +150,292 @@ func TestGatewayRoutesToolSearchToolReferenceResultToOpenAIProvider(t *testing.T
 		t.Fatalf("tool result content = %q, want %q", gotMessages[1].Content, wantContent)
 	}
 }
+
+func TestOpenAIUserMessagesConvertBase64Image(t *testing.T) {
+	t.Parallel()
+
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "text", "text": "describe this"},
+		map[string]any{"type": "image", "source": map[string]any{
+			"type": "base64", "media_type": "image/png", "data": "AAAA",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "user" || len(messages[0].Parts) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	if messages[0].Parts[0].Type != "text" || messages[0].Parts[0].Text != "describe this" {
+		t.Fatalf("text part = %#v", messages[0].Parts[0])
+	}
+	image := messages[0].Parts[1]
+	if image.Type != "image_url" || image.ImageURL == nil || image.ImageURL.URL != "data:image/png;base64,AAAA" {
+		t.Fatalf("image part = %#v", image)
+	}
+	encoded, err := json.Marshal(messages[0])
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	want := `{"role":"user","content":[{"type":"text","text":"describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}`
+	if string(encoded) != want {
+		t.Fatalf("marshaled = %s, want %s", encoded, want)
+	}
+}
+
+func TestOpenAIUserMessagesConvertURLImage(t *testing.T) {
+	t.Parallel()
+
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "image", "source": map[string]any{
+			"type": "url", "url": "https://example.com/cat.png",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 1 || len(messages[0].Parts) != 1 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	image := messages[0].Parts[0]
+	if image.Type != "image_url" || image.ImageURL == nil || image.ImageURL.URL != "https://example.com/cat.png" {
+		t.Fatalf("image part = %#v", image)
+	}
+}
+
+func TestOpenAIUserMessagesKeepTextOnlyAsString(t *testing.T) {
+	t.Parallel()
+
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "text", "text": "line one"},
+		map[string]any{"type": "text", "text": "line two"},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 1 || messages[0].Content != "line one\nline two" || messages[0].Parts != nil {
+		t.Fatalf("messages = %#v", messages)
+	}
+	encoded, err := json.Marshal(messages[0])
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if string(encoded) != `{"role":"user","content":"line one\nline two"}` {
+		t.Fatalf("marshaled = %s", encoded)
+	}
+}
+
+func TestOpenAIUserMessagesEmitToolBeforeUserContentForContiguity(t *testing.T) {
+	t.Parallel()
+
+	// A user turn that mixes a top-level image, a tool_result, and trailing text
+	// must still emit the tool message directly after the assistant tool_calls
+	// message. The tool message therefore comes first; all user content (the
+	// image and the text) collapses into a single trailing user message.
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "image", "source": map[string]any{
+			"type": "base64", "media_type": "image/jpeg", "data": "ZZZZ",
+		}},
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+		map[string]any{"type": "text", "text": "after tool"},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v, want tool message then a single user message", messages)
+	}
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "toolu_1" || messages[0].Content != "ok" {
+		t.Fatalf("tool message = %#v", messages[0])
+	}
+	if messages[1].Role != "user" || len(messages[1].Parts) != 2 {
+		t.Fatalf("user message = %#v", messages[1])
+	}
+	if messages[1].Parts[0].Type != "image_url" || messages[1].Parts[1].Type != "text" || messages[1].Parts[1].Text != "after tool" {
+		t.Fatalf("user parts = %#v", messages[1].Parts)
+	}
+}
+
+func TestOpenAIUserMessagesKeepParallelToolResultsContiguous(t *testing.T) {
+	t.Parallel()
+
+	// Parallel tool calls: two tool_results in one user turn, the first (non-final)
+	// carrying an image. The image must NOT be inserted between the two tool
+	// messages; both tool messages stay contiguous and the image trails after.
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": []any{
+			map[string]any{"type": "text", "text": "shot one"},
+			map[string]any{"type": "image", "source": map[string]any{
+				"type": "base64", "media_type": "image/png", "data": "AAAA",
+			}},
+		}},
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_2", "content": "second result"},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 3 {
+		t.Fatalf("messages = %#v, want tool, tool, user(image)", messages)
+	}
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "toolu_1" || messages[0].Content != "shot one" {
+		t.Fatalf("first tool message = %#v", messages[0])
+	}
+	if messages[1].Role != "tool" || messages[1].ToolCallID != "toolu_2" || messages[1].Content != "second result" {
+		t.Fatalf("second tool message = %#v", messages[1])
+	}
+	if messages[2].Role != "user" || len(messages[2].Parts) != 1 || messages[2].Parts[0].Type != "image_url" ||
+		messages[2].Parts[0].ImageURL == nil || messages[2].Parts[0].ImageURL.URL != "data:image/png;base64,AAAA" {
+		t.Fatalf("trailing image user message = %#v", messages[2])
+	}
+}
+
+func TestOpenAIToolResultSplitsImagesIntoFollowingUserMessage(t *testing.T) {
+	t.Parallel()
+
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_shot", "content": []any{
+			map[string]any{"type": "text", "text": "screenshot captured"},
+			map[string]any{"type": "image", "source": map[string]any{
+				"type": "base64", "media_type": "image/png", "data": "SHOT",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v, want tool message and image user message", messages)
+	}
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "toolu_shot" || messages[0].Content != "screenshot captured" {
+		t.Fatalf("tool message = %#v", messages[0])
+	}
+	if messages[1].Role != "user" || len(messages[1].Parts) != 1 {
+		t.Fatalf("image user message = %#v", messages[1])
+	}
+	image := messages[1].Parts[0]
+	if image.Type != "image_url" || image.ImageURL == nil || image.ImageURL.URL != "data:image/png;base64,SHOT" {
+		t.Fatalf("tool result image part = %#v", image)
+	}
+}
+
+func TestOpenAIToolResultImageOnlyUsesPlaceholderToolContent(t *testing.T) {
+	t.Parallel()
+
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_only", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{
+				"type": "url", "url": "https://example.com/out.png",
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	// Image-only tool_result: content must not be empty (some backends reject
+	// empty tool messages), so a placeholder stands in for the image output.
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "toolu_only" || messages[0].Content != "[image output]" {
+		t.Fatalf("tool message = %#v", messages[0])
+	}
+	if messages[1].Role != "user" || len(messages[1].Parts) != 1 || messages[1].Parts[0].Type != "image_url" {
+		t.Fatalf("image user message = %#v", messages[1])
+	}
+}
+
+func TestOpenAIToolResultRejectsInvalidImageSource(t *testing.T) {
+	t.Parallel()
+
+	_, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_bad", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "base64"}},
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "media_type and data") {
+		t.Fatalf("error = %v, want base64 validation failure", err)
+	}
+}
+
+func TestOpenAIUserMessagesRejectInvalidImageSources(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		block map[string]any
+		want  string
+	}{
+		"missing source": {
+			block: map[string]any{"type": "image"},
+			want:  "requires a source object",
+		},
+		"base64 missing data": {
+			block: map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png"}},
+			want:  "media_type and data",
+		},
+		"url missing url": {
+			block: map[string]any{"type": "image", "source": map[string]any{"type": "url"}},
+			want:  "requires a url",
+		},
+		"unsupported source type": {
+			block: map[string]any{"type": "image", "source": map[string]any{"type": "file_id"}},
+			want:  "is not supported",
+		},
+	}
+	for name, tc := range tests {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			_, err := openAIUserMessagesFromAnthropic([]any{tc.block})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIUserMessagesPreserveMultiImageOrder(t *testing.T) {
+	t.Parallel()
+
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "text", "text": "first"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "ONE"}},
+		map[string]any{"type": "text", "text": "second"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://example.com/two.png"}},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 1 || len(messages[0].Parts) != 4 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	parts := messages[0].Parts
+	if parts[0].Type != "text" || parts[0].Text != "first" ||
+		parts[1].Type != "image_url" || parts[1].ImageURL.URL != "data:image/png;base64,ONE" ||
+		parts[2].Type != "text" || parts[2].Text != "second" ||
+		parts[3].Type != "image_url" || parts[3].ImageURL.URL != "https://example.com/two.png" {
+		t.Fatalf("multi-image order = %#v", parts)
+	}
+}
+
+func TestOpenAIUserMessagesDropEmptyTextPartInMultipart(t *testing.T) {
+	t.Parallel()
+
+	messages, err := openAIUserMessagesFromAnthropic([]any{
+		map[string]any{"type": "text", "text": ""},
+		map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+	})
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropic() error = %v", err)
+	}
+	if len(messages) != 1 || len(messages[0].Parts) != 1 || messages[0].Parts[0].Type != "image_url" {
+		t.Fatalf("messages = %#v, want empty text part dropped", messages)
+	}
+	encoded, err := json.Marshal(messages[0])
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	want := `{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}`
+	if string(encoded) != want {
+		t.Fatalf("marshaled = %s, want %s", encoded, want)
+	}
+}
