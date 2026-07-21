@@ -249,7 +249,7 @@ func TestGatewayModelDiscoveryIncludesFirstPartyWithoutNativeShim(t *testing.T) 
 		}
 		if entry.Type != "model" || entry.MaxInputTokens == nil || *entry.MaxInputTokens != 1_000_000 ||
 			entry.MaxTokens == nil || *entry.MaxTokens != 64_000 || entry.Capabilities == nil ||
-			entry.Capabilities.ImageInput == nil || entry.Capabilities.ImageInput.Supported ||
+			entry.Capabilities.ImageInput == nil || !entry.Capabilities.ImageInput.Supported ||
 			entry.Capabilities.PDFInput == nil || entry.Capabilities.PDFInput.Supported ||
 			entry.Capabilities.StructuredOutputs == nil || !entry.Capabilities.StructuredOutputs.Supported ||
 			entry.Capabilities.Thinking == nil || !entry.Capabilities.Thinking.Supported ||

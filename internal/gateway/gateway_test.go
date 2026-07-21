@@ -17,6 +17,67 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
+func TestGatewayForwardsImageToOpenAICompatibleProvider(t *testing.T) {
+	ctx := context.Background()
+	var rawContent json.RawMessage
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("provider path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var payload struct {
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		if len(payload.Messages) > 0 {
+			rawContent = payload.Messages[len(payload.Messages)-1].Content
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","choices":[{"message":{"content":"looked"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: "env:PROVIDER_KEY"}, store.Model{
+		Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "full",
+		CapabilityOverrides: modelcap.Values{SupportsVision: modelcap.Bool(true)},
+	})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{"env:PROVIDER_KEY": "provider-secret"})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	body := `{"model":"gpt","max_tokens":20,"messages":[{"role":"user","content":[` +
+		`{"type":"text","text":"what is this"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}` +
+		`]}]}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+
+	var parts []openAIContentPart
+	if err := json.Unmarshal(rawContent, &parts); err != nil {
+		t.Fatalf("provider content is not a multipart array: %s (%v)", rawContent, err)
+	}
+	if len(parts) != 2 || parts[0].Type != "text" || parts[0].Text != "what is this" {
+		t.Fatalf("provider content parts = %#v", parts)
+	}
+	if parts[1].Type != "image_url" || parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,AAAA" {
+		t.Fatalf("provider image part = %#v", parts[1])
+	}
+}
+
 func TestGatewayRoutesOpenAICompatibleMessages(t *testing.T) {
 	ctx := context.Background()
 	var gotAuth string
@@ -696,8 +757,11 @@ func TestGatewayEnforcesExplicitModelCapabilityRestrictions(t *testing.T) {
 			wantStatus: http.StatusNotImplemented,
 		},
 		{
-			name: "OpenAI adapter vision gap", overrides: modelcap.Values{SupportsVision: modelcap.Bool(true)},
-			body:       `{"model":"gpt","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
+			// The OpenAI adapter can translate images, so a model that declares
+			// PDF support is still gated because the adapter cannot serialize
+			// document input over the OpenAI-compatible path.
+			name: "OpenAI adapter PDF gap", overrides: modelcap.Values{SupportsPDFInput: modelcap.Bool(true)},
+			body:       `{"model":"gpt","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"AA=="}}]}]}`,
 			wantStatus: http.StatusNotImplemented,
 		},
 		{
