@@ -1,0 +1,93 @@
+{
+  "model": "claude-sonnet-4-5",
+  "system": [
+    { "type": "text", "text": "Be concise." },
+    { "type": "text", "text": "Use tools when helpful." }
+  ],
+  "max_tokens": 256,
+  "temperature": 0.2,
+  "stop_sequences": ["END"],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get weather by city.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": { "type": "string" }
+        },
+        "required": ["city"]
+      }
+    },
+    {
+      "type": "computer_20250124",
+      "name": "computer",
+      "display_width_px": 1024,
+      "display_height_px": 768
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "What is in these images?" },
+        {
+          "type": "image",
+          "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": "iVBORw0KGgo="
+          }
+        },
+        {
+          "type": "image",
+          "source": {
+            "type": "url",
+            "url": "https://example.com/cat.jpg"
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_weather",
+          "name": "get_weather",
+          "input": { "city": "Berlin" }
+        },
+        {
+          "type": "tool_use",
+          "id": "call_screen",
+          "name": "computer",
+          "input": { "action": "screenshot" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_weather",
+          "content": [{ "type": "text", "text": "Sunny" }]
+        },
+        {
+          "type": "tool_result",
+          "tool_use_id": "call_screen",
+          "content": [
+            {
+              "type": "image",
+              "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "screenbase64"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

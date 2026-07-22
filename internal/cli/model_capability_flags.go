@@ -29,6 +29,8 @@ type modelCapabilityFlags struct {
 	audioInput       string
 	audioOutput      string
 	responseSchema   string
+	responses        string
+	computerUse      string
 	clearAll         bool
 }
 
@@ -51,6 +53,8 @@ func capabilityBooleanBindings(flags *modelCapabilityFlags) []capabilityBooleanB
 		{name: "audio-input", value: &flags.audioInput},
 		{name: "audio-output", value: &flags.audioOutput},
 		{name: "response-schema", value: &flags.responseSchema},
+		{name: "responses", value: &flags.responses},
+		{name: "computer-use", value: &flags.computerUse},
 	}
 }
 
@@ -128,6 +132,8 @@ func (flags modelCapabilityFlags) apply(cmd *cobra.Command, current modelcap.Val
 		"audio-input":     &current.SupportsAudioInput,
 		"audio-output":    &current.SupportsAudioOutput,
 		"response-schema": &current.SupportsResponseSchema,
+		"responses":       &current.SupportsResponses,
+		"computer-use":    &current.SupportsComputerUse,
 	}
 	for _, capability := range capabilityBooleanBindings(&flags) {
 		if !cmd.Flags().Changed(capability.name) {

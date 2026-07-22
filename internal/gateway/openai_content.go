@@ -1,17 +1,17 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
 	"unicode"
 )
 
-func openAIMessagesFromAnthropic(message anthropicMessage) ([]openAIMessage, error) {
+func openAIMessagesFromAnthropicWithResolver(ctx context.Context, message anthropicMessage, resolver imageSourceResolver) ([]openAIMessage, error) {
 	switch message.Role {
 	case "user":
-		return openAIUserMessagesFromAnthropic(message.Content)
+		return openAIUserMessagesFromAnthropicWithResolver(ctx, message.Content, resolver)
 	case "assistant":
 		return openAIAssistantMessagesFromAnthropic(message.Content)
 	case "system":
@@ -32,7 +32,7 @@ func openAISystemMessagesFromAnthropic(content any) ([]openAIMessage, error) {
 	return []openAIMessage{{Role: "system", Content: text}}, nil
 }
 
-func openAIUserMessagesFromAnthropic(content any) ([]openAIMessage, error) {
+func openAIUserMessagesFromAnthropicWithResolver(ctx context.Context, content any, resolver imageSourceResolver) ([]openAIMessage, error) {
 	if text, ok := content.(string); ok {
 		return []openAIMessage{{Role: "user", Content: text}}, nil
 	}
@@ -40,167 +40,170 @@ func openAIUserMessagesFromAnthropic(content any) ([]openAIMessage, error) {
 	if !ok {
 		return nil, fmt.Errorf("unsupported user message content type %T", content)
 	}
-	var toolMessages []openAIMessage
-	parts := make([]openAIContentPart, 0, len(blocks))
+	return openAIUserBlockMessages(ctx, blocks, resolver)
+}
+
+type openAIUserBlockConversion struct {
+	part        any
+	toolMessage *openAIMessage
+}
+
+func openAIUserBlockMessages(ctx context.Context, blocks []any, resolver imageSourceResolver) ([]openAIMessage, error) {
+	toolMessages := make([]openAIMessage, 0)
+	parts := make([]any, 0, len(blocks))
 	for _, item := range blocks {
-		block, ok := item.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("user content block is not an object")
+		converted, err := openAIUserBlock(ctx, item, resolver)
+		if err != nil {
+			return nil, err
 		}
-		blockType, _ := block["type"].(string)
-		switch blockType {
-		case "text":
-			text, err := anthropicTextBlockText(block)
-			if err != nil {
-				return nil, fmt.Errorf("unsupported user text block: %w", err)
-			}
-			parts = append(parts, openAIContentPart{Type: "text", Text: text})
-		case "image":
-			imagePart, err := openAIImagePartFromAnthropic(block)
-			if err != nil {
-				return nil, err
-			}
-			parts = append(parts, imagePart)
-		case "tool_result":
-			toolMessage, images, err := openAIToolResultMessage(block)
-			if err != nil {
-				return nil, err
-			}
-			toolMessages = append(toolMessages, toolMessage)
-			parts = append(parts, images...)
-		default:
-			return nil, fmt.Errorf("user content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
+		if converted.toolMessage != nil {
+			toolMessages = append(toolMessages, *converted.toolMessage)
+			continue
 		}
+		parts = append(parts, converted.part)
 	}
+
 	// OpenAI requires every tool response to directly follow the assistant
 	// tool_calls message, contiguous and before any other role. Emit all tool
-	// messages first, then a single user message carrying the turn's remaining
-	// content: top-level text/images plus any images extracted from tool_result
-	// blocks (which the tool role cannot carry). This keeps tool responses
-	// contiguous even when a user turn mixes parallel tool_results with images.
-	messages := toolMessages
+	// messages first, then one user message carrying the turn's remaining
+	// top-level text/images.
+	messages := append([]openAIMessage(nil), toolMessages...)
 	if len(parts) > 0 {
-		messages = append(messages, userMessageFromParts(parts))
+		messages = append(messages, openAIMessage{Role: "user", Content: openAIContentFromParts(parts)})
 	}
 	return messages, nil
 }
 
-// openAIToolResultMessage converts an Anthropic tool_result block into an OpenAI
-// tool-role message plus any image content parts. The tool role cannot carry
-// image_url content on the OpenAI-compatible path, so images are returned
-// separately for the caller to place in the trailing user message (after every
-// tool message, preserving tool-response contiguity). When a tool_result
-// carries only images, a short placeholder keeps the tool content non-empty for
-// backends that reject empty tool messages.
-func openAIToolResultMessage(block map[string]any) (openAIMessage, []openAIContentPart, error) {
+func openAIUserBlock(ctx context.Context, item any, resolver imageSourceResolver) (openAIUserBlockConversion, error) {
+	block, ok := item.(map[string]any)
+	if !ok {
+		return openAIUserBlockConversion{}, fmt.Errorf("user content block is not an object")
+	}
+	blockType, _ := block["type"].(string)
+	switch blockType {
+	case "text":
+		text, err := anthropicTextBlockText(block)
+		if err != nil {
+			return openAIUserBlockConversion{}, fmt.Errorf("unsupported user text block: %w", err)
+		}
+		return openAIUserBlockConversion{part: map[string]any{"type": "text", "text": text}}, nil
+	case "image":
+		image, err := resolver(ctx, block)
+		if err != nil {
+			return openAIUserBlockConversion{}, err
+		}
+		return openAIUserBlockConversion{part: image}, nil
+	case "tool_result":
+		return openAIToolResultMessage(block)
+	default:
+		return openAIUserBlockConversion{}, fmt.Errorf("user content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
+	}
+}
+
+func openAIToolResultMessage(block map[string]any) (openAIUserBlockConversion, error) {
 	toolCallID, _ := block["tool_use_id"].(string)
 	toolCallID = strings.TrimSpace(toolCallID)
 	if toolCallID == "" {
-		return openAIMessage{}, nil, fmt.Errorf("tool_result block missing tool_use_id")
+		return openAIUserBlockConversion{}, fmt.Errorf("tool_result block missing tool_use_id")
 	}
-	textContent, images, err := splitToolResultImages(block["content"])
+	resultContent, err := openAIToolResultContent(block["content"])
 	if err != nil {
-		return openAIMessage{}, nil, err
+		return openAIUserBlockConversion{}, err
 	}
-	text, err := anthropicToolResultText(textContent)
-	if err != nil {
-		return openAIMessage{}, nil, err
-	}
-	if text == "" && len(images) > 0 {
-		text = "[image output]"
-	}
-	return openAIMessage{Role: "tool", ToolCallID: toolCallID, Content: text}, images, nil
+	message := openAIMessage{Role: "tool", ToolCallID: toolCallID, Content: resultContent}
+	return openAIUserBlockConversion{toolMessage: &message}, nil
 }
 
-// splitToolResultImages separates image blocks from the rest of a tool_result
-// content value. Non-array content (string, nil, object) has no images and is
-// returned unchanged. Non-image blocks are left untouched so the existing text
-// path validates and renders them exactly as before.
-func splitToolResultImages(value any) (any, []openAIContentPart, error) {
-	blocks, ok := value.([]any)
-	if !ok {
-		return value, nil, nil
-	}
-	textBlocks := make([]any, 0, len(blocks))
-	images := make([]openAIContentPart, 0)
-	for _, item := range blocks {
-		block, ok := item.(map[string]any)
+func openAIContentFromParts(parts []any) any {
+	text := make([]string, 0, len(parts))
+	for _, item := range parts {
+		part, ok := item.(map[string]any)
+		if !ok || part["type"] != "text" {
+			return openAIMultipartContent(parts)
+		}
+		value, ok := part["text"].(string)
 		if !ok {
-			textBlocks = append(textBlocks, item)
-			continue
+			return openAIMultipartContent(parts)
 		}
-		blockType, _ := block["type"].(string)
-		if strings.EqualFold(strings.TrimSpace(blockType), "image") {
-			image, err := openAIImagePartFromAnthropic(block)
-			if err != nil {
-				return nil, nil, err
-			}
-			images = append(images, image)
-			continue
-		}
-		textBlocks = append(textBlocks, item)
+		text = append(text, value)
 	}
-	return textBlocks, images, nil
+	return strings.Join(text, "\n")
 }
 
-// userMessageFromParts collapses a buffered run of user content parts into one
-// OpenAI user message. A run without images keeps the plain-string content form
-// so text-only requests are byte-for-byte unchanged; any image forces the
-// multipart representation.
-func userMessageFromParts(parts []openAIContentPart) openAIMessage {
-	hasNonText := slices.ContainsFunc(parts, func(part openAIContentPart) bool {
-		return part.Type != "text"
-	})
-	if !hasNonText {
-		texts := make([]string, 0, len(parts))
-		for _, part := range parts {
-			texts = append(texts, part.Text)
-		}
-		return openAIMessage{Role: "user", Content: strings.Join(texts, "\n")}
-	}
-	// Multipart form: drop empty text parts. An empty text part serializes as
-	// {"type":"text"} without the required text field (Text has omitempty) and
-	// strict OpenAI-compatible providers reject it.
-	kept := make([]openAIContentPart, 0, len(parts))
-	for _, part := range parts {
-		if part.Type == "text" && part.Text == "" {
+func openAIMultipartContent(parts []any) []any {
+	kept := make([]any, 0, len(parts))
+	for _, item := range parts {
+		part, ok := item.(map[string]any)
+		if ok && part["type"] == "text" && part["text"] == "" {
 			continue
 		}
-		kept = append(kept, part)
+		kept = append(kept, item)
 	}
-	return openAIMessage{Role: "user", Parts: kept}
+	return kept
 }
 
-// openAIImagePartFromAnthropic converts an Anthropic image block into an OpenAI
-// image_url content part. Base64 sources become inline data URLs; url sources
-// pass through directly.
-func openAIImagePartFromAnthropic(block map[string]any) (openAIContentPart, error) {
-	source, ok := block["source"].(map[string]any)
-	if !ok {
-		return openAIContentPart{}, fmt.Errorf("image block requires a source object")
+func openAIToolResultContent(value any) (any, error) {
+	if value == nil {
+		return "", nil
 	}
-	sourceType, _ := source["type"].(string)
-	switch strings.TrimSpace(sourceType) {
-	case "base64":
-		mediaType, _ := source["media_type"].(string)
-		data, _ := source["data"].(string)
-		mediaType = strings.TrimSpace(mediaType)
-		data = strings.TrimSpace(data)
-		if mediaType == "" || data == "" {
-			return openAIContentPart{}, fmt.Errorf("base64 image source requires media_type and data")
-		}
-		url := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-		return openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: url}}, nil
-	case "url":
-		url, _ := source["url"].(string)
-		url = strings.TrimSpace(url)
-		if url == "" {
-			return openAIContentPart{}, fmt.Errorf("url image source requires a url")
-		}
-		return openAIContentPart{Type: "image_url", ImageURL: &openAIImageURL{URL: url}}, nil
+	switch content := value.(type) {
+	case string:
+		return content, nil
+	case []any:
+		return openAIToolResultParts(content)
 	default:
-		return openAIContentPart{}, fmt.Errorf("image source type %q is not supported by the OpenAI-compatible gateway path", sourceType)
+		encoded, err := json.Marshal(content)
+		if err != nil {
+			return nil, fmt.Errorf("encoding tool_result content: %w", err)
+		}
+		return string(encoded), nil
 	}
+}
+
+func openAIToolResultParts(content []any) (any, error) {
+	parts := make([]any, 0, len(content))
+	for _, item := range content {
+		part, err := openAIToolResultPart(item)
+		if err != nil {
+			return nil, err
+		}
+		parts = append(parts, part)
+	}
+	return openAIContentFromParts(parts), nil
+}
+
+func openAIToolResultPart(item any) (any, error) {
+	block, ok := item.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("tool_result content block is not an object")
+	}
+	blockType, _ := block["type"].(string)
+	switch blockType {
+	case "text":
+		return openAIToolResultTextPart(block)
+	case "tool_reference":
+		return openAIToolReferencePart(block)
+	case "image":
+		return nil, fmt.Errorf("image tool_result content is not supported by the OpenAI-compatible Chat Completions gateway path")
+	default:
+		return nil, fmt.Errorf("tool_result content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
+	}
+}
+
+func openAIToolResultTextPart(block map[string]any) (any, error) {
+	text, err := anthropicTextBlockText(block)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"type": "text", "text": text}, nil
+}
+
+func openAIToolReferencePart(block map[string]any) (any, error) {
+	text, err := anthropicToolReferenceBlockText(block)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"type": "text", "text": text}, nil
 }
 
 func openAIAssistantMessagesFromAnthropic(content any) ([]openAIMessage, error) {

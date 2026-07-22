@@ -1,7 +1,9 @@
 package modelcap
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -82,6 +84,15 @@ func TestNormalizeValuesRejectsInvalidData(t *testing.T) {
 				t.Fatal("NormalizeValues() succeeded")
 			}
 		})
+	}
+}
+
+func TestValuesUnmarshalRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+	var values Values
+	err := json.Unmarshal([]byte(`{"supports_reponses": true}`), &values)
+	if err == nil || !strings.Contains(err.Error(), `json: unknown field "supports_reponses"`) {
+		t.Fatalf("json.Unmarshal() error = %v, want unknown field rejection", err)
 	}
 }
 

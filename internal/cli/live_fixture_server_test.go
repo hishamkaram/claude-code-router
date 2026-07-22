@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
+	openairesponses "github.com/hishamkaram/claude-code-router/internal/responses"
 )
 
 type liveFirstPartyClassifierFixture struct {
@@ -155,6 +156,8 @@ func (f *liveMatrixFixture) handle(t *testing.T, w http.ResponseWriter, r *http.
 		_, _ = fmt.Fprint(w, `{"input_tokens":7}`)
 	case "/v1/chat/completions":
 		f.handleOpenAI(t, w, r)
+	case "/v1/responses":
+		f.handleResponses(t, w, r)
 	case "/v1/messages":
 		f.handleAnthropic(t, w, r)
 	default:
@@ -170,13 +173,30 @@ func (f *liveMatrixFixture) handleOpenAI(t *testing.T, w http.ResponseWriter, r 
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	if f.protocol != "openai" || !strings.HasPrefix(payload.Model, "fixture-") {
+	if f.protocol != "openai-chat" || !strings.HasPrefix(payload.Model, "fixture-") {
 		t.Errorf("unexpected OpenAI fixture model %q for protocol %q", payload.Model, f.protocol)
 		http.Error(w, "unexpected model", http.StatusBadRequest)
 		return
 	}
 	f.recordAliasCall(payload.Model, len(payload.Tools) > 0)
 	f.writeOpenAIText(w, payload.Model)
+}
+
+func (f *liveMatrixFixture) handleResponses(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	var payload openairesponses.Request
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Errorf("decoding Responses fixture request: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if f.protocol != "openai-responses" || !strings.HasPrefix(payload.Model, "fixture-") {
+		t.Errorf("unexpected Responses fixture model %q for protocol %q", payload.Model, f.protocol)
+		http.Error(w, "unexpected model", http.StatusBadRequest)
+		return
+	}
+	f.recordAliasCall(payload.Model, len(payload.Tools) > 0)
+	writeLiveResponsesText(w, payload.Model, f.responseText(payload.Model))
 }
 
 func (f *liveMatrixFixture) handleAnthropic(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -195,7 +215,7 @@ func (f *liveMatrixFixture) handleAnthropic(t *testing.T, w http.ResponseWriter,
 		return
 	}
 	if strings.HasPrefix(payload.Model, "fixture-") {
-		if f.protocol != "anthropic" {
+		if f.protocol != "anthropic-native" {
 			t.Errorf("unexpected Anthropic alias model %q for protocol %q", payload.Model, f.protocol)
 			http.Error(w, "unexpected model", http.StatusBadRequest)
 			return
@@ -225,6 +245,11 @@ func (f *liveMatrixFixture) recordAliasCall(model string, tools bool) {
 func (f *liveMatrixFixture) writeOpenAIText(w http.ResponseWriter, model string) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-fixture","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`, f.responseText(model))
+}
+
+func writeLiveResponsesText(w http.ResponseWriter, model, text string) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprintf(w, `{"id":"resp_fixture","model":%q,"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":7,"output_tokens":3}}`, model, text)
 }
 
 func (f *liveMatrixFixture) responseText(model string) string {

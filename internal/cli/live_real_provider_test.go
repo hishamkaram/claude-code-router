@@ -49,8 +49,8 @@ func TestLiveConfiguredProviderAutoModeAgentWebFetch(t *testing.T) {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
 	prompt := `Use the Agent tool to launch one general-purpose subagent. The subagent must use WebFetch on https://example.com and then return exactly CCR_LIVE_REAL_WEBFETCH_CHILD_OK. After the subagent finishes, reply exactly CCR_LIVE_REAL_WEBFETCH_PARENT_OK. Do not use Bash or shell.`
-	out, errOut, modelAlias := runConfiguredProviderProbe(t, ctx, prompt)
-	assertConfiguredProviderProbe(t, out, errOut, modelAlias, "CCR_LIVE_REAL_WEBFETCH_PARENT_OK")
+	out, errOut, modelAlias := runConfiguredProviderProbeWithAuthMode(t, ctx, "preserve", prompt)
+	assertConfiguredProviderProbeWithAuthMode(t, out, errOut, modelAlias, "preserve", "CCR_LIVE_REAL_WEBFETCH_PARENT_OK")
 }
 
 func TestLiveConfiguredProviderAutoModeWorkflow(t *testing.T) {
@@ -87,12 +87,12 @@ return result
 		"--permission-mode", "auto", "--tools", "Workflow",
 	)
 	if err != nil {
-		t.Fatalf("configured Anthropic-to-provider Workflow error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+		failLiveRealCommand(t, "configured Anthropic-to-provider Workflow", err, out, errOut)
 	}
 	combined := out + "\n" + errOut
 	for _, forbidden := range []string{"temporarily unavailable", "API Error", "InputValidationError"} {
 		if strings.Contains(combined, forbidden) {
-			t.Fatalf("configured Workflow output contains %q\nstdout:\n%s\nstderr:\n%s", forbidden, out, errOut)
+			failLiveRealOutput(t, fmt.Sprintf("configured Workflow output contains %q", forbidden), out, errOut)
 		}
 	}
 	for _, want := range []string{
@@ -100,16 +100,21 @@ return result
 		"Registered ccr models are available in Claude Code's /model picker",
 	} {
 		if !strings.Contains(combined, want) {
-			t.Fatalf("configured Workflow diagnostics missing %q\nstdout:\n%s\nstderr:\n%s", want, out, errOut)
+			failLiveRealOutput(t, fmt.Sprintf("configured Workflow diagnostics missing %q", want), out, errOut)
 		}
 	}
 	if strings.TrimSpace(out) == "" {
-		t.Fatalf("configured provider Workflow returned no user-facing response\nstderr:\n%s", errOut)
+		failLiveRealOutput(t, "configured provider Workflow returned no user-facing response", out, errOut)
 	}
 	assertConfiguredWorkflowEvidence(t, ctx, modelAlias)
 }
 
 func runConfiguredProviderProbe(t *testing.T, ctx context.Context, prompt string, claudeArgs ...string) (string, string, string) {
+	t.Helper()
+	return runConfiguredProviderProbeWithAuthMode(t, ctx, "gateway-token", prompt, claudeArgs...)
+}
+
+func runConfiguredProviderProbeWithAuthMode(t *testing.T, ctx context.Context, authMode, prompt string, claudeArgs ...string) (string, string, string) {
 	t.Helper()
 	if os.Getenv("CCR_LIVE_CONFIGURED_PROVIDER") != "1" {
 		t.Skip("set CCR_LIVE_CONFIGURED_PROVIDER=1 to run against the configured real provider")
@@ -118,38 +123,57 @@ func runConfiguredProviderProbe(t *testing.T, ctx context.Context, prompt string
 	if modelAlias == "" {
 		modelAlias = "glm-5-2"
 	}
-	args := []string{"launch", "--model", modelAlias, "--print", "--auth-mode", "gateway-token", "--permission-mode", "auto"}
+	if authMode == "" {
+		authMode = "gateway-token"
+	}
+	args := []string{"launch", "--model", modelAlias, "--print", "--auth-mode", authMode, "--permission-mode", "auto"}
 	args = append(args, claudeArgs...)
 	if dbPath := strings.TrimSpace(os.Getenv("CCR_LIVE_CONFIGURED_DB")); dbPath != "" {
 		args = append([]string{"--db", dbPath}, args...)
 	}
 	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader(prompt + "\n")}, args...)
 	if err != nil {
-		t.Fatalf("configured provider launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+		failLiveRealCommand(t, "configured provider launch", err, out, errOut)
 	}
 	return out, errOut, modelAlias
 }
 
 func assertConfiguredProviderProbe(t *testing.T, out, errOut, modelAlias string, sentinels ...string) {
 	t.Helper()
+	assertConfiguredProviderProbeWithAuthMode(t, out, errOut, modelAlias, "gateway-token", sentinels...)
+}
+
+func assertConfiguredProviderProbeWithAuthMode(t *testing.T, out, errOut, modelAlias, authMode string, sentinels ...string) {
+	t.Helper()
 	combined := out + "\n" + errOut
 	for _, sentinel := range sentinels {
 		if !strings.Contains(out, sentinel) {
-			t.Fatalf("configured provider output missing %q\nstdout:\n%s\nstderr:\n%s", sentinel, out, errOut)
+			failLiveRealOutput(t, fmt.Sprintf("configured provider output missing %q", sentinel), out, errOut)
 		}
 	}
 	for _, forbidden := range []string{"temporarily unavailable", "API Error"} {
 		if strings.Contains(combined, forbidden) {
-			t.Fatalf("configured provider output contains %q\nstdout:\n%s\nstderr:\n%s", forbidden, out, errOut)
+			failLiveRealOutput(t, fmt.Sprintf("configured provider output contains %q", forbidden), out, errOut)
 		}
 	}
-	for _, want := range []string{
+	wants := []string{
 		`Selected ccr model alias "` + modelAlias + `"`,
-		"Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN",
-		"Original Anthropic subscription login and Anthropic API-key auth are not active",
-	} {
+	}
+	if authMode == "preserve" {
+		wants = append(wants,
+			"Gateway accepts the generated local X-CCR-Session-Token",
+			"Original Anthropic subscription login and Anthropic API-key auth are preserved",
+			"Registered ccr models are available in Claude Code's /model picker",
+		)
+	} else {
+		wants = append(wants,
+			"Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN",
+			"Original Anthropic subscription login and Anthropic API-key auth are not active",
+		)
+	}
+	for _, want := range wants {
 		if !strings.Contains(combined, want) {
-			t.Fatalf("configured provider diagnostics missing %q\nstdout:\n%s\nstderr:\n%s", want, out, errOut)
+			failLiveRealOutput(t, fmt.Sprintf("configured provider diagnostics missing %q", want), out, errOut)
 		}
 	}
 }
@@ -312,7 +336,10 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 		"--permission-mode", "auto",
 	)
 	if err != nil {
-		t.Fatalf("real provider switch matrix error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+		if liveAnthropicAuthUnavailable(out + "\n" + errOut) {
+			t.Fatalf("real provider switch matrix requires valid first-party Anthropic authentication; sign in to Claude Code or configure ANTHROPIC_API_KEY, then retry; %s", liveRealOutputSummary(out, errOut))
+		}
+		failLiveRealCommand(t, "real provider switch matrix", err, out, errOut)
 	}
 	for index := range models {
 		for _, sentinel := range []string{
@@ -320,12 +347,12 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 			fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index),
 		} {
 			if !strings.Contains(out, sentinel) {
-				t.Fatalf("real provider matrix output missing %q\nstdout:\n%s\nstderr:\n%s", sentinel, out, errOut)
+				failLiveRealOutput(t, fmt.Sprintf("real provider matrix output missing %q", sentinel), out, errOut)
 			}
 		}
 	}
 	if !strings.Contains(out, "CCR_LIVE_REAL_ANTHROPIC_INITIAL") {
-		t.Fatalf("real provider matrix output missing first-party sentinel\nstdout:\n%s\nstderr:\n%s", out, errOut)
+		failLiveRealOutput(t, "real provider matrix output missing first-party sentinel", out, errOut)
 	}
 }
 
@@ -337,10 +364,32 @@ func runLiveRealChatOnlyAlias(t *testing.T, ctx context.Context, dbPath string, 
 		"--db", dbPath, "launch", "--model", model.Alias, "--print", "--auth-mode", "gateway-token",
 	)
 	if err != nil {
-		t.Fatalf("real chat-only alias %q error = %v\nstdout:\n%s\nstderr:\n%s", model.Alias, err, out, errOut)
+		failLiveRealCommand(t, fmt.Sprintf("real chat-only alias %q", model.Alias), err, out, errOut)
 	}
 	if !strings.Contains(out, sentinel) {
-		t.Fatalf("real chat-only alias %q output missing %q\nstdout:\n%s\nstderr:\n%s", model.Alias, sentinel, out, errOut)
+		failLiveRealOutput(t, fmt.Sprintf("real chat-only alias %q output missing %q", model.Alias, sentinel), out, errOut)
+	}
+}
+
+func failLiveRealCommand(t *testing.T, operation string, err error, out, errOut string) {
+	t.Helper()
+	failLiveRealOutput(t, fmt.Sprintf("%s: %v", operation, err), out, errOut)
+}
+
+func failLiveRealOutput(t *testing.T, message, out, errOut string) {
+	t.Helper()
+	t.Fatalf("%s; %s", message, liveRealOutputSummary(out, errOut))
+}
+
+func liveRealOutputSummary(out, errOut string) string {
+	return fmt.Sprintf("Claude Code output withheld (stdout_bytes=%d stderr_bytes=%d)", len(out), len(errOut))
+}
+
+func TestLiveRealOutputSummaryWithholdsContent(t *testing.T) {
+	t.Parallel()
+	summary := liveRealOutputSummary("private prompt", "private hook payload")
+	if strings.Contains(summary, "private") {
+		t.Fatalf("live output summary leaked raw content: %q", summary)
 	}
 }
 

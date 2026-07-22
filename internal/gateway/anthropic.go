@@ -18,9 +18,13 @@ import (
 func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string) observability.TokenUsage {
 	if body == nil {
 		var err error
-		body, err = io.ReadAll(io.LimitReader(r.Body, 16<<20))
+		body, err = io.ReadAll(io.LimitReader(r.Body, maxGatewayRequestBytes+1))
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadRequest, "invalid Anthropic request")
+			return observability.TokenUsage{}
+		}
+		if len(body) > maxGatewayRequestBytes {
+			writeAnthropicError(w, http.StatusRequestEntityTooLarge, "Anthropic request exceeds the 32 MiB gateway limit")
 			return observability.TokenUsage{}
 		}
 	}
@@ -66,10 +70,7 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("requesting Anthropic provider %q: %v", provider.Name, err))
 		return observability.TokenUsage{}
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	return copyProviderResponseBody(w, resp, responseModel)

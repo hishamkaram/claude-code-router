@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -46,6 +47,20 @@ func TestDoctorIsOfflineByDefaultAndBoundsLiveTargets(t *testing.T) {
 	}
 	if offline.SchemaVersion != 1 || len(offline.Probes) != 0 || offline.Status != "passed" {
 		t.Fatalf("offline doctor = %#v", offline)
+	}
+	foundProviderCheck := false
+	for _, check := range offline.Checks {
+		if check.Name != "provider:fixture" {
+			continue
+		}
+		foundProviderCheck = true
+		if check.SupportsResponses == nil || !*check.SupportsResponses || !strings.Contains(check.Evidence, "responses=true") {
+			t.Fatalf("provider capability diagnosis = %#v", check)
+		}
+		break
+	}
+	if !foundProviderCheck {
+		t.Fatalf("provider check missing: %#v", offline.Checks)
 	}
 
 	out, errOut, err := runCommand(t, "--db", dbPath, "doctor", "--live", "--json")
@@ -124,14 +139,22 @@ func TestDoctorLiveFailureReturnsNonzeroWithJSON(t *testing.T) {
 	}
 }
 
-func TestDoctorLiveControlModelSuggestsRemoval(t *testing.T) {
+func TestDoctorLiveSkipsProviderControlModels(t *testing.T) {
 	t.Parallel()
+	var controlRequests atomic.Int64
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"model-a"},{"id":"model-b"},{"id":"all-proxy-models"}]}`)
 		case "/v1/chat/completions":
+			var request struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			if request.Model == "all-proxy-models" {
+				controlRequests.Add(1)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}]}`)
 		default:
@@ -144,25 +167,88 @@ func TestDoctorLiveControlModelSuggestsRemoval(t *testing.T) {
 		Alias: "control", ProviderName: "fixture", ProviderModel: "all-proxy-models", Status: "degraded",
 	})
 
-	out, _, err := runCommand(t, "--db", dbPath, "doctor", "--live", "--all", "--json")
-	if err == nil || !strings.Contains(err.Error(), "required failures") {
+	out, errOut, err := runCommand(t, "--db", dbPath, "doctor", "--live", "--all", "--json")
+	if err != nil {
 		t.Fatalf("doctor control-model error = %v", err)
 	}
 	var document doctorDocument
 	if decodeErr := json.Unmarshal([]byte(out), &document); decodeErr != nil {
 		t.Fatalf("doctor control-model JSON error = %v\n%s", decodeErr, out)
 	}
+	if document.Status != "passed" || controlRequests.Load() != 0 || strings.Contains(errOut, "alias=control") {
+		t.Fatalf("control-model live probes = document=%#v control_requests=%d stderr=%s", document, controlRequests.Load(), errOut)
+	}
 	for _, probe := range document.Probes {
 		if probe.Alias != "control" {
 			continue
 		}
-		if probe.FailedCheck != "" || probe.FailureKind != "suite_start" ||
-			probe.Action != "ccr model remove control --yes" {
+		if probe.Status != doctorProbeStatusSkipped || probe.Protocol != "openai-compatible" ||
+			!strings.Contains(probe.Evidence, "excluded from routing and live probes") {
 			t.Fatalf("control-model diagnosis = %#v", probe)
+		}
+		humanOut, _, humanErr := runCommand(t, "--db", dbPath, "doctor", "--live", "--all")
+		if humanErr != nil || !strings.Contains(humanOut, "Live control: skipped") ||
+			!strings.Contains(humanOut, "skipped: provider control model is excluded") {
+			t.Fatalf("control-model human diagnosis = error=%v output=%s", humanErr, humanOut)
 		}
 		return
 	}
 	t.Fatalf("control-model probe missing: %#v", document.Probes)
+}
+
+func TestDoctorLiveAllSkipsResponsesAliasWithoutProviderSupport(t *testing.T) {
+	t.Parallel()
+	var responsesRequests atomic.Int64
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"data":[{"id":"model-a"},{"id":"responses-model"}]}`)
+		case "/v1/chat/completions":
+			var request struct {
+				Model string `json:"model"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&request)
+			if request.Model == "responses-model" {
+				responsesRequests.Add(1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	dbPath := seedDoctorProviderWithoutResponses(t, provider.URL)
+	addDoctorModel(t, dbPath, store.Model{
+		Alias: "responses", ProviderName: "fixture", ProviderModel: "responses-model", Status: "degraded",
+		CapabilityOverrides: modelcap.Values{
+			Kind:              modelcap.KindResponses,
+			SupportsResponses: modelcap.Bool(true),
+		},
+	})
+
+	out, errOut, err := runCommand(t, "--db", dbPath, "doctor", "--live", "--all", "--json")
+	if err != nil {
+		t.Fatalf("doctor responses-skip error = %v\nstderr=%s", err, errOut)
+	}
+	var document doctorDocument
+	if decodeErr := json.Unmarshal([]byte(out), &document); decodeErr != nil {
+		t.Fatalf("doctor responses-skip JSON error = %v\n%s", decodeErr, out)
+	}
+	if document.Status != "passed" || responsesRequests.Load() != 0 || strings.Contains(errOut, "alias=responses") {
+		t.Fatalf("responses live probes = document=%#v responses_requests=%d stderr=%s", document, responsesRequests.Load(), errOut)
+	}
+	for _, probe := range document.Probes {
+		if probe.Alias != "responses" {
+			continue
+		}
+		if probe.Status != doctorProbeStatusSkipped || !strings.Contains(probe.Evidence, "Responses API route is excluded") {
+			t.Fatalf("responses skip diagnosis = %#v", probe)
+		}
+		return
+	}
+	t.Fatalf("responses skip probe missing: %#v", document.Probes)
 }
 
 func seedDoctorModels(t *testing.T, baseURL string) string {
@@ -177,7 +263,7 @@ func seedDoctorModels(t *testing.T, baseURL string) string {
 		t.Fatalf("Migrate() error = %v", err)
 	}
 	if err := s.AddProvider(ctx, store.Provider{
-		Name: "fixture", Type: "litellm", BaseURL: baseURL,
+		Name: "fixture", Type: "litellm", BaseURL: baseURL, SupportsResponses: true,
 	}); err != nil {
 		t.Fatalf("AddProvider() error = %v", err)
 	}
@@ -188,6 +274,31 @@ func seedDoctorModels(t *testing.T, baseURL string) string {
 		if err := s.AddModel(ctx, model); err != nil {
 			t.Fatalf("AddModel(%s) error = %v", model.Alias, err)
 		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return dbPath
+}
+
+func seedDoctorProviderWithoutResponses(t *testing.T, baseURL string) string {
+	t.Helper()
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if err := s.AddProvider(ctx, store.Provider{Name: "fixture", Type: "litellm", BaseURL: baseURL}); err != nil {
+		t.Fatalf("AddProvider() error = %v", err)
+	}
+	if err := s.AddModel(ctx, store.Model{
+		Alias: "alpha", ProviderName: "fixture", ProviderModel: "model-a", Status: "degraded",
+	}); err != nil {
+		t.Fatalf("AddModel(alpha) error = %v", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)

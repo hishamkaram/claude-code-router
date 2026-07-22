@@ -32,7 +32,7 @@ func TestModelInputModalitiesIgnoreTypesInsideToolInput(t *testing.T) {
 	}
 }
 
-func TestModelCapabilitiesForRouteMasksOnlyUntranslatableOpenAIInput(t *testing.T) {
+func TestModelCapabilitiesForRouteMasksUnsupportedOpenAIInput(t *testing.T) {
 	t.Parallel()
 	values := modelcap.Values{
 		SupportsVision: modelcap.Bool(true), SupportsPDFInput: modelcap.Bool(true),
@@ -51,6 +51,25 @@ func TestModelCapabilitiesForRouteMasksOnlyUntranslatableOpenAIInput(t *testing.
 		anthropic.SupportsPDFInput == nil || !*anthropic.SupportsPDFInput ||
 		anthropic.SupportsAudioInput == nil || !*anthropic.SupportsAudioInput {
 		t.Fatalf("Anthropic route capabilities = %#v", anthropic)
+	}
+
+	unknownVision := modelCapabilitiesForRoute(providers.Capabilities{Protocol: providers.ProtocolOpenAICompatible}, modelcap.Values{})
+	if !explicitlyFalse(unknownVision.SupportsVision) {
+		t.Fatalf("OpenAI route with unknown vision support = %#v", unknownVision)
+	}
+
+	imageModalities := modelCapabilitiesForRoute(providers.Capabilities{Protocol: providers.ProtocolOpenAICompatible}, modelcap.Values{
+		InputModalities: []string{"text", "image"},
+	})
+	imageRequest := anthropicRequest{Messages: []anthropicMessage{{
+		Role: "user",
+		Content: []any{map[string]any{
+			"type":   "image",
+			"source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AA=="},
+		}},
+	}}}
+	if validationErr := validateModelInputModalities(store.Model{Alias: "vision"}, imageModalities, imageRequest); validationErr != nil {
+		t.Fatalf("explicit image modality rejected: %v", validationErr)
 	}
 }
 
@@ -83,11 +102,8 @@ func TestValidateModelInputModalitiesGatesImageOnVision(t *testing.T) {
 	}
 }
 
-func TestValidateModelInputModalitiesForwardsImageWhenVisionUnknown(t *testing.T) {
+func TestValidateModelInputModalitiesRejectsImageWhenVisionUnknown(t *testing.T) {
 	t.Parallel()
-	// The point of dropping the OpenAI-compat vision mask: when vision is neither
-	// declared nor denied (nil, no modality list), the image is forwarded so the
-	// provider decides, rather than being pre-emptively 501'd.
 	req := anthropicRequest{Messages: []anthropicMessage{{
 		Role: "user",
 		Content: []any{map[string]any{
@@ -95,9 +111,13 @@ func TestValidateModelInputModalitiesForwardsImageWhenVisionUnknown(t *testing.T
 			"source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AAAA"},
 		}},
 	}}}
-	capabilities := modelcap.Values{} // SupportsVision nil, InputModalities empty
-	if validationErr := validateModelInputModalities(store.Model{Alias: "unknown-vision"}, capabilities, req); validationErr != nil {
-		t.Fatalf("validateModelInputModalities() with unknown vision error = %v", validationErr)
+	capabilities := modelCapabilitiesForRoute(
+		providers.Capabilities{Protocol: providers.ProtocolOpenAICompatible},
+		modelcap.Values{},
+	)
+	validationErr := validateModelInputModalities(store.Model{Alias: "unknown-vision"}, capabilities, req)
+	if validationErr == nil || validationErr.status != http.StatusNotImplemented {
+		t.Fatalf("validateModelInputModalities() with unknown vision = %#v, want 501 rejection", validationErr)
 	}
 }
 
@@ -116,6 +136,52 @@ func TestRequestContentBlockTypesIncludeToolResultContent(t *testing.T) {
 	types := requestContentBlockTypes(req)
 	if !types["tool_result"] || !types["image"] || types["base64"] {
 		t.Fatalf("requestContentBlockTypes() = %#v", types)
+	}
+}
+
+func TestModelInputModalitiesIgnoreNativeCUAScreenshotResults(t *testing.T) {
+	t.Parallel()
+	req := anthropicRequest{
+		Tools: []json.RawMessage{json.RawMessage(`{"type":"computer_20250124","name":"computer"}`)},
+		Messages: []anthropicMessage{
+			{
+				Role: "assistant",
+				Content: []any{map[string]any{
+					"type": "tool_use", "id": "call_screen", "name": "computer",
+					"input": map[string]any{"action": "screenshot"},
+				}},
+			},
+			{
+				Role: "user",
+				Content: []any{map[string]any{
+					"type": "tool_result", "tool_use_id": "call_screen",
+					"content": []any{map[string]any{
+						"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AA=="},
+					}},
+				}},
+			},
+		},
+	}
+	capabilities := modelcap.Values{InputModalities: []string{"text"}, SupportsVision: modelcap.Bool(false)}
+	if validationErr := validateModelInputModalities(store.Model{Alias: "cua"}, capabilities, req); validationErr != nil {
+		t.Fatalf("validateModelInputModalities() error = %v", validationErr)
+	}
+}
+
+func TestModelInputModalitiesStillRejectsGenericImageToolResults(t *testing.T) {
+	t.Parallel()
+	req := anthropicRequest{Messages: []anthropicMessage{{
+		Role: "user",
+		Content: []any{map[string]any{
+			"type": "tool_result", "tool_use_id": "call_function",
+			"content": []any{map[string]any{
+				"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "AA=="},
+			}},
+		}},
+	}}}
+	capabilities := modelcap.Values{InputModalities: []string{"text"}, SupportsVision: modelcap.Bool(false)}
+	if validationErr := validateModelInputModalities(store.Model{Alias: "text-only"}, capabilities, req); validationErr == nil {
+		t.Fatal("validateModelInputModalities() succeeded for a generic image tool result")
 	}
 }
 

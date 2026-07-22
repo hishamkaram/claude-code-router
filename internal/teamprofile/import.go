@@ -56,6 +56,7 @@ func (m Manifest) PlanImport(bindings map[string]string) (ImportPlan, error) {
 			SupportsThinking:       provider.Capabilities.Thinking,
 			SupportsModelDiscovery: provider.Capabilities.ModelDiscovery,
 			SupportsCountTokens:    provider.Capabilities.CountTokens,
+			SupportsResponses:      provider.Capabilities.Responses,
 			Mode:                   provider.Mode,
 		})
 	}

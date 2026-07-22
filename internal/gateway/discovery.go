@@ -7,6 +7,7 @@ import (
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -34,33 +35,17 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	for index := range models {
 		model := &models[index]
-		if model.Status == "blocked" {
-			continue
-		}
-		if providers.IsProviderControlModel(providerTypes[model.ProviderName], model.ProviderModel) {
-			continue
-		}
-		effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
-		if err != nil {
-			writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("computing capabilities for model alias %q: %v", model.Alias, err))
-			return
-		}
-		if !modelcap.IsRoutableKind(effective.Values.Kind) {
-			continue
-		}
-		advertisedCapabilities := modelCapabilitiesForRoute(providerCapabilities[model.ProviderName], effective.Values)
-		id, err := DiscoveryIDForModel(*model)
+		entry, advertise, err := configuredGatewayModelEntry(
+			model,
+			providerTypes[model.ProviderName],
+			providerCapabilities[model.ProviderName],
+		)
 		if err != nil {
 			writeAnthropicError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		entry := gatewayModelEntry{
-			ID: id, DisplayName: fmt.Sprintf("CCR %s (%s)", model.Alias, model.ProviderModel), Type: "model",
-			MaxInputTokens: effective.Values.ContextWindowTokens, MaxTokens: effective.Values.MaxOutputTokens,
-			Capabilities: gatewayDiscoveryCapabilities(advertisedCapabilities),
-		}
-		if entry.MaxInputTokens == nil {
-			entry.MaxInputTokens = effective.Values.MaxInputTokens
+		if !advertise {
+			continue
 		}
 		appendGatewayModelEntry(&entries, seen, entry)
 	}
@@ -71,6 +56,34 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": entries, "first_id": firstID, "last_id": lastID, "has_more": false,
 	})
+}
+
+func configuredGatewayModelEntry(model *store.Model, providerType string, provider providers.Capabilities) (gatewayModelEntry, bool, error) {
+	if model.Status == "blocked" || providers.IsProviderControlModel(providerType, model.ProviderModel) {
+		return gatewayModelEntry{}, false, nil
+	}
+	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if err != nil {
+		return gatewayModelEntry{}, false, fmt.Errorf("computing capabilities for model alias %q: %w", model.Alias, err)
+	}
+	if !modelcap.IsRoutableKind(effective.Values.Kind) ||
+		(modelUsesResponsesAPI(effective.Values) && !supportsResponsesRoute(provider, effective.Values)) {
+		return gatewayModelEntry{}, false, nil
+	}
+	id, err := DiscoveryIDForModel(*model)
+	if err != nil {
+		return gatewayModelEntry{}, false, err
+	}
+	advertisedCapabilities := modelCapabilitiesForRoute(provider, effective.Values)
+	entry := gatewayModelEntry{
+		ID: id, DisplayName: fmt.Sprintf("CCR %s (%s)", model.Alias, model.ProviderModel), Type: "model",
+		MaxInputTokens: effective.Values.ContextWindowTokens, MaxTokens: effective.Values.MaxOutputTokens,
+		Capabilities: gatewayDiscoveryCapabilities(advertisedCapabilities),
+	}
+	if entry.MaxInputTokens == nil {
+		entry.MaxInputTokens = effective.Values.MaxInputTokens
+	}
+	return entry, true, nil
 }
 
 type gatewayModelEntry struct {

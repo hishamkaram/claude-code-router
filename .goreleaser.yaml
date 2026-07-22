@@ -50,6 +50,6 @@ release:
   github:
     owner: hishamkaram
     name: claude-code-router
-  draft: false
+  draft: true
   prerelease: auto
   name_template: '{{ .Tag }}'

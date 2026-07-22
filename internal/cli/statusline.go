@@ -56,10 +56,7 @@ func fetchStatusline(ctx context.Context, gatewayURL, token string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("requesting runtime status: %w", err)
 	}
-	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("runtime status returned HTTP %d", resp.StatusCode)
 	}

@@ -19,6 +19,7 @@ import (
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
 	"github.com/hishamkaram/claude-code-router/internal/liveclaude"
+	openairesponses "github.com/hishamkaram/claude-code-router/internal/responses"
 )
 
 type liveClaudeConformanceFixture struct {
@@ -85,7 +86,7 @@ func runLiveMalformedResponseProtocol(t *testing.T, ctx context.Context, protoco
 		case "/v1/messages/count_tokens":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"input_tokens":1}`)
-		case "/v1/chat/completions", "/v1/messages":
+		case "/v1/chat/completions", "/v1/messages", "/v1/responses":
 			malformedCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"content":[`+rawBodyMarker)
@@ -107,13 +108,18 @@ func runLiveMalformedResponseProtocol(t *testing.T, ctx context.Context, protoco
 		return gateway.Start(ctx, cfg)
 	}}
 	providerType := "litellm"
-	if protocol == "anthropic" {
-		providerType = "zai"
+	if protocol == "anthropic-native" {
+		providerType = "anthropic"
 	}
-	for _, args := range [][]string{
+	commands := [][]string{
 		{"--db", dbPath, "provider", "add", "malformed", "--type", providerType, "--base-url", provider.URL, "--no-api-key", "--mode", "full"},
 		{"--db", dbPath, "model", "add", "malformed", "--provider", "malformed", "--model", "fixture-malformed-model", "--compat", "full"},
-	} {
+	}
+	if protocol == "openai-responses" {
+		commands[0] = append(commands[0], "--responses")
+		commands = append(commands, []string{"--db", dbPath, "model", "update", "malformed", "--model-kind", "responses", "--responses", "true"})
+	}
+	for _, args := range commands {
 		out, errOut, commandErr := runLiveCommand(ctx, deps, args...)
 		if commandErr != nil {
 			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, commandErr, out, errOut)
@@ -160,13 +166,20 @@ func runLiveClaudeConformanceProtocol(t *testing.T, ctx context.Context, protoco
 		},
 	}
 	providerType := "litellm"
-	if protocol == "anthropic" {
-		providerType = "zai"
+	if protocol == "anthropic-native" {
+		providerType = "anthropic"
 	}
 	commands := [][]string{
 		{"--db", dbPath, "provider", "add", "fixture", "--type", providerType, "--base-url", fixture.URL(), "--no-api-key", "--mode", "full"},
 		{"--db", dbPath, "model", "add", "fixture-sonnet", "--provider", "fixture", "--model", "fixture-full-model", "--compat", "full"},
 		{"--db", dbPath, "model", "add", "fixture-chat", "--provider", "fixture", "--model", "fixture-chat-model", "--compat", "chat-only"},
+	}
+	if protocol == "openai-responses" {
+		commands[0] = append(commands[0], "--responses")
+		commands = append(commands,
+			[]string{"--db", dbPath, "model", "update", "fixture-sonnet", "--model-kind", "responses", "--responses", "true"},
+			[]string{"--db", dbPath, "model", "update", "fixture-chat", "--model-kind", "responses", "--responses", "true"},
+		)
 	}
 	for _, args := range commands {
 		out, errOut, err := runLiveCommand(ctx, deps, args...)
@@ -236,6 +249,8 @@ func (f *liveClaudeConformanceFixture) handle(t *testing.T, w http.ResponseWrite
 		_, _ = fmt.Fprint(w, `{"input_tokens":7}`)
 	case "/v1/chat/completions":
 		f.handleOpenAI(t, w, r)
+	case "/v1/responses":
+		f.handleResponses(t, w, r)
 	case "/v1/messages":
 		f.handleAnthropic(t, w, r)
 	default:
@@ -286,6 +301,58 @@ func (f *liveClaudeConformanceFixture) handleOpenAI(t *testing.T, w http.Respons
 		})
 	default:
 		f.writeOpenAIText(w, latestConformanceSentinel(latest))
+	}
+}
+
+func (f *liveClaudeConformanceFixture) handleResponses(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	var payload openairesponses.Request
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		t.Errorf("decoding Responses conformance request: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if f.protocol != "openai-responses" {
+		t.Errorf("unexpected Responses conformance request for protocol %q", f.protocol)
+		http.Error(w, "unexpected protocol", http.StatusBadRequest)
+		return
+	}
+	f.recordAlias(payload.Model)
+	latest := latestResponsesInput(payload.Input)
+	f.recordRequestStep(payload.Model, latest)
+	if strings.Contains(latest, "CCR_CONFORMANCE_CANCEL") {
+		waitForFixtureCancellation(r)
+		return
+	}
+	if isLiveResponsesAutoClassifierRequest(payload) {
+		writeLiveResponsesText(w, payload.Model, liveClassifierAllowResponse(payload.Instructions))
+		return
+	}
+	switch {
+	case liveResponsesToolsContain(payload.Tools, "ccr_probe"):
+		writeLiveResponsesFunctionCall(w, payload.Model, "ccr_probe", "toolu_conformance", map[string]any{})
+	case !f.workflowStarted() && strings.Contains(latest, claudeConformanceWorkflowParent):
+		f.markWorkflow()
+		writeLiveResponsesFunctionCall(w, payload.Model, "Workflow", "toolu_workflow_conformance", map[string]any{"script": conformanceWorkflowScript()})
+	case f.workflowStarted() && responsesInputContains(payload.Input, "<task-notification>"):
+		writeLiveResponsesText(w, payload.Model, claudeConformanceWorkflowParent)
+	case f.workflowStarted() && responsesInputContains(payload.Input, "Workflow launched in background"):
+		writeLiveResponsesText(w, payload.Model, claudeConformanceWorkflowParent)
+	case f.workflowStarted() && strings.Contains(payload.Instructions, "subagent spawned by a workflow orchestration script") &&
+		strings.Contains(latest, claudeConformanceWorkflowChild):
+		writeLiveResponsesText(w, payload.Model, claudeConformanceWorkflowChild)
+	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && responsesInputHasToolOutput(payload.Input):
+		writeLiveResponsesText(w, payload.Model, claudeConformanceAgentParent)
+	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && !strings.Contains(latest, claudeConformanceAgentParent):
+		writeLiveResponsesText(w, payload.Model, "CCR_CONFORMANCE_AGENT_CHILD_OK")
+	case strings.Contains(latest, claudeConformanceAgentParent):
+		f.markAgentTool()
+		writeLiveResponsesFunctionCall(w, payload.Model, "Agent", "toolu_agent_conformance", map[string]any{
+			"description": "return conformance sentinel", "prompt": "Return exactly CCR_CONFORMANCE_AGENT_CHILD_OK.",
+			"subagent_type": "general-purpose", "run_in_background": false,
+		})
+	default:
+		writeLiveResponsesText(w, payload.Model, latestConformanceSentinel(latest))
 	}
 }
 
@@ -358,6 +425,102 @@ func latestOpenAIMessage(messages []liveOpenAIChatMessage) string {
 	return message.Role + " " + message.Content
 }
 
+func isLiveResponsesAutoClassifierRequest(payload openairesponses.Request) bool {
+	return strings.Contains(payload.Instructions, "You are a security monitor for autonomous AI coding agents.") ||
+		responsesInputContains(payload.Input, "You are a security monitor for autonomous AI coding agents.")
+}
+
+func liveResponsesToolsContain(tools []openairesponses.Tool, name string) bool {
+	for _, tool := range tools {
+		if tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func responsesInputContains(input []openairesponses.InputItem, needle string) bool {
+	for _, item := range input {
+		if strings.Contains(responsesInputItemText(item), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestResponsesConformancePrioritizesWorkflowCompletion(t *testing.T) {
+	t.Parallel()
+	fixture := &liveClaudeConformanceFixture{
+		protocol: "openai-responses", aliasModels: make(map[string]int),
+	}
+	fixture.markWorkflow()
+	payload := openairesponses.Request{
+		Model:        "fixture-full-model",
+		Instructions: "You are a subagent spawned by a workflow orchestration script.",
+		Input: []openairesponses.InputItem{
+			{
+				Type: "function_call", CallID: "toolu_workflow_conformance", Name: "Workflow",
+				Arguments: `{"script":"Return exactly CCR_CONFORMANCE_WORKFLOW_CHILD_OK."}`,
+			},
+			{Type: "function_call_output", CallID: "toolu_workflow_conformance", Output: "Workflow launched in background"},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal Responses payload: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	fixture.handleResponses(t, recorder, request)
+
+	var response openairesponses.Response
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode Responses fixture response: %v", err)
+	}
+	if len(response.Output) != 1 || len(response.Output[0].Content) != 1 ||
+		response.Output[0].Content[0].Text != claudeConformanceWorkflowParent {
+		t.Fatalf("workflow completion response = %#v", response.Output)
+	}
+}
+
+func responsesInputHasToolOutput(input []openairesponses.InputItem) bool {
+	for _, item := range input {
+		if item.Type == "function_call_output" || item.Type == "computer_call_output" {
+			return true
+		}
+	}
+	return false
+}
+
+func latestResponsesInput(input []openairesponses.InputItem) string {
+	for index := len(input) - 1; index >= 0; index-- {
+		if text := responsesInputItemText(input[index]); strings.Contains(text, "CCR_CONFORMANCE_") {
+			return text
+		}
+	}
+	if len(input) == 0 {
+		return ""
+	}
+	return responsesInputItemText(input[len(input)-1])
+}
+
+func responsesInputItemText(item openairesponses.InputItem) string {
+	parts := make([]string, 0, len(item.Content)+2)
+	for _, content := range item.Content {
+		parts = append(parts, content.Text)
+	}
+	if item.Arguments != "" {
+		parts = append(parts, item.Arguments)
+	}
+	if item.Output != nil {
+		encoded, err := json.Marshal(item.Output)
+		if err == nil {
+			parts = append(parts, string(encoded))
+		}
+	}
+	return item.Role + " " + item.Type + " " + strings.Join(parts, " ")
+}
+
 func latestAnthropicMessage(messages []struct {
 	Content json.RawMessage `json:"content"`
 },
@@ -395,6 +558,12 @@ func waitForFixtureCancellation(r *http.Request) {
 func writeOpenAIToolCall(w http.ResponseWriter, name, id string, input map[string]any) {
 	arguments, _ := json.Marshal(input)
 	_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"content":"","tool_calls":[{"id":%q,"type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, id, name, string(arguments))
+}
+
+func writeLiveResponsesFunctionCall(w http.ResponseWriter, model, name, id string, input map[string]any) {
+	arguments, _ := json.Marshal(input)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprintf(w, `{"id":"resp_conformance","model":%q,"output":[{"type":"function_call","call_id":%q,"name":%q,"arguments":%q}],"usage":{"input_tokens":4,"output_tokens":2}}`, model, id, name, string(arguments))
 }
 
 func (f *liveClaudeConformanceFixture) writeOpenAIText(w http.ResponseWriter, text string) {

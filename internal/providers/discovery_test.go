@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -154,6 +155,38 @@ func TestDiscoverLiteLLMModelsReportsOptionalMetadataFailure(t *testing.T) {
 	}
 	if discovery.Models[0].CapabilityMetadataComplete {
 		t.Fatalf("model metadata unexpectedly complete: %#v", discovery.Models[0])
+	}
+}
+
+func TestResponsesKindInfersResponsesSupportFromAdapter(t *testing.T) {
+	t.Parallel()
+
+	for name, parse := range map[string]func() ([]DiscoveredModel, error){
+		"openai": func() ([]DiscoveredModel, error) {
+			return parseOpenAIModels(strings.NewReader(`{"data":[{"id":"responses-model","mode":"responses"}]}`))
+		},
+		"litellm": func() ([]DiscoveredModel, error) {
+			return parseLiteLLMModelInfo(strings.NewReader(`{"data":[{"model_name":"responses-model","model_info":{"mode":"responses"}}]}`))
+		},
+	} {
+		name, parse := name, parse
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			models, err := parse()
+			if err != nil {
+				t.Fatalf("parse error = %v", err)
+			}
+			if len(models) != 1 {
+				t.Fatalf("models = %#v", models)
+			}
+			caps := models[0].Capabilities
+			if caps.Values.SupportsResponses == nil || !*caps.Values.SupportsResponses {
+				t.Fatalf("supports_responses = %#v", caps.Values.SupportsResponses)
+			}
+			if caps.Sources["supports_responses"] != modelcap.SourceOpenAIAdapter {
+				t.Fatalf("supports_responses source = %q", caps.Sources["supports_responses"])
+			}
+		})
 	}
 }
 
@@ -329,6 +362,23 @@ func TestChatCompletionsEndpointKeepsVersionedBaseURL(t *testing.T) {
 	}
 }
 
+func TestResponsesEndpointNormalizesBaseURL(t *testing.T) {
+	t.Parallel()
+
+	for input, want := range map[string]string{
+		"https://api.openai.com":        "https://api.openai.com/v1/responses",
+		"https://openrouter.ai/api/v1/": "https://openrouter.ai/api/v1/responses",
+	} {
+		got, err := ResponsesEndpoint(input)
+		if err != nil {
+			t.Fatalf("ResponsesEndpoint(%q) error = %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("ResponsesEndpoint(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestMessagesCountTokensEndpointNormalizesBaseURL(t *testing.T) {
 	t.Parallel()
 
@@ -419,6 +469,35 @@ func TestDiscoverOpenAICompatibleModelsDoesNotLeakKeyOnAuthError(t *testing.T) {
 	}
 }
 
+func TestDiscoverOpenAICompatibleModelsDefaultTimeout(t *testing.T) {
+	t.Parallel()
+
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Fatalf("discovery request context has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining < 25*time.Second || remaining > DefaultDiscoveryTimeout {
+			t.Fatalf("discovery request deadline remaining = %s, want close to %s", remaining, DefaultDiscoveryTimeout)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"data":[]}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})}
+
+	_, err := (Discoverer{HTTPClient: client}).DiscoverOpenAICompatibleModels(context.Background(), DiscoveryConfig{
+		Type:    "openrouter",
+		BaseURL: "https://provider.example",
+	})
+	if err != nil {
+		t.Fatalf("DiscoverOpenAICompatibleModels() error = %v", err)
+	}
+}
+
 func TestDiscoverOpenAICompatibleModelsRejectsUnsupportedProvider(t *testing.T) {
 	t.Parallel()
 
@@ -429,4 +508,10 @@ func TestDiscoverOpenAICompatibleModelsRejectsUnsupportedProvider(t *testing.T) 
 	if err == nil {
 		t.Fatalf("expected unsupported provider error")
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }

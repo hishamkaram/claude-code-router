@@ -45,6 +45,7 @@ func effectiveProviderCapabilities(provider store.Provider) providers.Capabiliti
 		SupportsThinking:       provider.SupportsThinking,
 		SupportsModelDiscovery: provider.SupportsModelDiscovery,
 		SupportsCountTokens:    provider.SupportsCountTokens,
+		SupportsResponses:      provider.SupportsResponses,
 		Mode:                   provider.Mode,
 	})
 }

@@ -1,0 +1,33 @@
+{
+  "id": "resp_123",
+  "model": "gpt-5.6",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        { "type": "output_text", "text": "I will check." }
+      ]
+    },
+    {
+      "type": "function_call",
+      "id": "fc_123",
+      "call_id": "call_weather",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Berlin\"}"
+    },
+    {
+      "type": "computer_call",
+      "call_id": "call_screen",
+      "actions": [
+        { "type": "click", "button": "left", "x": 405, "y": 157 },
+        { "type": "type", "text": "penguin" }
+      ],
+      "status": "completed"
+    }
+  ],
+  "usage": {
+    "input_tokens": 10,
+    "output_tokens": 5
+  }
+}

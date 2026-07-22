@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	SchemaVersion    = 2
+	SchemaVersion    = 3
 	MinSchemaVersion = 1
 	Kind             = "ccr-team-profile"
 	MaxBytes         = 1 << 20
@@ -45,6 +45,52 @@ type Capabilities struct {
 	Thinking       bool `json:"thinking"`
 	ModelDiscovery bool `json:"model_discovery"`
 	CountTokens    bool `json:"count_tokens"`
+	Responses      bool `json:"responses"`
+	presentFields  map[string]struct{}
+}
+
+func (c *Capabilities) UnmarshalJSON(data []byte) error {
+	fields, err := decodeCapabilityFields(data)
+	if err != nil {
+		return err
+	}
+	type wire Capabilities
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*c = Capabilities(decoded)
+	if _, ok := fields["responses"]; ok {
+		c.presentFields = map[string]struct{}{"responses": {}}
+	}
+	return nil
+}
+
+func decodeCapabilityFields(data []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	unknown := make([]string, 0)
+	for field := range fields {
+		if !isCapabilityField(field) {
+			unknown = append(unknown, field)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("json: unknown field %q", unknown[0])
+	}
+	return fields, nil
+}
+
+func isCapabilityField(field string) bool {
+	switch field {
+	case "tools", "streaming", "thinking", "model_discovery", "count_tokens", "responses":
+		return true
+	default:
+		return false
+	}
 }
 
 type Credential struct {
@@ -124,6 +170,7 @@ func exportProvider(provider store.Provider) Provider {
 			Thinking:       provider.SupportsThinking,
 			ModelDiscovery: provider.SupportsModelDiscovery,
 			CountTokens:    provider.SupportsCountTokens,
+			Responses:      provider.SupportsResponses,
 		},
 		Credential: credential,
 	}

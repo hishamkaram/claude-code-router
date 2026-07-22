@@ -2,8 +2,13 @@ package cli
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/hishamkaram/claude-code-router/internal/cua"
+	cuaexecutor "github.com/hishamkaram/claude-code-router/internal/cua/executor"
 )
 
 type launchInvocation struct {
@@ -16,6 +21,14 @@ type launchInvocation struct {
 	noHistory      bool
 	noLifecycle    bool
 	noStatusline   bool
+	cuaConfig      cua.Config
+	cuaExternalURL string
+	cuaTokenEnv    string
+	cuaModeSet     bool
+	cuaExecutorSet bool
+	cuaLimitsSet   bool
+	cuaURLSet      bool
+	cuaTokenEnvSet bool
 	help           bool
 	claudeArgs     []string
 }
@@ -23,7 +36,8 @@ type launchInvocation struct {
 func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
 	if invocation.modelAlias != "" || invocation.printMode ||
 		invocation.authMode != launchAuthModePreserve || invocation.permissionMode != "" ||
-		invocation.noHistory || invocation.noLifecycle || invocation.noStatusline {
+		invocation.noHistory || invocation.noLifecycle || invocation.noStatusline ||
+		invocation.cuaOptionsConfigured() {
 		return nil, false
 	}
 	args := invocation.claudeArgs
@@ -39,6 +53,11 @@ func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func (invocation launchInvocation) cuaOptionsConfigured() bool {
+	return invocation.cuaModeSet || invocation.cuaExecutorSet ||
+		invocation.cuaLimitsSet || invocation.cuaURLSet || invocation.cuaTokenEnvSet
 }
 
 func parseLaunchInvocation(args []string) (launchInvocation, error) {
@@ -60,6 +79,9 @@ func parseLaunchInvocation(args []string) (launchInvocation, error) {
 		if !handled {
 			invocation.claudeArgs = append(invocation.claudeArgs, arg)
 		}
+	}
+	if err := normalizeLaunchCUAOptions(&invocation); err != nil {
+		return launchInvocation{}, err
 	}
 	return invocation, nil
 }
@@ -83,6 +105,9 @@ func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *
 	if handled, err := parseLaunchDisableOption(invocation, arg); handled {
 		return true, err
 	}
+	if handled, err := parseLaunchCUAOption(invocation, args, index); handled {
+		return true, err
+	}
 	if value, found := launchPrintOptionValue(arg); found {
 		parsed, err := strconv.ParseBool(value)
 		if err != nil {
@@ -91,7 +116,11 @@ func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *
 		invocation.printMode = parsed
 		return true, nil
 	}
+	return parseLaunchStringOption(invocation, args, index)
+}
 
+func parseLaunchStringOption(invocation *launchInvocation, args []string, index *int) (bool, error) {
+	arg := args[*index]
 	option, value, inline := strings.Cut(arg, "=")
 	target, set := launchStringOptionTarget(invocation, option)
 	if target == nil {
@@ -109,6 +138,225 @@ func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *
 		*set = true
 	}
 	return true, nil
+}
+
+func parseLaunchCUAOption(invocation *launchInvocation, args []string, index *int) (bool, error) {
+	arg := args[*index]
+	option, value, inline := strings.Cut(arg, "=")
+	if !isLaunchCUAOption(option) {
+		return false, nil
+	}
+	if !inline {
+		var err error
+		value, *index, err = launchOptionValue(args, *index, option)
+		if err != nil {
+			return true, err
+		}
+	}
+	return true, setLaunchCUAOption(invocation, option, value)
+}
+
+func isLaunchCUAOption(option string) bool {
+	switch option {
+	case "--ccr-cua-mode", "--ccr-cua-executor", "--ccr-cua-external-url",
+		"--ccr-cua-external-token-env", "--ccr-cua-max-turns", "--ccr-cua-max-actions", "--ccr-cua-timeout":
+		return true
+	default:
+		return false
+	}
+}
+
+func setLaunchCUAOption(invocation *launchInvocation, option, value string) error {
+	switch option {
+	case "--ccr-cua-mode":
+		invocation.cuaConfig.Mode = cua.Mode(value)
+		invocation.cuaModeSet = true
+	case "--ccr-cua-executor":
+		executor, err := parseLaunchCUAExecutor(value)
+		if err != nil {
+			return err
+		}
+		invocation.cuaConfig.Executor = executor
+		invocation.cuaExecutorSet = true
+	case "--ccr-cua-external-url":
+		externalURL, err := parseLaunchCUAExternalURL(value)
+		if err != nil {
+			return err
+		}
+		invocation.cuaExternalURL = externalURL
+		invocation.cuaURLSet = true
+	case "--ccr-cua-external-token-env":
+		tokenEnv, err := parseLaunchCUAExternalTokenEnv(value)
+		if err != nil {
+			return err
+		}
+		invocation.cuaTokenEnv = tokenEnv
+		invocation.cuaTokenEnvSet = true
+	case "--ccr-cua-max-turns":
+		return setLaunchCUAPositiveInt(invocation, &invocation.cuaConfig.MaxTurns, option, value)
+	case "--ccr-cua-max-actions":
+		return setLaunchCUAPositiveInt(invocation, &invocation.cuaConfig.MaxActions, option, value)
+	case "--ccr-cua-timeout":
+		return setLaunchCUATimeout(invocation, option, value)
+	}
+	return nil
+}
+
+func parseLaunchCUAExecutor(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if _, err := cua.ParseExecutor(value); err != nil {
+		return "", err
+	}
+	if _, err := cuaexecutor.ParseTarget(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func parseLaunchCUAExternalURL(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return "", fmt.Errorf("--ccr-cua-external-url must be an absolute HTTPS URL")
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("--ccr-cua-external-url must not include credentials")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(value, "#") {
+		return "", fmt.Errorf("--ccr-cua-external-url must not include query or fragment")
+	}
+	if err := validateLaunchURLPort(parsed); err != nil {
+		return "", err
+	}
+	return parsed.String(), nil
+}
+
+func parseLaunchCUAExternalTokenEnv(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if err := validateEnvName(value); err != nil {
+		return "", fmt.Errorf("--ccr-cua-external-token-env: %w", err)
+	}
+	if reservedLaunchExternalTokenEnvName(value) {
+		return "", fmt.Errorf("--ccr-cua-external-token-env %q is reserved by CCR or Claude Code launch environment", value)
+	}
+	return value, nil
+}
+
+func reservedLaunchExternalTokenEnvName(value string) bool {
+	switch value {
+	case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+		"ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_USE_GATEWAY",
+		"ENABLE_TOOL_SEARCH", "CCR_LAUNCH_ID", statuslineGatewayURLEnv, statuslineTokenEnv:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateLaunchURLPort(parsed *url.URL) error {
+	port := parsed.Port()
+	if port == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value > 65535 {
+		return fmt.Errorf("--ccr-cua-external-url port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func parseLaunchPositiveInt(option, value string) (int, error) {
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid value for %s: %w", option, err)
+	}
+	if parsed < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", option)
+	}
+	return parsed, nil
+}
+
+func setLaunchCUAPositiveInt(invocation *launchInvocation, target *int, option, value string) error {
+	parsed, err := parseLaunchPositiveInt(option, value)
+	if err != nil {
+		return err
+	}
+	*target = parsed
+	invocation.cuaLimitsSet = true
+	return nil
+}
+
+func setLaunchCUATimeout(invocation *launchInvocation, option, value string) error {
+	timeout, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("invalid value for %s: %w", option, err)
+	}
+	if timeout <= 0 {
+		return fmt.Errorf("%s must be greater than zero", option)
+	}
+	invocation.cuaConfig.Timeout = timeout
+	invocation.cuaLimitsSet = true
+	return nil
+}
+
+func normalizeLaunchCUAOptions(invocation *launchInvocation) error {
+	config, err := invocation.cuaConfig.Normalize()
+	if err != nil {
+		return err
+	}
+	invocation.cuaConfig = config
+	if !invocation.cuaOptionsConfigured() {
+		return nil
+	}
+	if err := validateLaunchCUAModeOptions(invocation, config); err != nil {
+		return err
+	}
+	return validateLaunchCUAExecutorOptions(invocation, config)
+}
+
+func validateLaunchCUAModeOptions(invocation *launchInvocation, config cua.Config) error {
+	if invocation.cuaManagedOptionSet() && config.Mode != cua.ModeManaged {
+		return fmt.Errorf("managed CUA options require --ccr-cua-mode managed")
+	}
+	if config.Mode == cua.ModeManaged && !invocation.cuaExecutorSet {
+		return fmt.Errorf("--ccr-cua-mode managed requires --ccr-cua-executor")
+	}
+	return nil
+}
+
+func validateLaunchCUAExecutorOptions(invocation *launchInvocation, config cua.Config) error {
+	if !invocation.cuaExecutorSet {
+		return nil
+	}
+	kind, err := cua.ParseExecutor(config.Executor)
+	if err != nil {
+		return err
+	}
+	if kind == cua.ExecutorExternal {
+		return validateLaunchExternalCUAOptions(invocation)
+	}
+	if invocation.cuaURLSet {
+		return fmt.Errorf("--ccr-cua-external-url requires --ccr-cua-executor external:<name>")
+	}
+	if invocation.cuaTokenEnvSet {
+		return fmt.Errorf("--ccr-cua-external-token-env requires --ccr-cua-executor external:<name>")
+	}
+	return nil
+}
+
+func validateLaunchExternalCUAOptions(invocation *launchInvocation) error {
+	if !invocation.cuaURLSet {
+		return fmt.Errorf("--ccr-cua-executor external:<name> requires --ccr-cua-external-url")
+	}
+	if !invocation.cuaTokenEnvSet {
+		return fmt.Errorf("--ccr-cua-executor external:<name> requires --ccr-cua-external-token-env")
+	}
+	return nil
+}
+
+func (invocation launchInvocation) cuaManagedOptionSet() bool {
+	return invocation.cuaExecutorSet || invocation.cuaLimitsSet || invocation.cuaURLSet || invocation.cuaTokenEnvSet
 }
 
 func parseLaunchDisableOption(invocation *launchInvocation, arg string) (bool, error) {

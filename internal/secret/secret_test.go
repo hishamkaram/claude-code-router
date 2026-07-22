@@ -33,6 +33,46 @@ func TestRedactRef(t *testing.T) {
 	}
 }
 
+func TestValidateRef(t *testing.T) {
+	t.Parallel()
+
+	filePath := writeSecretFile(t, "sk-test\n", 0o600)
+	tests := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "empty", ref: ""},
+		{name: "environment", ref: "env:OPENROUTER_API_KEY"},
+		{name: "file", ref: FileRef(filePath)},
+		{name: "missing file remains portable", ref: FileRef(filepath.Join(t.TempDir(), "missing.key"))},
+		{name: "keyring", ref: "keyring:provider/openrouter/api-key"},
+		{name: "raw secret", ref: "sk-live-secret", want: "unsupported secret reference"},
+		{name: "surrounding whitespace", ref: " env:OPENROUTER_API_KEY ", want: "surrounding whitespace"},
+		{name: "bad env", ref: "env:lowercase", want: "invalid environment secret reference"},
+		{name: "relative file", ref: "file:relative.key", want: "absolute path"},
+		{name: "bad keyring", ref: "keyring:other/account", want: "invalid keyring secret reference"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateRef(tt.ref)
+			if tt.want == "" && err != nil {
+				t.Fatalf("ValidateRef(%q) error = %v", tt.ref, err)
+			}
+			if tt.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("ValidateRef(%q) error = %v, want %q", tt.ref, err, tt.want)
+				}
+				if strings.Contains(err.Error(), "sk-live-secret") {
+					t.Fatalf("ValidateRef leaked secret: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestDefaultBackendResolveFileRef(t *testing.T) {
 	t.Parallel()
 

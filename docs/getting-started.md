@@ -35,12 +35,26 @@ explicit no-key mode.
 For OpenAI-compatible profiles that support discovery, CCR verifies connectivity
 with `/v1/models`, shows a searchable model multi-select, and lets you review
 aliases before saving. Safe capability metadata is retained when supplied;
-LiteLLM can augment it from `/model/info`. For non-discoverable profiles, CCR
-validates the provider config and credential resolution, then offers a manual
-repeating model form.
+LiteLLM can augment it from `/model/info`. If LiteLLM returns HTTP 403 or
+another optional `/model/info` failure, CCR reports a warning and may still
+complete the refresh using `/v1/models`, retained discovery, and local
+overrides. That warning is not, by itself, a failed refresh. For
+non-discoverable profiles, CCR validates the provider config and credential
+resolution, then offers a manual repeating model form.
 
 New imported aliases default to `degraded`. CCR never promotes compatibility
 automatically.
+
+Capability facts are visible before launch:
+
+```bash
+ccr model show <alias> --json
+```
+
+The effective value for each capability is derived from explicit local
+overrides first, then provider discovery, then recognized provider-model hints.
+Unknown values remain unknown so you can decide whether to add a reviewed
+override or keep the route degraded.
 
 ## Launch Claude Code
 
@@ -51,12 +65,14 @@ ccr launch
 ```
 
 Without `--model`, Claude Code starts on its normal configured model. CCR passes
-an ephemeral allowlist that adds configured, non-blocked aliases to the visual
+an ephemeral allowlist that adds configured, non-blocked routable aliases to the visual
 `/model` picker beside the permitted Anthropic models. Subscription or API-key
 authentication remains available for first-party routes. Launch output also
 prints each `/model anthropic.ccr.<alias>` ID for scripted selection.
 An effective context window of at least one million tokens is printed and shown
-with a terminal `[1m]` marker.
+with a terminal `[1m]` marker. The picker allowlist is generated once per
+launch; after changing aliases or capabilities, relaunch to refresh what Claude
+Code shows in `/model`.
 
 Pass ordinary Claude Code options after `launch`:
 
@@ -119,11 +135,17 @@ ccr model refresh coding-model
 ccr model show coding-model --json
 ```
 
+For a provider that implements the OpenAI Responses API, configure the provider
+explicitly with `--responses`, then set the alias facts with `ccr model update
+<alias> --model-kind responses --responses true`. See
+[provider configuration](providers.md#openai-responses-api) for managed
+computer-use requirements.
+
 ## Multiple Providers
 
 You can configure several providers and many aliases before launching. A normal
 `ccr launch` preserves Claude Code's default startup model and adds every
-non-blocked, tool-compatible alias to `/model`. Use the picker or the printed
+non-blocked, routable, tool-compatible alias to `/model`. Use the picker or the printed
 `/model anthropic.ccr.<alias>` IDs to switch providers in the same session.
 Use the exact printed ID when it includes `[1m]` or selective family-name
 escaping.
@@ -132,6 +154,14 @@ requires tools to be disabled for the launch.
 
 New agents and workflows use the active route where Claude Code permits it.
 Existing workers can remain on their spawn-time model.
+
+Vision and computer-use requests are capability-gated like tools and thinking.
+If a selected alias does not effectively support image input or computer use,
+CCR returns a visible rejection instead of sending a partial request or falling
+back to Claude. OpenAI Responses computer use also requires a launch with
+`--ccr-cua-mode managed` and a supported `--ccr-cua-executor`; without one, CCR
+rejects the request before provider submission. Direct first-party Anthropic CUA
+remains client-managed by Claude Code.
 
 ## Authentication
 
@@ -161,11 +191,15 @@ ccr sessions --active
 ccr agents --active
 ```
 
-Add `--json` to these inspection commands for stable `schema_version: 1` output.
+Add `--json` to these inspection commands for stable, schema-versioned output.
 With `ccr trace --follow --json`, each event is emitted as one versioned JSON
 document. `ccr status` shows the latest observed route, while
 `ccr trace --follow` follows new redacted route and lifecycle events. Use
 `ccr trace purge --all --yes` when retained history is no longer needed.
+Redacted route and lifecycle metadata is retained for 30 days and at most
+10,000 combined events. Prompts, responses, tool arguments, screenshots,
+transcript paths, raw hook payloads, authorization headers, and provider secret
+values are not stored.
 
 CCR uses a local SQLite database. `ccr init` prints its exact path. Override it
 for an isolated test or separate workspace with `ccr --db /path/to/ccr.db ...`.

@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS providers (
   supports_thinking INTEGER NOT NULL DEFAULT 0,
   supports_model_discovery INTEGER NOT NULL DEFAULT 0,
   supports_count_tokens INTEGER NOT NULL DEFAULT 0,
+  supports_responses INTEGER NOT NULL DEFAULT 0,
   mode TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );

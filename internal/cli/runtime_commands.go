@@ -2,20 +2,14 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
-	"slices"
-	"strings"
 	"sync"
-	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/hishamkaram/claude-code-router/internal/cua"
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/observability"
@@ -72,6 +66,13 @@ help, use ccr launch -- --help.`,
 	cmd.Flags().Bool("no-history", false, "Disable redacted route history for this launch")
 	cmd.Flags().Bool("no-lifecycle", false, "Disable Claude lifecycle hooks for this launch")
 	cmd.Flags().Bool("no-statusline", false, "Disable CCR status-line injection for this launch")
+	cmd.Flags().String("ccr-cua-mode", "client", "Computer-use owner: client or managed")
+	cmd.Flags().String("ccr-cua-executor", "", "Managed CUA executor: docker, local-browser, macos-preview, or external:<name>")
+	cmd.Flags().String("ccr-cua-external-url", "", "Public HTTPS base URL for an external managed CUA executor")
+	cmd.Flags().String("ccr-cua-external-token-env", "", "Environment variable containing the required external managed CUA bearer token")
+	cmd.Flags().Int("ccr-cua-max-turns", 0, "Maximum managed CUA model turns for this launch")
+	cmd.Flags().Int("ccr-cua-max-actions", 0, "Maximum managed CUA actions for this launch")
+	cmd.Flags().String("ccr-cua-timeout", "", "Maximum total managed CUA duration, for example 10m")
 	return cmd
 }
 
@@ -103,6 +104,9 @@ type launchExecution struct {
 	observerToken string
 	resolved      resolvedLaunch
 	invocation    launchInvocation
+	recorder      *observability.Recorder
+	managedCUA    *managedCUALaunch
+	cuaProject    string
 }
 
 func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, invocation launchInvocation) (resultErr error) {
@@ -126,6 +130,9 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	if passthroughErr := validateResolvedLaunchPassthroughArgs(ctx, s, invocation, resolved); passthroughErr != nil {
 		return passthroughErr
 	}
+	if cuaErr := validateManagedCUALaunch(ctx, s, deps, invocation, resolved); cuaErr != nil {
+		return cuaErr
+	}
 	lifecycleState, statuslineState := launchObservationStates(invocation)
 	launchID, err := s.CreateLaunch(ctx, resolved.modelAlias, lifecycleState, statuslineState)
 	if err != nil {
@@ -141,6 +148,16 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 			return
 		}
 		resultErr = errors.Join(resultErr, finalizer.Finish(ctx, "failed", "startup_failed", nil))
+	}()
+	execution.recorder = observability.NewRecorder(ctx, observability.Config{
+		Store: execution.store, LaunchID: execution.launchID,
+		Enabled: !execution.invocation.noHistory,
+	})
+	if startErr := startLaunchManagedCUA(ctx, cmd, deps, execution); startErr != nil {
+		return startErr
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, shutdownManagedCUA(ctx, &execution.managedCUA))
 	}()
 
 	if startErr := startObservableGateway(ctx, deps, execution); startErr != nil {
@@ -162,6 +179,27 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 		return passthroughErr
 	}
 	return runClaudeLaunchProcess(ctx, cmd, deps, execution, claudeSettings.JSON)
+}
+
+func startLaunchManagedCUA(ctx context.Context, cmd *cobra.Command, deps Dependencies, execution *launchExecution) error {
+	if execution.invocation.cuaConfig.Mode != cua.ModeManaged {
+		return nil
+	}
+	project, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("reading managed computer-use project directory: %w", err)
+	}
+	execution.cuaProject = project
+	managedCUA, err := deps.StartManagedCUA(ctx, managedCUAStart{
+		Config: execution.invocation.cuaConfig, ExternalURL: execution.invocation.cuaExternalURL,
+		ExternalToken: managedCUAExternalToken(execution.invocation),
+		LaunchID:      execution.launchID, Project: project, Out: cmd.ErrOrStderr(), Recorder: execution.recorder,
+	})
+	if err != nil {
+		return fmt.Errorf("starting managed computer use: %w", err)
+	}
+	execution.managedCUA = managedCUA
+	return nil
 }
 
 func validateResolvedLaunchPassthroughArgs(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch) error {
@@ -248,10 +286,14 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 	if err != nil {
 		return fmt.Errorf("creating lifecycle observer token: %w", err)
 	}
-	recorder := observability.NewRecorder(ctx, observability.Config{
-		Store: execution.store, LaunchID: execution.launchID,
-		Enabled: !execution.invocation.noHistory,
-	})
+	recorder := execution.recorder
+	if recorder == nil {
+		recorder = observability.NewRecorder(ctx, observability.Config{
+			Store: execution.store, LaunchID: execution.launchID,
+			Enabled: !execution.invocation.noHistory,
+		})
+		execution.recorder = recorder
+	}
 	tracker, err := session.NewTracker(session.Config{
 		Store: execution.store, Recorder: recorder, LaunchID: execution.launchID,
 		Enabled:           !execution.invocation.noLifecycle,
@@ -266,6 +308,7 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 		Token: execution.token, ObserverToken: execution.observerToken,
 		DefaultModelAlias: execution.resolved.modelAlias,
 		Recorder:          recorder, Tracker: tracker,
+		ManagedCUA: execution.managedCUA.Runtime(), ManagedCUAProject: execution.cuaProject,
 	})
 	if err != nil {
 		return fmt.Errorf("starting local gateway: %w", err)
@@ -278,11 +321,16 @@ func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Depend
 	resolved := execution.resolved
 	claudeArgs := launchClaudeArgs(resolved.claudeModelID, invocation.printMode, resolved.disableTools,
 		claudeSettings, invocation.permissionMode, invocation.claudeArgs)
+	providerSecretEnvNames, err := configuredProviderSecretEnvNames(ctx, execution.store)
+	if err != nil {
+		return fmt.Errorf("reading configured provider secret environment names: %w", err)
+	}
 	env := launchClaudeEnv(launchEnvironmentOptions{
 		GatewayURL: execution.server.URL(), Token: execution.token,
 		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
 		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
 		DisableTools: resolved.disableTools, AuthMode: invocation.authMode,
+		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
 	})
 	outputLock := &sync.Mutex{}
 	out := launchProcessWriter(cmd.OutOrStdout(), outputLock)
@@ -305,9 +353,10 @@ func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Depend
 		process.PID(), resolved.modelAlias, resolved.disableTools, invocation.authMode, invocation.permissionMode)
 	waitErr := process.Wait()
 	shutdownGateway(ctx, execution.server)
+	managedCUAErr := shutdownManagedCUA(ctx, &execution.managedCUA)
 	state, reason := launchExitState(ctx, waitErr)
 	finishErr := execution.finalizer.Finish(ctx, state, reason, launchExitCode(waitErr))
-	return errors.Join(waitErr, finishErr)
+	return errors.Join(waitErr, managedCUAErr, finishErr)
 }
 
 func validateLaunchInputs(modelAlias, authMode, permissionMode string) error {
@@ -347,158 +396,6 @@ func validateClaudePermissionMode(mode string) error {
 	}
 }
 
-type launchEnvironmentOptions struct {
-	GatewayURL    string
-	Token         string
-	ObserverToken string
-	LaunchID      int64
-	ModelAlias    string
-	ModelID       string
-	DisableTools  bool
-	AuthMode      string
-}
-
-func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
-	env := ClaudeEnvironment{
-		Set: make([]string, 0, 13),
-		Unset: []string{
-			"CLAUDE_CODE_USE_GATEWAY",
-		},
-	}
-	env.Set = append(
-		env.Set,
-		"ANTHROPIC_BASE_URL="+options.GatewayURL,
-		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
-		statuslineGatewayURLEnv+"="+options.GatewayURL,
-		statuslineTokenEnv+"="+options.ObserverToken,
-		fmt.Sprintf("CCR_LAUNCH_ID=%d", options.LaunchID),
-	)
-	if options.DisableTools {
-		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=")
-	} else {
-		// Claude Code disables deferred MCP tool search behind non-first-party gateways
-		// unless this is enabled. CCR translates the resulting tool_reference blocks.
-		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=true")
-	}
-	if options.AuthMode == launchAuthModeGatewayToken {
-		env.Set = append(
-			env.Set,
-			"ANTHROPIC_AUTH_TOKEN="+options.Token,
-		)
-	} else {
-		env.Unset = append(env.Unset, "ANTHROPIC_AUTH_TOKEN")
-		env.Set = append(
-			env.Set,
-			"ANTHROPIC_CUSTOM_HEADERS="+launchAnthropicCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS"), options.Token),
-		)
-	}
-	if options.DisableTools {
-		env.Set = append(env.Set, "CLAUDE_CODE_SIMPLE=1")
-	}
-	if options.ModelID == "" {
-		return env
-	}
-	env.Set = append(
-		env.Set,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION="+options.ModelID,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=CCR "+options.ModelAlias,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Model alias registered in ccr",
-	)
-	return env
-}
-
-func launchClaudeModelID(model store.Model) (string, error) {
-	return gateway.DiscoveryIDForModel(model)
-}
-
-func claudeAvailableModels() (models []string, configured bool, err error) {
-	paths := claudeSettingsPaths()
-	for _, path := range paths {
-		fileModels, ok, readErr := settingsFileAvailableModels(path)
-		if readErr != nil {
-			return nil, false, readErr
-		}
-		if ok {
-			configured = true
-			models = append(models, fileModels...)
-		}
-	}
-	return models, configured, nil
-}
-
-func claudeSettingsPaths() []string {
-	paths := []string{}
-	configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
-	if configDir != "" {
-		paths = append(
-			paths,
-			filepath.Join(configDir, "settings.json"),
-			filepath.Join(configDir, "settings.local.json"),
-		)
-	} else if home, err := os.UserHomeDir(); err == nil && home != "" {
-		paths = append(
-			paths,
-			filepath.Join(home, ".claude", "settings.json"),
-			filepath.Join(home, ".claude", "settings.local.json"),
-		)
-	}
-	if cwd, err := os.Getwd(); err == nil && cwd != "" {
-		paths = append(
-			paths,
-			filepath.Join(cwd, ".claude", "settings.json"),
-			filepath.Join(cwd, ".claude", "settings.local.json"),
-		)
-	}
-	return paths
-}
-
-func settingsFileAvailableModels(path string) (models []string, configured bool, err error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("reading Claude Code settings %s: %w", path, err)
-	}
-	if strings.TrimSpace(string(data)) == "" {
-		return nil, false, nil
-	}
-	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, false, fmt.Errorf("parsing Claude Code settings %s: %w", path, err)
-	}
-	raw, ok := settings["availableModels"]
-	if !ok {
-		return nil, false, nil
-	}
-	if err := json.Unmarshal(raw, &models); err != nil {
-		return nil, false, fmt.Errorf("parsing Claude Code settings %s availableModels: %w", path, err)
-	}
-	return models, true, nil
-}
-
-func launchAnthropicCustomHeaders(existing, token string) string {
-	header := gatewaySessionHeaderValue(token)
-	lines := []string{}
-	for _, line := range strings.Split(strings.ReplaceAll(existing, "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(strings.TrimRight(line, "\r"))
-		if line == "" {
-			continue
-		}
-		name, _, ok := strings.Cut(line, ":")
-		if ok && strings.EqualFold(strings.TrimSpace(name), "X-CCR-Session-Token") {
-			continue
-		}
-		lines = append(lines, line)
-	}
-	lines = append(lines, header)
-	return strings.Join(lines, "\n")
-}
-
-func gatewaySessionHeaderValue(token string) string {
-	return "X-CCR-Session-Token: " + token
-}
-
 func launchShouldDisableTools(ctx context.Context, s *store.Store, modelAlias string) (bool, error) {
 	if modelAlias == "" {
 		return false, nil
@@ -532,233 +429,4 @@ func modelDisablesClaudeTools(model store.Model, provider store.Provider) (bool,
 		return false, err
 	}
 	return effective.Values.SupportsTools != nil && !*effective.Values.SupportsTools, nil
-}
-
-func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool, authMode, permissionMode string) {
-	fmt.Fprintf(out, "Claude Code launched through %s (session=%d pid=%d)\n", gatewayURL, sessionID, pid)
-	if modelAlias != "" {
-		fmt.Fprintf(out, "Selected ccr model alias %q is exposed to Claude Code and used as the startup model.\n", modelAlias)
-		fmt.Fprintf(out, "Requests selecting ccr alias %q are routed through its registered provider.\n", modelAlias)
-		writeLaunchCompatibilitySummary(ctx, out, s, modelAlias)
-		if disableTools {
-			fmt.Fprintln(out, "Selected route does not support tools; Claude Code tools are disabled for this launch.")
-		}
-	} else {
-		fmt.Fprintln(out, "No ccr startup model selected; Claude Code will use its configured default model.")
-	}
-	writeLaunchAuthSummary(out, authMode)
-	if authMode == launchAuthModeGatewayToken {
-		if permissionMode == "auto" {
-			fmt.Fprintln(out, "Claude Code auto mode may require first-party Anthropic access for safety classification; use --auth-mode preserve if Agent or Workflow actions are denied.")
-		}
-		fmt.Fprintln(out, "Gateway model discovery is requested; registered aliases are exposed through /v1/models.")
-		return
-	}
-	writePreserveAuthModelGuidance(ctx, out, s, disableTools)
-}
-
-func writePreserveAuthModelGuidance(ctx context.Context, out io.Writer, s *store.Store, includeToolDisabled bool) {
-	models, _, err := routableModels(ctx, s, includeToolDisabled)
-	if err != nil {
-		fmt.Fprintf(out, "Registered ccr model guidance unavailable: %v\n", err)
-		return
-	}
-	if len(models) == 0 {
-		return
-	}
-	fmt.Fprintln(out, "Registered ccr models are available in Claude Code's /model picker:")
-	for index := range models {
-		model := &models[index]
-		id, err := gateway.DiscoveryIDForModel(*model)
-		if err != nil {
-			fmt.Fprintf(out, "  %s unavailable: %v\n", model.Alias, err)
-			continue
-		}
-		fmt.Fprintf(out, "  /model %s\n", id)
-	}
-}
-
-func writeLaunchAuthSummary(out io.Writer, authMode string) {
-	if authMode == launchAuthModeGatewayToken {
-		fmt.Fprintln(out, "Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN for this process.")
-		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in --auth-mode gateway-token.")
-		return
-	}
-	fmt.Fprintln(out, "Gateway accepts the generated local X-CCR-Session-Token for this process.")
-	fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are preserved for first-party Anthropic routes.")
-}
-
-func writeLaunchCompatibilitySummary(ctx context.Context, out io.Writer, s *store.Store, modelAlias string) {
-	model, err := s.GetModel(ctx, modelAlias)
-	if err != nil {
-		fmt.Fprintf(out, "Compatibility metadata unavailable for %q: %v\n", modelAlias, err)
-		return
-	}
-	provider, err := s.GetProvider(ctx, model.ProviderName)
-	if err != nil {
-		fmt.Fprintf(out, "Compatibility metadata unavailable for provider %q: %v\n", model.ProviderName, err)
-		return
-	}
-	caps := effectiveProviderCapabilities(provider)
-	fmt.Fprintf(out, "Provider protocol=%s mode=%s token-count=%s capabilities=%s.\n", caps.Protocol, caps.Mode, providerTokenCountMode(provider), providerCapabilitySummary(provider))
-	if !caps.SupportsModelDiscovery {
-		fmt.Fprintln(out, "Provider model discovery is unavailable; only configured CCR aliases are exposed.")
-	}
-}
-
-func launchProcessWriter(writer io.Writer, lock *sync.Mutex) io.Writer {
-	if _, ok := writer.(*os.File); ok {
-		return writer
-	}
-	return synchronizedWriter{lock: lock, writer: writer}
-}
-
-type synchronizedWriter struct {
-	lock   *sync.Mutex
-	writer io.Writer
-}
-
-func (w synchronizedWriter) Write(p []byte) (int, error) {
-	w.lock.Lock()
-	defer w.lock.Unlock()
-	return w.writer.Write(p)
-}
-
-func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.Store, requested string) (string, error) {
-	if requested != "" {
-		model, provider, _, validateErr := validateRoutableModelAliasTargetWithStore(ctx, deps, s, requested, true)
-		if validateErr != nil {
-			return "", validateErr
-		}
-		effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
-		if err != nil {
-			return "", fmt.Errorf("checking model alias %q launch capabilities: %w", requested, err)
-		}
-		if !supportsClaudeStreaming(effectiveProviderCapabilities(provider), effective.Values) {
-			return "", fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective provider/model capabilities do not support streaming; it is excluded from /model", requested)
-		}
-		if !supportsClaudeSystemMessages(effective.Values) {
-			return "", fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective model capabilities do not support system messages; it is excluded from /model", requested)
-		}
-		return requested, nil
-	}
-	return "", nil
-}
-
-func routableModelAliases(ctx context.Context, s *store.Store, includeToolDisabled bool) ([]string, error) {
-	models, _, err := routableModels(ctx, s, includeToolDisabled)
-	if err != nil {
-		return nil, err
-	}
-	aliases := make([]string, 0, len(models))
-	for index := range models {
-		aliases = append(aliases, models[index].Alias)
-	}
-	return aliases, nil
-}
-
-func routableModels(ctx context.Context, s *store.Store, includeToolDisabled bool) (models []store.Model, hasRoutable bool, err error) {
-	storedModels, err := s.ListModels(ctx)
-	if err != nil {
-		return nil, false, err
-	}
-	routable := make([]store.Model, 0, len(storedModels))
-	for index := range storedModels {
-		model := &storedModels[index]
-		eligible, toolsDisabled, eligibilityErr := modelLaunchEligibility(ctx, s, model)
-		if eligibilityErr != nil {
-			return nil, false, eligibilityErr
-		}
-		if !eligible {
-			continue
-		}
-		hasRoutable = true
-		if !includeToolDisabled && toolsDisabled {
-			continue
-		}
-		routable = append(routable, *model)
-	}
-	slices.SortFunc(routable, func(a, b store.Model) int { return strings.Compare(a.Alias, b.Alias) })
-	return routable, hasRoutable, nil
-}
-
-func modelLaunchEligibility(ctx context.Context, s *store.Store, model *store.Model) (eligible, toolsDisabled bool, err error) {
-	if model.Status == "blocked" {
-		return false, false, nil
-	}
-	provider, err := s.GetProvider(ctx, model.ProviderName)
-	if err != nil {
-		return false, false, err
-	}
-	caps := effectiveProviderCapabilities(provider)
-	if caps.Protocol != providers.ProtocolOpenAICompatible && caps.Protocol != providers.ProtocolAnthropicCompatible {
-		return false, false, nil
-	}
-	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
-		return false, false, nil
-	}
-	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
-	if err != nil {
-		return false, false, err
-	}
-	if !modelcap.IsRoutableKind(effective.Values.Kind) {
-		return false, false, nil
-	}
-	if !supportsClaudeStreaming(caps, effective.Values) {
-		return false, false, nil
-	}
-	if !supportsClaudeSystemMessages(effective.Values) {
-		return false, false, nil
-	}
-	toolsDisabled = model.Status == "chat-only" || providerDisablesClaudeTools(provider) ||
-		effective.Values.SupportsTools != nil && !*effective.Values.SupportsTools
-	return true, toolsDisabled, nil
-}
-
-func supportsClaudeStreaming(provider providers.Capabilities, model modelcap.Values) bool {
-	return provider.SupportsStreaming &&
-		(model.SupportsStreaming == nil || *model.SupportsStreaming)
-}
-
-func supportsClaudeSystemMessages(model modelcap.Values) bool {
-	return model.SupportsSystemMessages == nil || *model.SupportsSystemMessages
-}
-
-func cleanupStartedClaudeProcess(process ClaudeProcess) error {
-	if process == nil {
-		return nil
-	}
-	stopErr := process.Stop()
-	if stopErr != nil {
-		return stopErr
-	}
-	_ = process.Wait()
-	return nil
-}
-
-func shutdownGateway(parent context.Context, server *gateway.Server) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
-	defer cancel()
-	_ = server.Shutdown(ctx)
-}
-
-func processStatus(pid int) string {
-	if pid <= 0 {
-		return "unknown"
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return "unknown"
-	}
-	err = process.Signal(syscall.Signal(0))
-	switch {
-	case err == nil:
-		return "running"
-	case errors.Is(err, os.ErrProcessDone):
-		return "exited"
-	case errors.Is(err, syscall.EPERM):
-		return "running"
-	default:
-		return "exited"
-	}
 }

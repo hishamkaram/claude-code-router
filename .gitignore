@@ -6,6 +6,8 @@ coverage.html
 *.db-shm
 *.db-wal
 graphify-out/
+__pycache__/
+*.pyc
 .DS_Store
 .env
 .env.*

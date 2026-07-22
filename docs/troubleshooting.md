@@ -48,7 +48,7 @@ ccr launch
 ```
 
 A normal no-model launch preserves Claude Code's startup model and subscription
-authentication, then adds configured, non-blocked aliases that are safe for a
+authentication, then adds configured, non-blocked routable aliases that are safe for a
 tools-enabled session to the visual picker. It also prints their model IDs:
 
 ```text
@@ -98,14 +98,47 @@ Relaunch Claude Code after changing capabilities because the picker allowlist is
 created once per launch. Context below one million tokens intentionally has no
 `[1m]` suffix. Use `--context-window 0` to clear the override.
 
+For LiteLLM, a warning such as `LiteLLM capability metadata unavailable: HTTP
+403 Forbidden` means optional `/model/info` metadata was unavailable. If the
+alias line says `refreshed`, the refresh still completed using discovery,
+retained facts, and local overrides.
+
 ## Doctor Reports a Live Failure
 
 Doctor now prints the failed check, failure kind, safe gateway/provider HTTP
-statuses, and an `action:` command. A provider control row such as
-`all-proxy-models` is not a chat model; remove the alias using the exact command
-Doctor prints. Authentication and provider HTTP failures point to
-`ccr provider test <provider>`, while missing models point to fresh discovery.
-Provider response bodies and credentials are never included in the diagnosis.
+statuses, and an `action:` command. Aliases excluded from routing, such as a
+provider control row or a Responses-only alias whose provider lacks
+`--responses`, are marked skipped and are not sent to the provider. They are
+also excluded from `/model` and aggregate conformance. Authentication and
+provider HTTP failures point to `ccr provider test <provider>`, while missing
+models point to fresh discovery. Provider response bodies and credentials are
+never included in the diagnosis.
+
+## Conformance Fails on Forced Tool Choice
+
+When model metadata leaves tool choice unknown, `ccr conformance run` probes it
+instead of assuming support. A provider that ignores a forced tool request
+causes the `forced_tool` check to fail and CCR does not silently change the
+model's compatibility or capabilities.
+
+Review the effective facts first:
+
+```bash
+ccr model show <alias> --json
+```
+
+If you have verified that the provider does not support forced tool choice,
+record that limitation explicitly, rerun conformance, and relaunch Claude Code
+before relying on the alias in `/model`:
+
+```bash
+ccr model update <alias> --tool-choice false
+ccr conformance run <alias>
+ccr launch
+```
+
+Use `--tool-choice auto` to clear the override after provider metadata or
+capability support changes.
 
 ## CCR Starts on an Unexpected Model
 
@@ -150,6 +183,36 @@ ccr trace purge --all --yes
 Start a one-off launch with `--no-history` when no route events should be
 persisted. Prompts, responses, tool arguments, transcript paths, raw hook bodies,
 authorization headers, and provider secret values are never part of history.
+The default metadata retention window is 30 days and 10,000 combined route and
+lifecycle events.
+
+## Vision or Computer Use Is Rejected
+
+Inspect the selected alias:
+
+```bash
+ccr model show <alias> --json
+```
+
+If the effective facts do not show image input or computer-use support, CCR
+rejects the request before provider submission. Add a reviewed override only
+when you have provider evidence. For managed computer use, also verify the
+provider is OpenAI-compatible and Responses-capable, the model has effective
+Responses and computer-use support, and the launch selected the intended
+executor. OpenAI Responses computer use always requires that managed executor;
+it is not delegated to Claude Code's client-managed tool loop. External managed
+CUA requires a public HTTPS base URL with no
+credentials, query, fragment, or redirects, plus
+`--ccr-cua-external-token-env`. The macOS helper is source-built only, unsigned,
+not packaged in Homebrew or release archives, and must be on `PATH` as
+`ccr-cua-macos`. It requires Accessibility and Screen Recording permission for
+the launching process; restart it after granting permissions. Prefer Docker for
+reproducible local runs.
+
+If a Responses provider returns `pending_safety_checks`, CCR returns a visible
+rejection before running the executor. This prevents silent
+`acknowledged_safety_checks` until those checks can be displayed in the approval
+flow.
 
 ## `/compact` Does Not Reduce Context on an OpenAI-Compatible Alias
 

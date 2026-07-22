@@ -1,6 +1,7 @@
 package modelcap
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -45,12 +46,83 @@ type Values struct {
 	SupportsAudioInput     *bool    `json:"supports_audio_input,omitempty"`
 	SupportsAudioOutput    *bool    `json:"supports_audio_output,omitempty"`
 	SupportsResponseSchema *bool    `json:"supports_response_schema,omitempty"`
+	SupportsResponses      *bool    `json:"supports_responses,omitempty"`
+	SupportsComputerUse    *bool    `json:"supports_computer_use,omitempty"`
+	presentFields          map[string]struct{}
 }
 
 // Snapshot stores normalized values and per-field provenance from discovery.
 type Snapshot struct {
 	Values  Values            `json:"values,omitempty"`
 	Sources map[string]string `json:"sources,omitempty"`
+}
+
+func (v *Values) UnmarshalJSON(data []byte) error {
+	fields, err := decodeValueFields(data)
+	if err != nil {
+		return err
+	}
+	type wire Values
+	var decoded wire
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*v = Values(decoded)
+	for _, field := range []string{"supports_responses", "supports_computer_use"} {
+		if _, ok := fields[field]; ok {
+			if v.presentFields == nil {
+				v.presentFields = make(map[string]struct{}, 2)
+			}
+			v.presentFields[field] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func decodeValueFields(data []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	unknown := make([]string, 0)
+	for field := range fields {
+		if !isValueField(field) {
+			unknown = append(unknown, field)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return nil, fmt.Errorf("json: unknown field %q", unknown[0])
+	}
+	return fields, nil
+}
+
+func isValueField(field string) bool {
+	switch field {
+	case "kind",
+		"context_window_tokens",
+		"max_input_tokens",
+		"max_output_tokens",
+		"input_modalities",
+		"output_modalities",
+		"supports_tools",
+		"supports_tool_choice",
+		"supports_parallel_tools",
+		"supports_streaming",
+		"supports_thinking",
+		"supports_prompt_caching",
+		"supports_system_messages",
+		"supports_vision",
+		"supports_pdf_input",
+		"supports_audio_input",
+		"supports_audio_output",
+		"supports_response_schema",
+		"supports_responses",
+		"supports_computer_use":
+		return true
+	default:
+		return false
+	}
 }
 
 // Effective merges discovered values, explicit overrides, and safe model-ID hints.
@@ -160,7 +232,7 @@ func NormalizeValues(values Values) (Values, error) {
 }
 
 func PopulatedFields(values Values) []string {
-	fields := make([]string, 0, 18)
+	fields := make([]string, 0, 20)
 	if values.Kind != "" {
 		fields = append(fields, "kind")
 	}
@@ -195,6 +267,8 @@ func PopulatedFields(values Values) []string {
 		{name: "supports_audio_input", value: values.SupportsAudioInput},
 		{name: "supports_audio_output", value: values.SupportsAudioOutput},
 		{name: "supports_response_schema", value: values.SupportsResponseSchema},
+		{name: "supports_responses", value: values.SupportsResponses},
+		{name: "supports_computer_use", value: values.SupportsComputerUse},
 	}
 	for _, field := range boolFields {
 		if field.value != nil {
@@ -210,6 +284,19 @@ func IsZeroValues(values Values) bool {
 
 func IsZeroSnapshot(snapshot Snapshot) bool {
 	return IsZeroValues(snapshot.Values) && len(snapshot.Sources) == 0
+}
+
+func UsesSchemaV3Fields(values Values) bool {
+	return valueFieldPresent(values, "supports_responses", values.SupportsResponses) ||
+		valueFieldPresent(values, "supports_computer_use", values.SupportsComputerUse)
+}
+
+func valueFieldPresent(values Values, field string, value *bool) bool {
+	if value != nil {
+		return true
+	}
+	_, ok := values.presentFields[field]
+	return ok
 }
 
 func SupportsOneMillion(values Values) bool {
@@ -278,6 +365,8 @@ func applyValues(target *Values, values Values, sources map[string]string, sourc
 	applyBool("supports_audio_input", values.SupportsAudioInput, &target.SupportsAudioInput)
 	applyBool("supports_audio_output", values.SupportsAudioOutput, &target.SupportsAudioOutput)
 	applyBool("supports_response_schema", values.SupportsResponseSchema, &target.SupportsResponseSchema)
+	applyBool("supports_responses", values.SupportsResponses, &target.SupportsResponses)
+	applyBool("supports_computer_use", values.SupportsComputerUse, &target.SupportsComputerUse)
 }
 
 func applySnapshotValues(target *Values, source Values) {
@@ -317,6 +406,8 @@ func applySnapshotValues(target *Values, source Values) {
 	copyBool(source.SupportsAudioInput, &target.SupportsAudioInput)
 	copyBool(source.SupportsAudioOutput, &target.SupportsAudioOutput)
 	copyBool(source.SupportsResponseSchema, &target.SupportsResponseSchema)
+	copyBool(source.SupportsResponses, &target.SupportsResponses)
+	copyBool(source.SupportsComputerUse, &target.SupportsComputerUse)
 }
 
 func normalizeModalities(values []string) ([]string, error) {

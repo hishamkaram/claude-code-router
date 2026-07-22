@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -108,6 +109,109 @@ func TestConformanceRunAllContinuesFailuresAndEmitsAggregateJSON(t *testing.T) {
 	if !strings.Contains(errOut, "alias=alpha") || !strings.Contains(errOut, "alias=beta") {
 		t.Fatalf("aggregate diagnostics = %s", errOut)
 	}
+	if !strings.Contains(errOut, "Conformance provider checks completed: alias=alpha status=passed") ||
+		!strings.Contains(errOut, "Conformance provider checks completed: alias=beta status=failed") {
+		t.Fatalf("aggregate completion progress = %s", errOut)
+	}
+}
+
+func TestConformanceSkipsProviderControlModels(t *testing.T) {
+	t.Parallel()
+	server := newCLIConformanceOpenAIServer(t, "model-a")
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "fixture",
+		"--type", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "alpha",
+		"--provider", "fixture", "--model", "model-a"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	ctx := context.Background()
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if addErr := s.AddModel(ctx, store.Model{
+		Alias: "control", ProviderName: "fixture", ProviderModel: "all-proxy-models", Status: "degraded",
+	}); addErr != nil {
+		t.Fatalf("adding legacy control alias: %v", addErr)
+	}
+
+	out, errOut, err := runCommand(t, "--db", dbPath, "conformance", "run", "--all", "--json")
+	if err != nil {
+		t.Fatalf("conformance --all error = %v\nstdout=%s\nstderr=%s", err, out, errOut)
+	}
+	var document conformanceAllDocument
+	if decodeErr := json.Unmarshal([]byte(out), &document); decodeErr != nil {
+		t.Fatalf("aggregate JSON error = %v\n%s", decodeErr, out)
+	}
+	if document.Status != "passed" || document.Total != 2 || document.Passed != 1 || document.Skipped != 1 ||
+		len(document.Results) != 2 || document.Results[1].Alias != "control" || document.Results[1].Status != "skipped" ||
+		!strings.Contains(document.Results[1].Error, "control model") {
+		t.Fatalf("aggregate control result = %#v", document)
+	}
+	if !strings.Contains(errOut, "Conformance target skipped: alias=control") {
+		t.Fatalf("control-model skip progress missing: %s", errOut)
+	}
+	_, _, err = runCommand(t, "--db", dbPath, "conformance", "run", "control")
+	if err == nil || !strings.Contains(err.Error(), "provider control model") {
+		t.Fatalf("single control-model conformance error = %v", err)
+	}
+}
+
+func TestConformanceRunAllSkipsResponsesAliasWithoutProviderSupport(t *testing.T) {
+	t.Parallel()
+	server := newCLIConformanceOpenAIServer(t, "model-a")
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "fixture",
+		"--type", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "alpha",
+		"--provider", "fixture", "--model", "model-a"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	ctx := context.Background()
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	if addErr := s.AddModel(ctx, store.Model{
+		Alias: "responses", ProviderName: "fixture", ProviderModel: "responses-model", Status: "degraded",
+		CapabilityOverrides: modelcap.Values{
+			Kind:              modelcap.KindResponses,
+			SupportsResponses: modelcap.Bool(true),
+		},
+	}); addErr != nil {
+		_ = s.Close()
+		t.Fatalf("adding responses alias: %v", addErr)
+	}
+	if closeErr := s.Close(); closeErr != nil {
+		t.Fatalf("Close() error = %v", closeErr)
+	}
+
+	out, errOut, err := runCommand(t, "--db", dbPath, "conformance", "run", "--all", "--json")
+	if err != nil {
+		t.Fatalf("conformance --all responses-skip error = %v\nstdout=%s\nstderr=%s", err, out, errOut)
+	}
+	var document conformanceAllDocument
+	if decodeErr := json.Unmarshal([]byte(out), &document); decodeErr != nil {
+		t.Fatalf("aggregate JSON error = %v\n%s", decodeErr, out)
+	}
+	if document.Status != "passed" || document.Total != 2 || document.Passed != 1 ||
+		document.Failed != 0 || document.Skipped != 1 || len(document.Results) != 2 {
+		t.Fatalf("aggregate responses result = %#v", document)
+	}
+	if document.Results[1].Alias != "responses" || document.Results[1].Status != "skipped" ||
+		!strings.Contains(document.Results[1].Error, "Responses API route is excluded") {
+		t.Fatalf("responses conformance diagnosis = %#v", document.Results)
+	}
+	if !strings.Contains(errOut, "Conformance target skipped: alias=responses") ||
+		strings.Contains(errOut, "Conformance target: alias=responses") {
+		t.Fatalf("responses conformance progress = %s", errOut)
+	}
 }
 
 func TestConformanceRunAllStrictlyValidatesScopeBeforeDatabaseOpen(t *testing.T) {
@@ -127,7 +231,7 @@ func TestConformanceRunAllFailsWhenNothingIsRunnable(t *testing.T) {
 	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	out, _, err := runCommand(t, "--db", dbPath, "conformance", "run", "--all", "--json")
-	if err == nil || !strings.Contains(err.Error(), "no runnable non-blocked model aliases") {
+	if err == nil || !strings.Contains(err.Error(), "no runnable non-blocked routable model aliases") {
 		t.Fatalf("empty conformance error = %v", err)
 	}
 	var document conformanceAllDocument

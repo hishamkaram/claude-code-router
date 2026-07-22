@@ -155,3 +155,28 @@ func TestAnthropicContentBlocksKeepsValidAgentToolInput(t *testing.T) {
 		t.Fatalf("input = %#v", input)
 	}
 }
+
+func TestAnthropicContentBlocksSkipsNullOpenAIContentForToolCalls(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		`{"id":"chatcmpl-null","choices":[{"message":{"content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"status\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		`{"id":"chatcmpl-omitted","choices":[{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"status\"}"}}]},"finish_reason":"tool_calls"}]}`,
+	} {
+		var response openAIChatResponse
+		if err := json.Unmarshal([]byte(raw), &response); err != nil {
+			t.Fatalf("json.Unmarshal() error = %v", err)
+		}
+
+		blocks, stopReason := anthropicContentBlocksFromOpenAI(response, "tool_use")
+		if stopReason != "tool_use" {
+			t.Fatalf("stopReason = %q, want tool_use", stopReason)
+		}
+		if len(blocks) != 1 || blocks[0]["type"] != "tool_use" {
+			t.Fatalf("blocks = %#v, want only a tool_use block", blocks)
+		}
+		if _, found := blocks[0]["text"]; found {
+			t.Fatalf("tool-use block unexpectedly included text: %#v", blocks[0])
+		}
+	}
+}

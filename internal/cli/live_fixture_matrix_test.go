@@ -51,11 +51,15 @@ func TestLiveFixtureMatrix(t *testing.T) {
 func selectedLiveFixtureProtocols(selected string) ([]string, error) {
 	switch selected {
 	case "":
-		return []string{"openai", "anthropic"}, nil
-	case "openai", "anthropic":
+		return []string{"openai-chat", "anthropic-native", "openai-responses"}, nil
+	case "openai":
+		return []string{"openai-chat"}, nil
+	case "anthropic":
+		return []string{"anthropic-native"}, nil
+	case "openai-chat", "anthropic-native", "openai-responses":
 		return []string{selected}, nil
 	default:
-		return nil, fmt.Errorf("invalid CCR_LIVE_FIXTURE_PROTOCOL %q; expected openai or anthropic", selected)
+		return nil, fmt.Errorf("invalid CCR_LIVE_FIXTURE_PROTOCOL %q; expected openai-chat, anthropic-native, or openai-responses", selected)
 	}
 }
 
@@ -173,8 +177,8 @@ func liveMatrixDependencies(fixture *liveMatrixFixture) Dependencies {
 func configureLiveMatrixModels(t *testing.T, ctx context.Context, deps Dependencies, dbPath, baseURL, protocol string) {
 	t.Helper()
 	providerType := "litellm"
-	if protocol == "anthropic" {
-		providerType = "zai"
+	if protocol == "anthropic-native" {
+		providerType = "anthropic"
 	}
 	for _, entry := range []struct {
 		name string
@@ -187,6 +191,10 @@ func configureLiveMatrixModels(t *testing.T, ctx context.Context, deps Dependenc
 		commands := [][]string{
 			{"--db", dbPath, "provider", "add", entry.name, "--type", providerType, "--base-url", baseURL, "--no-api-key", "--mode", entry.mode},
 			{"--db", dbPath, "model", "add", entry.name, "--provider", entry.name, "--model", entry.name + "-model", "--compat", entry.mode},
+		}
+		if protocol == "openai-responses" {
+			commands[0] = append(commands[0], "--responses")
+			commands = append(commands, []string{"--db", dbPath, "model", "update", entry.name, "--model-kind", "responses", "--responses", "true"})
 		}
 		if entry.name == "fixture-full" {
 			commands = append(commands,

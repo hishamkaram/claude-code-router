@@ -169,6 +169,32 @@ func (s *Store) migrateV4ToV5(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) migrateV5ToV6(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v5 to v6 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	exists, err := tableColumnExists(ctx, tx, "providers", "supports_responses")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE providers ADD COLUMN supports_responses INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("adding providers.supports_responses column: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 6 WHERE id = 1 AND version = 5`); err != nil {
+		return fmt.Errorf("updating schema version to 6: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v5 to v6 migration: %w", err)
+	}
+	return nil
+}
+
 func tableColumnExists(ctx context.Context, tx *sql.Tx, table, name string) (bool, error) {
 	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {

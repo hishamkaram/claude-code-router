@@ -62,11 +62,15 @@ func TestGatewayInjectsOpenAIRouteIdentityForModelQuestion(t *testing.T) {
 		t.Fatalf("provider messages = %#v, want route identity plus transcript", gotMessages)
 	}
 	identity := gotMessages[0]
+	identityContent, ok := identity.Content.(string)
+	if !ok {
+		t.Fatalf("route identity content = %T, want string", identity.Content)
+	}
 	if identity.Role != "system" ||
-		!strings.Contains(identity.Content, `CCR alias "glm"`) ||
-		!strings.Contains(identity.Content, `provider "litellm"`) ||
-		!strings.Contains(identity.Content, `provider model "glm-5.2"`) ||
-		!strings.Contains(identity.Content, `Claude Code requested model ID "anthropic.ccr.glm"`) {
+		!strings.Contains(identityContent, `CCR alias "glm"`) ||
+		!strings.Contains(identityContent, `provider "litellm"`) ||
+		!strings.Contains(identityContent, `provider model "glm-5.2"`) ||
+		!strings.Contains(identityContent, `Claude Code requested model ID "anthropic.ccr.glm"`) {
 		t.Fatalf("route identity message = %#v", identity)
 	}
 	if gotMessages[2].Role != "assistant" || gotMessages[2].Content != "I am Sonnet." {
