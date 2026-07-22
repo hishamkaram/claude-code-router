@@ -49,6 +49,83 @@ func TestProviderRemoveDeletesProviderAndModels(t *testing.T) {
 	}
 }
 
+func TestResolveProviderUpdateBaseClearsResponsesOnTypeChange(t *testing.T) {
+	t.Parallel()
+
+	existing := store.Provider{
+		Name: "fixture", Type: "openai-compatible", BaseURL: "https://responses.example",
+		Protocol: "openai-compatible", SupportsTools: true, SupportsStreaming: true, SupportsResponses: true,
+	}
+	updated, err := resolveProviderUpdateBase(existing, providerSetupPrompt{
+		providerType: "anthropic-compatible", baseURL: "https://anthropic.example",
+	})
+	if err != nil {
+		t.Fatalf("resolveProviderUpdateBase() error = %v", err)
+	}
+	if updated.SupportsResponses {
+		t.Fatalf("updated provider retained Responses support: %#v", updated)
+	}
+}
+
+func TestProviderUpdateInteractivePreservesResponsesForUnchangedProfile(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "openai", "--type", "openai-compatible", "--base-url", "https://responses.example", "--api-key-env", "CCR_TEST_OPENAI_KEY", "--responses"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	input := strings.Join([]string{
+		"", // keep the Responses-capable profile
+		"", // keep the base URL
+		"", // keep the secret reference
+	}, "\n") + "\n"
+	if _, errOut, err := runCommandWithDeps(t, Dependencies{In: newPromptReader(input)}, "--db", dbPath, "provider", "update", "openai", "--interactive"); err != nil {
+		t.Fatalf("interactive provider update error = %v\nstderr:\n%s", err, errOut)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "responses") {
+		t.Fatalf("provider list dropped Responses support: %q", out)
+	}
+}
+
+func TestProviderUpdateWithUnchangedTypeOrProtocolPreservesResponsesCapability(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "type", args: []string{"--type", "openai-compatible"}},
+		{name: "protocol", args: []string{"--protocol", "openai-compatible"}},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			dbPath := filepath.Join(t.TempDir(), "ccr.db")
+			if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "openai", "--type", "openai-compatible", "--base-url", "https://responses.example", "--api-key-env", "CCR_TEST_OPENAI_KEY", "--responses"); err != nil {
+				t.Fatalf("provider add error = %v", err)
+			}
+			args := append([]string{"--db", dbPath, "provider", "update", "openai"}, test.args...)
+			if _, _, err := runCommand(t, args...); err != nil {
+				t.Fatalf("provider update error = %v", err)
+			}
+			out, _, err := runCommand(t, "--db", dbPath, "provider", "list")
+			if err != nil {
+				t.Fatalf("provider list error = %v", err)
+			}
+			if !strings.Contains(out, "responses") {
+				t.Fatalf("provider list dropped Responses support: %q", out)
+			}
+		})
+	}
+}
+
 func TestProviderRemoveMissingProviderFailsBeforeSideEffects(t *testing.T) {
 	t.Parallel()
 
@@ -140,6 +217,58 @@ func TestProviderUpdateWithFlags(t *testing.T) {
 	}
 	if !strings.Contains(out, "http://localhost:5000") || !strings.Contains(out, "env:LITELLM_API_KEY") {
 		t.Fatalf("provider list output = %q", out)
+	}
+}
+
+func TestProviderResponsesCapabilityCanBeConfiguredAtAddAndUpdate(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "responses", "--type", "openai-compatible", "--base-url", "http://localhost:4000", "--no-api-key", "--responses"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if !strings.Contains(out, "caps=tools,streaming,thinking,models,responses,") {
+		t.Fatalf("provider list after add = %q", out)
+	}
+	if _, _, updateErr := runCommand(t, "--db", dbPath, "provider", "update", "responses", "--responses=false"); updateErr != nil {
+		t.Fatalf("provider update error = %v", updateErr)
+	}
+	out, _, err = runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if strings.Contains(out, "responses,") {
+		t.Fatalf("provider list retained disabled Responses capability: %q", out)
+	}
+}
+
+func TestProviderResponsesCapabilityRejectsAnthropicCompatibleProvider(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	_, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--type", "anthropic-compatible", "--base-url", "https://anthropic.example", "--no-api-key", "--responses")
+	if err == nil || !strings.Contains(err.Error(), `responses API capability requires provider protocol "openai-compatible"`) {
+		t.Fatalf("provider add error = %v", err)
+	}
+
+	if _, _, addErr := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--type", "anthropic-compatible", "--base-url", "https://anthropic.example", "--no-api-key"); addErr != nil {
+		t.Fatalf("provider add without Responses capability error = %v", addErr)
+	}
+	_, _, err = runCommand(t, "--db", dbPath, "provider", "update", "anthropic", "--responses")
+	if err == nil || !strings.Contains(err.Error(), `responses API capability requires provider protocol "openai-compatible"`) {
+		t.Fatalf("provider update error = %v", err)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "provider", "list")
+	if err != nil {
+		t.Fatalf("provider list error = %v", err)
+	}
+	if strings.Contains(out, "responses,") {
+		t.Fatalf("provider list advertised Responses capability: %q", out)
 	}
 }
 

@@ -7,11 +7,13 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	conformancecheck "github.com/hishamkaram/claude-code-router/internal/conformance"
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -63,9 +65,16 @@ func runConformanceAll(ctx context.Context, cmd *cobra.Command, opts *options, d
 		if err := writeConformanceAllResult(cmd, aggregate, options.jsonOutput); err != nil {
 			return err
 		}
-		return fmt.Errorf("conformance found no runnable non-blocked model aliases")
+		return fmt.Errorf("conformance found no runnable non-blocked routable model aliases")
 	}
-	executions := runProviderConformanceTargets(ctx, deps, s, targets)
+	executions := runProviderConformanceTargets(ctx, deps, s, targets, func(execution conformanceExecution) {
+		status := conformancecheck.StatusPassed
+		if execution.err != nil || execution.result.Status != conformancecheck.StatusPassed {
+			status = conformancecheck.StatusFailed
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "Conformance provider checks completed: alias=%s status=%s\n",
+			execution.target.model.Alias, status)
+	})
 	for index := range executions {
 		execution := &executions[index]
 		if execution.err == nil && options.claude {
@@ -119,6 +128,26 @@ func prepareConformanceTargets(ctx context.Context, diagnostics io.Writer, s *st
 		if err != nil {
 			return nil, conformanceAllDocument{}, err
 		}
+		if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+			aggregate.Results = append(aggregate.Results, conformanceAllResult{
+				Alias: model.Alias, Status: "skipped", Error: "provider control model is excluded from routing and conformance",
+			})
+			fmt.Fprintf(diagnostics, "Conformance target skipped: alias=%s provider=%s model=%s reason=provider control model\n",
+				model.Alias, provider.Name, model.ProviderModel)
+			continue
+		}
+		skipReason, err := liveProbeSkipReason(*model, provider)
+		if err != nil {
+			return nil, conformanceAllDocument{}, err
+		}
+		if skipReason != "" {
+			aggregate.Results = append(aggregate.Results, conformanceAllResult{
+				Alias: model.Alias, Status: "skipped", Error: skipReason,
+			})
+			fmt.Fprintf(diagnostics, "Conformance target skipped: alias=%s provider=%s model=%s reason=%s\n",
+				model.Alias, provider.Name, model.ProviderModel, skipReason)
+			continue
+		}
 		caps := effectiveProviderCapabilities(provider)
 		fmt.Fprintf(diagnostics, "Conformance target: alias=%s provider=%s model=%s protocol=%s\n",
 			model.Alias, provider.Name, model.ProviderModel, caps.Protocol)
@@ -134,7 +163,13 @@ func prepareConformanceTargets(ctx context.Context, diagnostics io.Writer, s *st
 	return targets, aggregate, nil
 }
 
-func runProviderConformanceTargets(ctx context.Context, deps Dependencies, s *store.Store, targets []conformanceTarget) []conformanceExecution {
+func runProviderConformanceTargets(
+	ctx context.Context,
+	deps Dependencies,
+	s *store.Store,
+	targets []conformanceTarget,
+	onComplete func(conformanceExecution),
+) []conformanceExecution {
 	if len(targets) == 0 {
 		return nil
 	}
@@ -145,10 +180,11 @@ func runProviderConformanceTargets(ctx context.Context, deps Dependencies, s *st
 	}
 	close(jobs)
 	workers := min(maxConcurrentConformanceProviders, len(targets))
-	done := make(chan struct{}, workers)
+	var wait sync.WaitGroup
+	wait.Add(workers)
 	for range workers {
 		go func() {
-			defer func() { done <- struct{}{} }()
+			defer wait.Done()
 			for target := range jobs {
 				if _, err := validateProviderConfigAndSecret(ctx, deps, target.provider); err != nil {
 					results <- conformanceExecution{target: target, err: err}
@@ -161,12 +197,15 @@ func runProviderConformanceTargets(ctx context.Context, deps Dependencies, s *st
 			}
 		}()
 	}
-	for range workers {
-		<-done
-	}
-	close(results)
+	go func() {
+		wait.Wait()
+		close(results)
+	}()
 	executions := make([]conformanceExecution, 0, len(targets))
 	for result := range results {
+		if onComplete != nil {
+			onComplete(result)
+		}
 		executions = append(executions, result)
 	}
 	sort.Slice(executions, func(i, j int) bool {

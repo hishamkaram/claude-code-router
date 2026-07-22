@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	conformancecheck "github.com/hishamkaram/claude-code-router/internal/conformance"
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -85,7 +86,7 @@ func newConformanceCommand(ctx context.Context, opts *options, deps Dependencies
 	run.Flags().BoolVar(&runOptions.claude, "claude", false, "Also verify the installed Claude Code CLI")
 	run.Flags().BoolVar(&runOptions.includeAnthropic, "include-anthropic", false, "Include first-party Anthropic in the Claude CLI matrix")
 	run.Flags().BoolVar(&runOptions.jsonOutput, "json", false, "Emit schema-versioned JSON")
-	run.Flags().BoolVar(&runOptions.all, "all", false, "Run conformance for every registered non-blocked model alias")
+	run.Flags().BoolVar(&runOptions.all, "all", false, "Run conformance for every registered non-blocked routable model alias")
 	cmd.AddCommand(run, newConformanceListCommand(ctx, opts))
 	return cmd
 }
@@ -106,6 +107,9 @@ func runConformance(ctx context.Context, cmd *cobra.Command, opts *options, deps
 	provider, err := s.GetProvider(ctx, model.ProviderName)
 	if err != nil {
 		return err
+	}
+	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
+		return fmt.Errorf("model alias %q targets provider control model %q and cannot be tested", alias, model.ProviderModel)
 	}
 	if _, validationErr := validateProviderConfigAndSecret(ctx, deps, provider); validationErr != nil {
 		return validationErr

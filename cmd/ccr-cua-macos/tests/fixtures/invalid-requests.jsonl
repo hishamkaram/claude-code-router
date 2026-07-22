@@ -1,0 +1,10 @@
+{"name":"non_object","request":["not","an","object"],"expected_error":"invalid_request"}
+{"name":"unknown_envelope_field","request":{"version":1,"id":"unknown-field","type":"start","token":"test-session-token","command":"whoami"},"expected_error":"invalid_request"}
+{"name":"bad_id","request":{"version":1,"id":"bad id","type":"start","token":"test-session-token"},"expected_error":"invalid_request"}
+{"name":"wrong_token","request":{"version":1,"id":"wrong-token","type":"start","token":"different-token"},"expected_error":"unauthenticated"}
+{"name":"action_before_start","request":{"version":1,"id":"early-action","type":"action","token":"test-session-token","action":{"kind":"screenshot"}},"expected_error":"not_started"}
+{"name":"unsupported_action","state":"active","request":{"version":1,"id":"shell-action","type":"action","token":"test-session-token","action":{"kind":"shell","command":"whoami"}},"expected_error":"invalid_action"}
+{"name":"extra_action_field","state":"active","request":{"version":1,"id":"extra-field","type":"action","token":"test-session-token","action":{"kind":"click","x":1,"y":2,"command":"whoami"}},"expected_error":"invalid_action"}
+{"name":"extra_drag_source_field","state":"active","request":{"version":1,"id":"drag-source-extra","type":"action","token":"test-session-token","action":{"kind":"drag","from":{"x":1,"y":2,"command":"whoami"},"to":{"x":3,"y":4}}},"expected_error":"invalid_action"}
+{"name":"invalid_scroll_type","state":"active","request":{"version":1,"id":"bad-scroll","type":"action","token":"test-session-token","action":{"kind":"scroll","x":1,"y":2,"delta_x":0.5,"delta_y":2}},"expected_error":"invalid_request"}
+{"name":"boolean_coordinate","state":"active","request":{"version":1,"id":"bool-coordinate","type":"action","token":"test-session-token","action":{"kind":"click","x":true,"y":2}},"expected_error":"invalid_request"}

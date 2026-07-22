@@ -70,6 +70,8 @@ type openAIModelItem struct {
 	SupportsAudioOutput     *bool         `json:"supports_audio_output"`
 	SupportsNativeStreaming *bool         `json:"supports_native_streaming"`
 	SupportsResponseSchema  *bool         `json:"supports_response_schema"`
+	SupportsResponses       *bool         `json:"supports_responses"`
+	SupportsComputerUse     *bool         `json:"supports_computer_use"`
 	Architecture            struct {
 		InputModalities  []string `json:"input_modalities"`
 		OutputModalities []string `json:"output_modalities"`
@@ -123,6 +125,8 @@ type liteLLMModelInfoItem struct {
 		SupportsSystemMessages          *bool         `json:"supports_system_messages"`
 		SupportsResponseSchema          *bool         `json:"supports_response_schema"`
 		SupportsNativeStructuredOutput  *bool         `json:"supports_native_structured_output"`
+		SupportsResponses               *bool         `json:"supports_responses"`
+		SupportsComputerUse             *bool         `json:"supports_computer_use"`
 	} `json:"model_info"`
 }
 
@@ -202,6 +206,8 @@ func parseLiteLLMModelInfo(body io.Reader) ([]DiscoveredModel, error) {
 			SupportsAudioInput:     item.ModelInfo.SupportsAudioInput,
 			SupportsAudioOutput:    item.ModelInfo.SupportsAudioOutput,
 			SupportsResponseSchema: firstBool(item.ModelInfo.SupportsResponseSchema, item.ModelInfo.SupportsNativeStructuredOutput),
+			SupportsResponses:      item.ModelInfo.SupportsResponses,
+			SupportsComputerUse:    item.ModelInfo.SupportsComputerUse,
 		}
 		normalizeProviderModalities(&values)
 		applySupportedParameters(&values, item.ModelInfo.SupportedOpenAIParams)
@@ -245,6 +251,8 @@ func capabilitiesFromOpenAIItem(item openAIModelItem) modelcap.Values {
 		SupportsAudioInput:     item.SupportsAudioInput,
 		SupportsAudioOutput:    item.SupportsAudioOutput,
 		SupportsResponseSchema: firstBool(item.SupportsResponseSchema, item.Capabilities.StructuredOutputs.Supported),
+		SupportsResponses:      item.SupportsResponses,
+		SupportsComputerUse:    item.SupportsComputerUse,
 	}
 	normalizeProviderModalities(&values)
 	applySupportedParameters(&values, item.SupportedParameters)
@@ -301,6 +309,10 @@ func applyOpenAIAdapterCapabilities(snapshot *modelcap.Snapshot) {
 		snapshot.Sources = make(map[string]string)
 	}
 	snapshot.Sources["supports_streaming"] = modelcap.SourceOpenAIAdapter
+	if snapshot.Values.Kind == modelcap.KindResponses && snapshot.Values.SupportsResponses == nil {
+		snapshot.Values.SupportsResponses = modelcap.Bool(true)
+		snapshot.Sources["supports_responses"] = modelcap.SourceOpenAIAdapter
+	}
 }
 
 func applySupportedParameters(values *modelcap.Values, parameters []string) {
@@ -318,6 +330,10 @@ func applySupportedParameters(values *modelcap.Values, parameters []string) {
 			setTrueIfUnknown(&values.SupportsThinking)
 		case "response_format", "structured_outputs":
 			setTrueIfUnknown(&values.SupportsResponseSchema)
+		case "responses", "response_api":
+			setTrueIfUnknown(&values.SupportsResponses)
+		case "computer", "computer_use":
+			setTrueIfUnknown(&values.SupportsComputerUse)
 		}
 	}
 }

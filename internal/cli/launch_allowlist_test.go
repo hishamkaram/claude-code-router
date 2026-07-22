@@ -155,6 +155,39 @@ func TestLaunchRejectsExplicitNonStreamingStartupModel(t *testing.T) {
 	}
 }
 
+func TestLaunchExcludesResponsesModelsWithoutProviderResponsesSupport(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	server := newModelsServer(t, []string{"responses-model"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "responses", "--provider", "litellm", "--model", "responses-model"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "update", "responses", "--model-kind", "responses", "--responses", "true"); err != nil {
+		t.Fatalf("model update error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch"); err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	payload := launchSettingsPayload(t, launcher)
+	if slices.Contains(payload.AvailableModels, "anthropic.ccr.responses") {
+		t.Fatalf("availableModels includes Responses alias without provider support: %#v", payload.AvailableModels)
+	}
+
+	startupLauncher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err := runCommandWithDeps(t, Dependencies{Launcher: startupLauncher}, "--db", dbPath, "launch", "--model", "responses")
+	if err == nil || !strings.Contains(err.Error(), "OpenAI Responses API") || !strings.Contains(err.Error(), "excluded from /model") {
+		t.Fatalf("launch error = %v", err)
+	}
+	if startupLauncher.starts != 0 {
+		t.Fatalf("launcher starts = %d, want 0", startupLauncher.starts)
+	}
+}
+
 func TestLaunchExcludesModelsWithoutSystemMessageSupport(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

@@ -31,6 +31,9 @@ func (e *ConfigurationConflictError) Error() string {
 }
 
 func (s *Store) ImportConfiguration(ctx context.Context, providers []Provider, models []Model, dryRun bool) (ConfigurationImportResult, error) {
+	if err := validateProviderSecretRefs(providers); err != nil {
+		return ConfigurationImportResult{}, fmt.Errorf("store.ImportConfiguration: %w", err)
+	}
 	if dryRun {
 		return s.PlanConfigurationImport(ctx, providers, models)
 	}
@@ -51,14 +54,14 @@ func (s *Store) ImportConfiguration(ctx context.Context, providers []Provider, m
 INSERT INTO providers (
   name, type, base_url, secret_ref, protocol, supports_tools,
   supports_streaming, supports_thinking, supports_model_discovery,
-  supports_count_tokens, mode, created_at
+  supports_count_tokens, supports_responses, mode, created_at
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, provider.Name, provider.Type, provider.BaseURL, provider.SecretRef,
 			provider.Protocol, boolToInt(provider.SupportsTools),
 			boolToInt(provider.SupportsStreaming), boolToInt(provider.SupportsThinking),
 			boolToInt(provider.SupportsModelDiscovery), boolToInt(provider.SupportsCountTokens),
-			provider.Mode, now)
+			boolToInt(provider.SupportsResponses), provider.Mode, now)
 		if err != nil {
 			return ConfigurationImportResult{}, fmt.Errorf("store.ImportConfiguration: inserting provider %q: %w", provider.Name, err)
 		}
@@ -96,6 +99,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 }
 
 func (s *Store) PlanConfigurationImport(ctx context.Context, providers []Provider, models []Model) (ConfigurationImportResult, error) {
+	if err := validateProviderSecretRefs(providers); err != nil {
+		return ConfigurationImportResult{}, fmt.Errorf("store.PlanConfigurationImport: %w", err)
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return ConfigurationImportResult{}, fmt.Errorf("store.PlanConfigurationImport: starting read-only transaction: %w", err)
@@ -106,6 +112,16 @@ func (s *Store) PlanConfigurationImport(ctx context.Context, providers []Provide
 		return ConfigurationImportResult{}, fmt.Errorf("store.PlanConfigurationImport: %w", err)
 	}
 	return result, nil
+}
+
+func validateProviderSecretRefs(providers []Provider) error {
+	for index := range providers {
+		provider := &providers[index]
+		if err := validateSecretRef(provider.SecretRef); err != nil {
+			return fmt.Errorf("provider %q: %w", provider.Name, err)
+		}
+	}
+	return nil
 }
 
 func planConfigurationImport(ctx context.Context, tx *sql.Tx, providers []Provider, models []Model) (ConfigurationImportResult, error) {

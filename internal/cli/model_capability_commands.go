@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,7 +17,10 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-const maxConcurrentProviderRefreshes = 4
+const (
+	maxConcurrentProviderRefreshes = 4
+	modelRefreshSchemaVersion      = 2
+)
 
 type modelShowDocument struct {
 	SchemaVersion int               `json:"schema_version"`
@@ -32,11 +36,12 @@ type modelShowDocument struct {
 }
 
 type modelRefreshDocument struct {
-	SchemaVersion int                  `json:"schema_version"`
-	Refreshed     int                  `json:"refreshed"`
-	Skipped       int                  `json:"skipped"`
-	Failed        int                  `json:"failed"`
-	Results       []modelRefreshResult `json:"results"`
+	SchemaVersion    int                           `json:"schema_version"`
+	Refreshed        int                           `json:"refreshed"`
+	Skipped          int                           `json:"skipped"`
+	Failed           int                           `json:"failed"`
+	ProviderWarnings []modelRefreshProviderWarning `json:"provider_warnings,omitempty"`
+	Results          []modelRefreshResult          `json:"results"`
 }
 
 type modelRefreshResult struct {
@@ -47,6 +52,11 @@ type modelRefreshResult struct {
 	RefreshedAt   string   `json:"refreshed_at,omitempty"`
 	Warnings      []string `json:"warnings,omitempty"`
 	Error         string   `json:"error,omitempty"`
+}
+
+type modelRefreshProviderWarning struct {
+	Provider string   `json:"provider"`
+	Warnings []string `json:"warnings"`
 }
 
 type providerRefreshGroup struct {
@@ -172,11 +182,18 @@ func runModelRefresh(ctx context.Context, cmd *cobra.Command, opts *options, dep
 	if err != nil {
 		return err
 	}
-	discoveryResults := discoverProviderGroups(ctx, deps, groups)
+	discoveryResults := discoverProviderGroups(ctx, deps, groups, func(result providerDiscoveryResult) {
+		status := "completed"
+		if result.err != nil {
+			status = "failed"
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "Capability refresh: provider=%s aliases=%d status=%s\n",
+			result.group.provider.Name, len(result.group.models), status)
+	})
 	results := initialResults
 	results = append(results, applyProviderDiscoveries(ctx, s, discoveryResults)...)
 	sort.Slice(results, func(i, j int) bool { return results[i].Alias < results[j].Alias })
-	document := summarizeModelRefresh(results)
+	document := summarizeModelRefresh(results, collectProviderRefreshWarnings(discoveryResults))
 	if jsonOutput {
 		if err := writeVersionedJSON(cmd.OutOrStdout(), document); err != nil {
 			return err
@@ -240,7 +257,12 @@ func buildProviderRefreshGroups(ctx context.Context, s *store.Store, alias strin
 	return groups, skipped, nil
 }
 
-func discoverProviderGroups(ctx context.Context, deps Dependencies, groups []providerRefreshGroup) []providerDiscoveryResult {
+func discoverProviderGroups(
+	ctx context.Context,
+	deps Dependencies,
+	groups []providerRefreshGroup,
+	onComplete func(providerDiscoveryResult),
+) []providerDiscoveryResult {
 	if len(groups) == 0 {
 		return nil
 	}
@@ -251,22 +273,26 @@ func discoverProviderGroups(ctx context.Context, deps Dependencies, groups []pro
 	}
 	close(jobs)
 	workers := min(maxConcurrentProviderRefreshes, len(groups))
-	done := make(chan struct{}, workers)
+	var wait sync.WaitGroup
+	wait.Add(workers)
 	for range workers {
 		go func() {
-			defer func() { done <- struct{}{} }()
+			defer wait.Done()
 			for group := range jobs {
 				discovery, err := discoverProviderModels(ctx, deps, group.provider)
 				results <- providerDiscoveryResult{group: group, discovery: discovery, err: err}
 			}
 		}()
 	}
-	for range workers {
-		<-done
-	}
-	close(results)
+	go func() {
+		wait.Wait()
+		close(results)
+	}()
 	discovered := make([]providerDiscoveryResult, 0, len(groups))
 	for result := range results {
+		if onComplete != nil {
+			onComplete(result)
+		}
 		discovered = append(discovered, result)
 	}
 	sort.Slice(discovered, func(i, j int) bool {
@@ -283,7 +309,6 @@ func applyProviderDiscoveries(ctx context.Context, s *store.Store, discoveries [
 			model := &providerResult.group.models[modelIndex]
 			result := modelRefreshResult{
 				Alias: model.Alias, Provider: model.ProviderName, ProviderModel: model.ProviderModel,
-				Warnings: append([]string(nil), providerResult.discovery.Warnings...),
 			}
 			if providerResult.err != nil {
 				result.Status = "failed"
@@ -326,6 +351,21 @@ func applyProviderDiscoveries(ctx context.Context, s *store.Store, discoveries [
 	return results
 }
 
+func collectProviderRefreshWarnings(discoveries []providerDiscoveryResult) []modelRefreshProviderWarning {
+	warnings := make([]modelRefreshProviderWarning, 0, len(discoveries))
+	for index := range discoveries {
+		discovery := &discoveries[index]
+		if len(discovery.discovery.Warnings) == 0 {
+			continue
+		}
+		warnings = append(warnings, modelRefreshProviderWarning{
+			Provider: discovery.group.provider.Name,
+			Warnings: append([]string(nil), discovery.discovery.Warnings...),
+		})
+	}
+	return warnings
+}
+
 func findDiscoveredModel(models []providers.DiscoveredModel, id string) (providers.DiscoveredModel, bool) {
 	for index := range models {
 		model := &models[index]
@@ -336,8 +376,8 @@ func findDiscoveredModel(models []providers.DiscoveredModel, id string) (provide
 	return providers.DiscoveredModel{}, false
 }
 
-func summarizeModelRefresh(results []modelRefreshResult) modelRefreshDocument {
-	document := modelRefreshDocument{SchemaVersion: 1, Results: results}
+func summarizeModelRefresh(results []modelRefreshResult, providerWarnings []modelRefreshProviderWarning) modelRefreshDocument {
+	document := modelRefreshDocument{SchemaVersion: modelRefreshSchemaVersion, ProviderWarnings: providerWarnings, Results: results}
 	for index := range results {
 		result := &results[index]
 		switch result.Status {
@@ -353,6 +393,13 @@ func summarizeModelRefresh(results []modelRefreshResult) modelRefreshDocument {
 }
 
 func writeModelRefreshSummary(out io.Writer, document modelRefreshDocument) {
+	for index := range document.ProviderWarnings {
+		providerWarning := &document.ProviderWarnings[index]
+		fmt.Fprintf(out, "Provider %s:\n", providerWarning.Provider)
+		for _, warning := range providerWarning.Warnings {
+			fmt.Fprintf(out, "  warning: %s\n", warning)
+		}
+	}
 	for index := range document.Results {
 		result := &document.Results[index]
 		fmt.Fprintf(out, "%s: %s provider=%s model=%s", result.Alias, result.Status, result.Provider, result.ProviderModel)

@@ -13,7 +13,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 )
 
-const DefaultDiscoveryTimeout = 10 * time.Second
+const DefaultDiscoveryTimeout = 30 * time.Second
 
 type DiscoveryConfig struct {
 	Type    string
@@ -191,7 +191,7 @@ func (d Discoverer) discoveryRequest(ctx context.Context, endpoint, apiKey strin
 }
 
 func closeDiscoveryResponse(resp *http.Response) {
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxDiscoveryResponseBytes+1))
 	_ = resp.Body.Close()
 }
 
@@ -220,6 +220,12 @@ func LiteLLMModelInfoEndpoint(baseURL string) (string, error) {
 
 func ChatCompletionsEndpoint(baseURL string) (string, error) {
 	return endpointWithPath(baseURL, "chat/completions")
+}
+
+// ResponsesEndpoint returns the OpenAI Responses API endpoint for a provider
+// base URL while preserving an existing versioned path.
+func ResponsesEndpoint(baseURL string) (string, error) {
+	return endpointWithPath(baseURL, "responses")
 }
 
 func MessagesCountTokensEndpoint(baseURL string) (string, error) {

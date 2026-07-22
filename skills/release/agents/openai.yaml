@@ -1,0 +1,7 @@
+interface:
+  display_name: "CCR Release"
+  short_description: "Plan, verify, and promote CCR releases"
+  default_prompt: "Use $release to prepare a CCR release with evidence-backed notes, acceptance gates, draft artifacts, and Homebrew promotion."
+
+policy:
+  allow_implicit_invocation: true

@@ -2,9 +2,12 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	openairesponses "github.com/hishamkaram/claude-code-router/internal/responses"
 )
 
 func TestAnthropicUsageFromJSON(t *testing.T) {
@@ -66,5 +69,23 @@ func TestOpenAIUsagePresenceDistinguishesUnavailableFromZero(t *testing.T) {
 	}
 	if usage := tokenUsageFromOpenAI(withoutUsage); usage.Observed {
 		t.Fatalf("tokenUsageFromOpenAI(without usage) = %#v", usage)
+	}
+}
+
+func TestResponsesUsagePresenceDistinguishesUnavailableFromZero(t *testing.T) {
+	t.Parallel()
+	var withUsage openairesponses.Response
+	if err := json.Unmarshal([]byte(`{"output":[],"usage":{"input_tokens":0,"output_tokens":0}}`), &withUsage); err != nil {
+		t.Fatalf("UnmarshalJSON(with usage) error = %v", err)
+	}
+	if usage := tokenUsageFromResponses(&withUsage); !usage.Observed {
+		t.Fatalf("tokenUsageFromResponses(with usage) = %#v", usage)
+	}
+	var withoutUsage openairesponses.Response
+	if err := json.Unmarshal([]byte(`{"output":[]}`), &withoutUsage); err != nil {
+		t.Fatalf("UnmarshalJSON(without usage) error = %v", err)
+	}
+	if usage := tokenUsageFromResponses(&withoutUsage); usage.Observed {
+		t.Fatalf("tokenUsageFromResponses(without usage) = %#v", usage)
 	}
 }

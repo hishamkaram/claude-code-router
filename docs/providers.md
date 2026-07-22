@@ -85,6 +85,36 @@ unset key
 If keychain storage is unavailable, use an environment-variable or `0600` file
 reference.
 
+## OpenAI Responses API
+
+Responses routing is an explicit provider capability because an
+OpenAI-compatible endpoint does not necessarily implement `POST /v1/responses`.
+Enable it when adding or updating a provider that has that endpoint:
+
+```bash
+ccr provider add litellm-full --type litellm --base-url https://gateway.example/v1 \
+  --api-key-env LITELLM_API_KEY --responses
+
+# Existing provider:
+ccr provider update litellm-full --responses
+```
+
+Only OpenAI-compatible providers can advertise this capability. To route a
+specific alias through Responses, set the model facts as well. Add
+`--computer-use true` only when the provider model actually supports managed
+computer use:
+
+```bash
+ccr model update responses-cua --model-kind responses \
+  --responses true --computer-use true
+```
+
+CCR rejects a Responses or computer-use request when either the provider or the
+effective model facts do not support it; it never falls back to Chat
+Completions or Claude. A Responses-only alias whose provider is not configured
+with `--responses` is excluded from gateway discovery and Claude Code's picker
+instead of being offered as a route that would fail.
+
 ## Discovery and Review
 
 OpenAI-compatible profiles with model discovery verify connectivity before
@@ -126,7 +156,10 @@ ccr model show code-review --json
 A failed or partial refresh preserves the last complete facts. Explicit model
 overrides take precedence over discovered values, which take precedence over a
 recognized provider-model hint such as a terminal `[1m]` suffix. Unknown is
-distinct from `false`; missing metadata does not invent a limitation.
+distinct from `false`; missing metadata does not invent support or a limitation.
+For LiteLLM, an HTTP 403 from optional `/model/info` is reported as a provider
+warning. The refresh can still succeed from discovery, retained facts, and local
+overrides; the warning is not itself a failed alias refresh.
 
 Use `model update` when the provider cannot report a capability accurately:
 
@@ -140,8 +173,13 @@ ccr model update code-review --clear-capabilities
 Boolean overrides accept `true`, `false`, or `auto`. `auto` clears that one
 override. CCR also supports normalized input/output limits, modalities, tool
 choice and parallel tools, thinking, prompt caching, system messages, vision,
-PDF and audio input, audio output, and response-schema support. Run
-`ccr model update --help` for the exact flags.
+PDF and audio input, audio output, response-schema support, and computer-use
+support. Run `ccr model update --help` for the exact flags.
+
+Vision has two checks: the request must contain an image modality that CCR can
+translate, and the effective model facts must allow image input. If either check
+fails, the gateway rejects the request with the missing capability. It does not
+strip the image, retry text-only, or route to Claude.
 
 ## Manual Model Entry
 
@@ -195,6 +233,66 @@ applicable. CCR still enforces every effective restriction at its gateway before
 a provider request is sent, regardless of which metadata the installed Claude
 Code version consumes.
 
+## Computer Use
+
+Computer-use automation is split by owner:
+
+| Mode | Owner | Notes |
+| --- | --- | --- |
+| Client-managed CUA | Claude Code host | Direct first-party Anthropic routes only. Claude Code owns the browser/session and approval prompts. |
+| Managed Docker browser | CCR executor | Uses the signed GHCR browser image published with a release. Prefer this for reproducible local automation. |
+| Managed host browser | CCR executor | Uses a trusted browser on the host. It is local and explicit, but less isolated than Docker. |
+| External executor | User-provided bridge | Requires a public HTTPS base URL, no URL credentials/query/fragment, no redirects, and a bearer token passed by environment-variable reference. |
+| macOS helper preview | CCR helper | Source-built only, not in Homebrew or release archives. Unsigned preview; treat as experimental until signed and notarized. |
+
+Managed CUA is never implicit. A route must effectively support computer use,
+the provider must be OpenAI-compatible and configured as Responses-capable, and
+the launch must choose a managed executor before CCR accepts native computer-use
+actions. An OpenAI Responses computer request without that executor is rejected
+before provider submission; CCR never emits an opaque provider action to Claude
+Code. Direct first-party Anthropic CUA remains client-managed by Claude Code.
+Approval decisions and audit metadata are stored locally; screenshots, page
+text, prompts, responses, credentials, and raw action payloads are not retained.
+
+The Docker executor defaults to the signed release image
+`ghcr.io/hishamkaram/claude-code-router/browser:latest`. Pin a signed release
+tag when reproducibility matters. Releases publish Linux `amd64` and `arm64`
+image manifests. Chromium runs without its internal Linux
+sandbox because CCR uses a non-root, read-only, no-new-privileges container;
+Docker capability, filesystem, resource, and process limits are the isolation
+boundary. Do not treat the managed browser as a credential-bearing desktop
+session.
+
+Docker and trusted-host browser executors preserve `CTRL`, `ALT`, `META`, and
+`SHIFT` modifiers on pointer actions. The macOS preview explicitly rejects
+pointer modifiers rather than performing a different action.
+
+Safe external executor launch shape:
+
+```bash
+export CCR_CUA_EXTERNAL_TOKEN='<external-executor-token>'
+ccr launch --model responses-cua \
+  --ccr-cua-mode managed \
+  --ccr-cua-executor external:browser \
+  --ccr-cua-external-url https://executor.example/cua \
+  --ccr-cua-external-token-env CCR_CUA_EXTERNAL_TOKEN
+```
+
+The token value is read from the named environment variable and is not passed to
+the Claude Code child process.
+
+For the macOS helper preview, build the helper yourself on macOS 14 or later
+and put the resulting `ccr-cua-macos` binary on the `PATH` used to start CCR:
+
+```bash
+make build-cua-macos
+```
+
+Grant Accessibility and Screen Recording permission to the process that
+launches the helper, then restart the helper before trying `macos-preview`.
+Unsigned preview builds may need permissions granted again after rebuilds or
+when the launching identity changes.
+
 ## Conformance and Diagnostics
 
 Run the protocol matrix through CCR's production gateway path:
@@ -202,7 +300,6 @@ Run the protocol matrix through CCR's production gateway path:
 ```bash
 ccr conformance run code-review
 ccr conformance run --all
-ccr conformance run code-review --claude --include-anthropic
 ccr conformance list code-review --json
 ```
 
@@ -211,19 +308,15 @@ forced tools, thinking, token counting, cancellation, and sanitized errors.
 Capability-disabled checks are reported as not applicable. A failed declared
 capability does not silently change the model's compatibility setting.
 
-`--claude` runs the route through the installed Claude Code CLI and verifies
-launch history, hooks, traces, Agent, and Workflow behavior. With
-`--include-anthropic`, CCR switches from first-party Anthropic to every
-tool-compatible alias and back in one launch. Tool-disabled aliases are checked
-in explicit launches because Claude cannot safely change tool availability in
-the middle of a session.
-
-`ccr conformance run --all` runs every non-blocked alias with bounded provider
-concurrency, continues after individual failures, and returns nonzero when any
-required alias fails. `ccr doctor` is offline by default. Use `ccr doctor
---live` to probe one alias per provider or `ccr doctor --live --all` to probe
-every non-blocked alias. Live Doctor failures identify the failed check, safe
-HTTP status details, bounded evidence, and a command to run next.
+`ccr conformance run --all` runs every non-blocked routable alias with bounded
+provider concurrency, continues after individual failures, and returns nonzero
+when any required alias fails. Provider control aliases and Responses-only
+aliases whose provider lacks `--responses` are reported as skipped without a
+provider request. `ccr doctor` is offline by default. Use `ccr doctor --live`
+to probe one alias per provider or `ccr doctor --live --all` to probe every
+routable alias and report excluded aliases as skipped. Live Doctor
+failures identify the failed check, safe HTTP status details, bounded evidence,
+and a command to run next.
 
 ## Team Profiles
 

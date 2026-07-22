@@ -35,6 +35,54 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 
 	configureIsolatedLivePickerClaude(t)
 
+	routedModel, provider := newLivePickerProvider(t)
+	defer provider.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	addLivePickerModels(t, ctx, dbPath, provider.URL)
+
+	run := startLivePickerRun(t, ctx, dbPath)
+	defer run.close()
+
+	run.waitForText(t, ctx, "Detected a custom API key")
+	run.write(t, "\x1b[A\r", "accepting isolated placeholder API key")
+	run.waitForText(t, ctx, "Welcome back!")
+	run.write(t, "/model\r", "opening /model picker")
+	run.waitForText(t, ctx,
+		"Select model",
+		"Opus",
+		"Sonnet",
+		"Haiku",
+		"anthropic.ccr.gpt",
+		"anthropic.ccr.s%6fnnet",
+		"anthropic.ccr.%6fpus",
+		"anthropic.ccr.h%61iku",
+	)
+
+	run.write(t, "\x1b", "closing /model picker")
+	time.Sleep(500 * time.Millisecond)
+	run.write(t, "/model anthropic.ccr.gpt\r", "selecting registered model by ID")
+	run.waitForText(t, ctx, "Set model to anthropic.ccr.gpt")
+	run.write(t, "Reply with the routed test response.\r", "sending routed prompt")
+	run.assertRoutedModel(t, ctx, routedModel, "gpt-5")
+	time.Sleep(500 * time.Millisecond)
+
+	run.write(t, "/exit\r", "exiting Claude Code")
+	run.waitForExit(t, ctx)
+}
+
+type livePickerRun struct {
+	session     livePickerSession
+	commandDone chan error
+	commandOut  *bytes.Buffer
+	commandErr  *bytes.Buffer
+	transcript  *synchronizedBuffer
+	readDone    chan error
+}
+
+func newLivePickerProvider(t *testing.T) (chan string, *httptest.Server) {
+	t.Helper()
+
 	routedModel := make(chan string, 1)
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -60,19 +108,21 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer provider.Close()
+	return routedModel, provider
+}
 
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	addLivePickerModels(t, ctx, dbPath, provider.URL)
+func startLivePickerRun(t *testing.T, ctx context.Context, dbPath string) *livePickerRun {
+	t.Helper()
 
 	launcher := &livePickerLauncher{started: make(chan livePickerSession, 1)}
-	var commandOut, commandErr bytes.Buffer
+	commandOut := &bytes.Buffer{}
+	commandErr := &bytes.Buffer{}
 	commandDone := make(chan error, 1)
 	go func() {
 		cmd := NewRootCommand(ctx, Dependencies{
 			In:       strings.NewReader(""),
-			Out:      &commandOut,
-			Err:      &commandErr,
+			Out:      commandOut,
+			Err:      commandErr,
 			Launcher: launcher,
 		})
 		cmd.SetArgs([]string{"--db", dbPath, "launch", "--bare"})
@@ -87,10 +137,6 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("waiting for Claude Code PTY: %v", ctx.Err())
 	}
-	defer func() {
-		_ = session.process.Stop()
-		_ = session.pty.Close()
-	}()
 
 	transcript := &synchronizedBuffer{}
 	readDone := make(chan error, 1)
@@ -98,65 +144,67 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 		_, err := io.Copy(transcript, session.pty)
 		readDone <- err
 	}()
+	return &livePickerRun{
+		session:     session,
+		commandDone: commandDone,
+		commandOut:  commandOut,
+		commandErr:  commandErr,
+		transcript:  transcript,
+		readDone:    readDone,
+	}
+}
 
-	waitForLivePickerText(t, ctx, transcript, commandDone, "Detected a custom API key")
-	if _, err := session.pty.Write([]byte("\x1b[A\r")); err != nil {
-		t.Fatalf("accepting isolated placeholder API key: %v", err)
-	}
-	waitForLivePickerText(t, ctx, transcript, commandDone, "Welcome back!")
-	if _, err := session.pty.Write([]byte("/model\r")); err != nil {
-		t.Fatalf("opening /model picker: %v", err)
-	}
-	waitForLivePickerText(t, ctx, transcript, commandDone,
-		"Select model",
-		"Opus",
-		"Sonnet",
-		"Haiku",
-		"anthropic.ccr.gpt",
-		"anthropic.ccr.s%6fnnet",
-		"anthropic.ccr.%6fpus",
-		"anthropic.ccr.h%61iku",
-	)
+func (r *livePickerRun) close() {
+	_ = r.session.process.Stop()
+	_ = r.session.pty.Close()
+}
 
-	if _, err := session.pty.Write([]byte("\x1b")); err != nil {
-		t.Fatalf("closing /model picker: %v", err)
+func (r *livePickerRun) waitForText(t *testing.T, ctx context.Context, wants ...string) {
+	t.Helper()
+	waitForLivePickerText(t, ctx, r.transcript, r.commandDone, wants...)
+}
+
+func (r *livePickerRun) write(t *testing.T, input, action string) {
+	t.Helper()
+	if _, err := r.session.pty.Write([]byte(input)); err != nil {
+		t.Fatalf("%s: %v", action, err)
 	}
-	time.Sleep(500 * time.Millisecond)
-	if _, err := session.pty.Write([]byte("/model anthropic.ccr.gpt\r")); err != nil {
-		t.Fatalf("selecting registered model by ID: %v", err)
-	}
-	waitForLivePickerText(t, ctx, transcript, commandDone, "Set model to anthropic.ccr.gpt")
-	if _, err := session.pty.Write([]byte("Reply with the routed test response.\r")); err != nil {
-		t.Fatalf("sending routed prompt: %v", err)
-	}
+}
+
+func (r *livePickerRun) assertRoutedModel(t *testing.T, ctx context.Context, routedModel <-chan string, want string) {
+	t.Helper()
 
 	select {
 	case got := <-routedModel:
-		if got != "gpt-5" {
-			t.Fatalf("picker routed provider model = %q, want gpt-5\ntranscript:\n%s", got, ansi.Strip(transcript.String()))
+		if got != want {
+			t.Fatalf("picker routed provider model = %q, want %s\ntranscript:\n%s", got, want, r.plainTranscript())
 		}
-	case err := <-commandDone:
-		t.Fatalf("ccr launch stopped before routing picker selection: %v\nstdout:\n%s\nstderr:\n%s\ntranscript:\n%s", err, commandOut.String(), commandErr.String(), ansi.Strip(transcript.String()))
+	case err := <-r.commandDone:
+		t.Fatalf("ccr launch stopped before routing picker selection: %v\nstdout:\n%s\nstderr:\n%s\ntranscript:\n%s", err, r.commandOut.String(), r.commandErr.String(), r.plainTranscript())
 	case <-ctx.Done():
-		t.Fatalf("waiting for picker-selected route: %v\ntranscript:\n%s", ctx.Err(), ansi.Strip(transcript.String()))
+		t.Fatalf("waiting for picker-selected route: %v\ntranscript:\n%s", ctx.Err(), r.plainTranscript())
 	}
-	time.Sleep(500 * time.Millisecond)
+}
 
-	if _, err := session.pty.Write([]byte("/exit\r")); err != nil {
-		t.Fatalf("exiting Claude Code: %v", err)
-	}
+func (r *livePickerRun) waitForExit(t *testing.T, ctx context.Context) {
+	t.Helper()
+
 	select {
-	case err := <-commandDone:
+	case err := <-r.commandDone:
 		if err != nil {
-			t.Fatalf("ccr launch error = %v\nstdout:\n%s\nstderr:\n%s\ntranscript:\n%s", err, commandOut.String(), commandErr.String(), ansi.Strip(transcript.String()))
+			t.Fatalf("ccr launch error = %v\nstdout:\n%s\nstderr:\n%s\ntranscript:\n%s", err, r.commandOut.String(), r.commandErr.String(), r.plainTranscript())
 		}
 	case <-ctx.Done():
-		t.Fatalf("waiting for Claude Code exit: %v\ntranscript:\n%s", ctx.Err(), ansi.Strip(transcript.String()))
+		t.Fatalf("waiting for Claude Code exit: %v\ntranscript:\n%s", ctx.Err(), r.plainTranscript())
 	}
 	select {
-	case <-readDone:
+	case <-r.readDone:
 	case <-time.After(time.Second):
 	}
+}
+
+func (r *livePickerRun) plainTranscript() string {
+	return ansi.Strip(r.transcript.String())
 }
 
 func configureIsolatedLivePickerClaude(t *testing.T) {

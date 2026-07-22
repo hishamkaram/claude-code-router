@@ -106,6 +106,37 @@ func KeyringRef(providerName string) string {
 	return "keyring:provider/" + providerName + "/api-key"
 }
 
+// ValidateRef accepts only the durable secret-reference formats CCR supports.
+// File existence and permissions are checked when resolving the reference so a
+// portable configuration can be imported before its local credential exists.
+func ValidateRef(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if strings.TrimSpace(ref) != ref {
+		return fmt.Errorf("secret reference must not contain surrounding whitespace")
+	}
+	if name, ok := strings.CutPrefix(ref, "env:"); ok {
+		if !validEnvName(name) {
+			return fmt.Errorf("invalid environment secret reference %q", RedactRef(ref))
+		}
+		return nil
+	}
+	if path, ok := strings.CutPrefix(ref, "file:"); ok {
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("file secret reference must use an absolute path")
+		}
+		return nil
+	}
+	if account, ok := strings.CutPrefix(ref, "keyring:"); ok {
+		if !validKeyringAccount(account) {
+			return fmt.Errorf("invalid keyring secret reference %q", RedactRef(ref))
+		}
+		return nil
+	}
+	return fmt.Errorf("unsupported secret reference %q; expected env:, file:, or keyring", RedactRef(ref))
+}
+
 func RedactRef(ref string) string {
 	if ref == "" {
 		return ""
@@ -117,6 +148,34 @@ func RedactRef(ref string) string {
 		return prefix + ":***"
 	}
 	return "***"
+}
+
+func validEnvName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index, r := range value {
+		if (r >= 'A' && r <= 'Z') || r == '_' {
+			continue
+		}
+		if index > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validKeyringAccount(account string) bool {
+	provider, suffix, found := strings.Cut(account, "/")
+	if !found || provider != "provider" {
+		return false
+	}
+	providerName, keyName, found := strings.Cut(suffix, "/")
+	if !found || keyName != "api-key" || providerName == "" {
+		return false
+	}
+	return !strings.ContainsAny(providerName, "\\/\t\r\n ")
 }
 
 func readFileSecret(path string) (string, error) {

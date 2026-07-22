@@ -22,6 +22,7 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 	var apiKeyFile string
 	var apiKeyStdin bool
 	var noAPIKey bool
+	var supportsResponses bool
 	var interactive bool
 
 	cmd := &cobra.Command{
@@ -35,14 +36,15 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := providerAddConfig{
-				providerType: providerType,
-				protocol:     protocol,
-				mode:         mode,
-				baseURL:      baseURL,
-				apiKeyEnv:    apiKeyEnv,
-				apiKeyFile:   apiKeyFile,
-				apiKeyStdin:  apiKeyStdin,
-				noAPIKey:     noAPIKey,
+				providerType:      providerType,
+				protocol:          protocol,
+				mode:              mode,
+				baseURL:           baseURL,
+				apiKeyEnv:         apiKeyEnv,
+				apiKeyFile:        apiKeyFile,
+				apiKeyStdin:       apiKeyStdin,
+				noAPIKey:          noAPIKey,
+				supportsResponses: supportsResponses,
 			}
 			changes := providerUpdateChangesFromCommand(cmd)
 			if interactive {
@@ -59,6 +61,7 @@ func newProviderUpdateCommand(ctx context.Context, opts *options, deps Dependenc
 	cmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to a 0600 file containing the API key; stores only file:<absolute-path>")
 	cmd.Flags().BoolVar(&apiKeyStdin, "api-key-stdin", false, "Read API key from stdin and store it in the OS keychain")
 	cmd.Flags().BoolVar(&noAPIKey, "no-api-key", false, "Clear the provider API key reference")
+	cmd.Flags().BoolVar(&supportsResponses, "responses", false, "Set whether this provider supports the OpenAI Responses API")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Guide provider updates with prompts")
 	return cmd
 }
@@ -117,10 +120,11 @@ type providerUpdateChanges struct {
 	mode         bool
 	baseURL      bool
 	auth         bool
+	responses    bool
 }
 
 func (c providerUpdateChanges) any() bool {
-	return c.providerType || c.protocol || c.mode || c.baseURL || c.auth
+	return c.providerType || c.protocol || c.mode || c.baseURL || c.auth || c.responses
 }
 
 func providerUpdateChangesFromCommand(cmd *cobra.Command) providerUpdateChanges {
@@ -131,6 +135,7 @@ func providerUpdateChangesFromCommand(cmd *cobra.Command) providerUpdateChanges 
 		mode:         flags.Changed("mode"),
 		baseURL:      flags.Changed("base-url"),
 		auth:         flags.Changed("api-key-env") || flags.Changed("api-key-file") || flags.Changed("api-key-stdin") || flags.Changed("no-api-key"),
+		responses:    flags.Changed("responses"),
 	}
 }
 
@@ -156,6 +161,12 @@ func buildProviderUpdateFromFlags(deps Dependencies, name string, cfg providerAd
 		}
 		updated = applyProviderModeUpdate(updated, cfg.mode)
 	}
+	if changes.responses {
+		updated.SupportsResponses = cfg.supportsResponses
+	}
+	if err := validateProviderResponsesCapability(updated); err != nil {
+		return store.Provider{}, secretPlan{}, err
+	}
 	if !changes.auth {
 		if err := validateProviderUpdateAuthDecision(existing, updated, changes); err != nil {
 			return store.Provider{}, secretPlan{}, err
@@ -180,7 +191,11 @@ func applyProviderTypeProtocolUpdate(name string, cfg providerAddConfig, existin
 		return store.Provider{}, err
 	}
 	capsMode := providerModeForTypeChange(existing.Type, existing.Mode, resolvedType, cfg.mode, changes.mode)
-	return providerWithCapabilities(name, resolvedType, existing.BaseURL, existing.SecretRef, capsMode), nil
+	updated := providerWithCapabilities(name, resolvedType, existing.BaseURL, existing.SecretRef, capsMode)
+	if existing.Type == updated.Type && existing.Protocol == updated.Protocol {
+		updated.SupportsResponses = existing.SupportsResponses
+	}
+	return updated, nil
 }
 
 func applyProviderBaseURLUpdate(cfg providerAddConfig, provider store.Provider, changes providerUpdateChanges) (store.Provider, error) {
@@ -306,6 +321,12 @@ func runProviderUpdateInteractive(ctx context.Context, cmd *cobra.Command, opts 
 	}
 	updated, plan, err := promptProviderUpdateConfig(ctx, deps, existing, cfg)
 	if err != nil {
+		return err
+	}
+	if changes.responses {
+		updated.SupportsResponses = cfg.supportsResponses
+	}
+	if err := validateProviderResponsesCapability(updated); err != nil {
 		return err
 	}
 	if plan.store {

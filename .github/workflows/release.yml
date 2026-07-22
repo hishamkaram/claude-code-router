@@ -4,14 +4,27 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Stable tag to promote, for example v0.3.0'
+        required: true
+        type: string
+      publish_homebrew:
+        description: 'Publish the Homebrew formula after release promotion'
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: write
   attestations: write
   id-token: write
+  packages: write
 
 jobs:
   release:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -23,6 +36,9 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+
+      - name: Maintainability gate
+        run: make maintainability
 
       - name: Go vet
         run: go vet ./...
@@ -50,16 +66,6 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
 
-      - name: Require Homebrew tap credential for stable releases
-        env:
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          if [[ "$TAG" != *-* && -z "$HOMEBREW_TAP_TOKEN" ]]; then
-            echo 'HOMEBREW_TAP_TOKEN is required to publish a stable Homebrew formula.' >&2
-            exit 1
-          fi
-
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
@@ -70,7 +76,7 @@ jobs:
       - name: Validate release configuration
         run: goreleaser check
 
-      - name: Publish GitHub Release
+      - name: Publish draft GitHub Release
         run: goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,9 +86,120 @@ jobs:
         with:
           subject-checksums: ./dist/checksums.txt
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish managed browser image
+        id: browser-image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: docs/release/browser-image.Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          provenance: true
+          tags: |
+            ghcr.io/${{ github.repository }}/browser:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Sign managed browser image
+        env:
+          DIGEST: ${{ steps.browser-image.outputs.digest }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}/browser@${DIGEST}"
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "ghcr.io/${GITHUB_REPOSITORY}/browser@${DIGEST}"
+
+  promote:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Validate promotion input
+        env:
+          TAG: ${{ inputs.tag }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          PUBLISH_HOMEBREW: ${{ inputs.publish_homebrew }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+){2}$ ]]; then
+            echo 'Only stable semantic version tags such as v0.3.0 can be promoted.' >&2
+            exit 1
+          fi
+          if [[ "$PUBLISH_HOMEBREW" == "true" && -z "$HOMEBREW_TAP_TOKEN" ]]; then
+            echo 'HOMEBREW_TAP_TOKEN is required when publish_homebrew is true.' >&2
+            exit 1
+          fi
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Verify draft release and image before promotion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+          if [[ "$draft" != "true" ]]; then
+            echo "Release $TAG is not a draft; refusing promotion." >&2
+            exit 1
+          fi
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fx checksums.txt >/dev/null
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "ghcr.io/${GITHUB_REPOSITORY}/browser:${TAG}"
+
+      - name: Promote managed browser image latest
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          docker buildx imagetools create \
+            --tag "ghcr.io/${GITHUB_REPOSITORY}/browser:latest" \
+            "ghcr.io/${GITHUB_REPOSITORY}/browser:${TAG}"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: gh release edit "$TAG" --draft=false --latest
+
       - name: Publish Homebrew formula
-        if: ${{ !contains(github.ref_name, '-') }}
+        if: ${{ inputs.publish_homebrew }}
         env:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag }}
         run: ./scripts/publish-homebrew-formula.sh "$TAG"

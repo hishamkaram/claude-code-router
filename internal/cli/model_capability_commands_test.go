@@ -38,7 +38,7 @@ func TestModelUpdateAndShowCapabilityOverrides(t *testing.T) {
 		t.Fatalf("launch with tools=false error = %v", err)
 	}
 	if !launcher.hasEnv("CLAUDE_CODE_SIMPLE=1") || !launcher.hasEnv("ENABLE_TOOL_SEARCH=") {
-		t.Fatalf("launch env = %#v", launcher.env)
+		t.Fatalf("launch env = %s", launcher.environmentSummary())
 	}
 
 	if _, _, err := runCommand(t, "--db", dbPath, "model", "update", "glm",
@@ -83,7 +83,7 @@ func TestModelRefreshAllGroupsModelsByProviderAndContinuesFailures(t *testing.T)
 			t.Fatalf("model add error = %v", err)
 		}
 	}
-	out, _, err := runCommand(t, "--db", dbPath, "model", "refresh", "--all")
+	out, errOut, err := runCommand(t, "--db", dbPath, "model", "refresh", "--all")
 	if err == nil || !strings.Contains(err.Error(), "failed for 1 aliases") {
 		t.Fatalf("model refresh --all error = %v, output = %s", err, out)
 	}
@@ -92,6 +92,9 @@ func TestModelRefreshAllGroupsModelsByProviderAndContinuesFailures(t *testing.T)
 	}
 	if modelsRequests.Load() != 1 || metadataRequests.Load() != 1 {
 		t.Fatalf("requests: models=%d metadata=%d", modelsRequests.Load(), metadataRequests.Load())
+	}
+	if !strings.Contains(errOut, "Capability refresh: provider=litellm aliases=2 status=completed") {
+		t.Fatalf("refresh progress missing from stderr: %s", errOut)
 	}
 	document := readModelShowDocument(t, dbPath, "available")
 	if document.Discovered.Values.ContextWindowTokens == nil || *document.Discovered.Values.ContextWindowTokens != 200_000 ||
@@ -102,6 +105,62 @@ func TestModelRefreshAllGroupsModelsByProviderAndContinuesFailures(t *testing.T)
 	missing := readModelShowDocument(t, dbPath, "missing")
 	if missing.RefreshedAt != "" {
 		t.Fatalf("missing model was mutated = %#v", missing)
+	}
+}
+
+func TestModelRefreshReportsDiscoveryWarningsOncePerProvider(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"model-a"},{"id":"model-b"}]}`))
+		case "/model/info":
+			http.Error(w, "metadata access denied", http.StatusForbidden)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	for alias, model := range map[string]string{"alpha": "model-a", "beta": "model-b"} {
+		if _, _, err := runCommand(t, "--db", dbPath, "model", "add", alias, "--provider", "litellm", "--model", model); err != nil {
+			t.Fatalf("model add error = %v", err)
+		}
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "model", "refresh", "--all")
+	if err != nil {
+		t.Fatalf("model refresh error = %v, output = %s", err, out)
+	}
+	const warning = "LiteLLM capability metadata unavailable: HTTP 403 Forbidden"
+	if strings.Count(out, warning) != 1 || !strings.Contains(out, "alpha: refreshed") || !strings.Contains(out, "beta: refreshed") {
+		t.Fatalf("model refresh output = %s", out)
+	}
+
+	out, _, err = runCommand(t, "--db", dbPath, "model", "refresh", "--all", "--json")
+	if err != nil {
+		t.Fatalf("model refresh JSON error = %v, output = %s", err, out)
+	}
+	var document modelRefreshDocument
+	if err := json.Unmarshal([]byte(out), &document); err != nil {
+		t.Fatalf("decode refresh JSON: %v\n%s", err, out)
+	}
+	if document.SchemaVersion != modelRefreshSchemaVersion {
+		t.Fatalf("schema version = %d, want %d", document.SchemaVersion, modelRefreshSchemaVersion)
+	}
+	if len(document.ProviderWarnings) != 1 || document.ProviderWarnings[0].Provider != "litellm" ||
+		len(document.ProviderWarnings[0].Warnings) != 1 || document.ProviderWarnings[0].Warnings[0] != warning {
+		t.Fatalf("provider warnings = %#v", document.ProviderWarnings)
+	}
+	for _, result := range document.Results {
+		if result.Status != "refreshed" || len(result.Warnings) != 0 {
+			t.Fatalf("refresh result = %#v", result)
+		}
 	}
 }
 

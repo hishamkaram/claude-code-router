@@ -17,12 +17,14 @@ import (
 )
 
 type Dependencies struct {
-	In           io.Reader
-	Out          io.Writer
-	Err          io.Writer
-	Secrets      secret.Backend
-	Launcher     ClaudeLauncher
-	StartGateway func(context.Context, gateway.Config) (*gateway.Server, error)
+	In                     io.Reader
+	Out                    io.Writer
+	Err                    io.Writer
+	Secrets                secret.Backend
+	Launcher               ClaudeLauncher
+	StartGateway           func(context.Context, gateway.Config) (*gateway.Server, error)
+	StartManagedCUA        func(context.Context, managedCUAStart) (*managedCUALaunch, error)
+	ValidateExternalCUAURL func(context.Context, string) error
 }
 
 type options struct {
@@ -36,15 +38,16 @@ type secretPlan struct {
 }
 
 type providerAddConfig struct {
-	providerType string
-	protocol     string
-	mode         string
-	baseURL      string
-	apiKeyEnv    string
-	apiKeyFile   string
-	apiKeyValue  string
-	apiKeyStdin  bool
-	noAPIKey     bool
+	providerType      string
+	protocol          string
+	mode              string
+	baseURL           string
+	apiKeyEnv         string
+	apiKeyFile        string
+	apiKeyValue       string
+	apiKeyStdin       bool
+	noAPIKey          bool
+	supportsResponses bool
 }
 
 func Execute(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) error {
@@ -67,6 +70,12 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	}
 	if deps.StartGateway == nil {
 		deps.StartGateway = gateway.Start
+	}
+	if deps.StartManagedCUA == nil {
+		deps.StartManagedCUA = startManagedCUA
+	}
+	if deps.ValidateExternalCUAURL == nil {
+		deps.ValidateExternalCUAURL = validateExternalCUAURL
 	}
 	opts := &options{}
 	cmd := &cobra.Command{
@@ -188,6 +197,7 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 	var apiKeyFile string
 	var apiKeyStdin bool
 	var noAPIKey bool
+	var supportsResponses bool
 	var interactive bool
 
 	cmd := &cobra.Command{
@@ -226,25 +236,27 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 					name = args[0]
 				}
 				return runProviderAddInteractive(ctx, cmd, opts, deps, name, providerAddConfig{
-					providerType: providerType,
-					protocol:     protocol,
-					mode:         mode,
-					baseURL:      baseURL,
-					apiKeyEnv:    apiKeyEnv,
-					apiKeyFile:   apiKeyFile,
-					apiKeyStdin:  apiKeyStdin,
-					noAPIKey:     noAPIKey,
+					providerType:      providerType,
+					protocol:          protocol,
+					mode:              mode,
+					baseURL:           baseURL,
+					apiKeyEnv:         apiKeyEnv,
+					apiKeyFile:        apiKeyFile,
+					apiKeyStdin:       apiKeyStdin,
+					noAPIKey:          noAPIKey,
+					supportsResponses: supportsResponses,
 				})
 			}
 			return runProviderAdd(ctx, cmd, opts, deps, args[0], providerAddConfig{
-				providerType: providerType,
-				protocol:     protocol,
-				mode:         mode,
-				baseURL:      baseURL,
-				apiKeyEnv:    apiKeyEnv,
-				apiKeyFile:   apiKeyFile,
-				apiKeyStdin:  apiKeyStdin,
-				noAPIKey:     noAPIKey,
+				providerType:      providerType,
+				protocol:          protocol,
+				mode:              mode,
+				baseURL:           baseURL,
+				apiKeyEnv:         apiKeyEnv,
+				apiKeyFile:        apiKeyFile,
+				apiKeyStdin:       apiKeyStdin,
+				noAPIKey:          noAPIKey,
+				supportsResponses: supportsResponses,
 			})
 		},
 	}
@@ -256,6 +268,7 @@ func newProviderAddCommand(ctx context.Context, opts *options, deps Dependencies
 	cmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "Path to a 0600 file containing the API key; stores only file:<absolute-path>")
 	cmd.Flags().BoolVar(&apiKeyStdin, "api-key-stdin", false, "Read API key from stdin and store it in the OS keychain")
 	cmd.Flags().BoolVar(&noAPIKey, "no-api-key", false, "Declare that this provider does not need an API key")
+	cmd.Flags().BoolVar(&supportsResponses, "responses", false, "Provider supports the OpenAI Responses API")
 	cmd.Flags().BoolVar(&interactive, "interactive", false, "Guide provider setup and optional model import with prompts")
 	return cmd
 }
@@ -291,12 +304,16 @@ func runProviderAdd(ctx context.Context, cmd *cobra.Command, opts *options, deps
 		return fmt.Errorf("provider %q already exists", name)
 	}
 
+	provider := providerWithCapabilities(name, resolvedType, resolvedURL, plan.ref, cfg.mode)
+	provider.SupportsResponses = cfg.supportsResponses
+	if err := validateProviderResponsesCapability(provider); err != nil {
+		return err
+	}
 	if plan.store {
 		if err := deps.Secrets.Store(ctx, plan.ref, plan.value); err != nil {
 			return fmt.Errorf("storing API key for provider %q: %w", name, err)
 		}
 	}
-	provider := providerWithCapabilities(name, resolvedType, resolvedURL, plan.ref, cfg.mode)
 	if err := s.AddProvider(ctx, provider); err != nil {
 		return err
 	}

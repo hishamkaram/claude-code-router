@@ -26,7 +26,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         claude-version: ["2.1.209", "latest"]
-        protocol: [openai, anthropic]
+        protocol: [openai-chat, anthropic-native, openai-responses]
     env:
       CCR_LIVE_FIXTURE_PROTOCOL: ${{ matrix.protocol }}
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
@@ -43,3 +43,26 @@ jobs:
         run: claude --version
       - name: Fixture Claude Code E2E
         run: make test-live-fixture
+
+  macos-cua-helper:
+    name: macOS CUA helper
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Validate portable helper protocol fixtures
+        run: make test-cua-macos-fixture
+      - name: Build macOS preview helper
+        run: make build-cua-macos
+
+  docker-cua-browser:
+    name: Docker CUA browser fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build and exercise managed Docker browser
+        run: make test-cua-docker-fixture

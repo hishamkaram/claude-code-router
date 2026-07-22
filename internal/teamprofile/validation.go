@@ -20,7 +20,7 @@ func (m Manifest) Validate() error {
 	if err := validateManifestHeader(m); err != nil {
 		return err
 	}
-	providerTypes, err := validateManifestProviders(m.Providers)
+	providerTypes, err := validateManifestProviders(m.SchemaVersion, m.Providers)
 	if err != nil {
 		return err
 	}
@@ -43,10 +43,13 @@ func validateManifestHeader(m Manifest) error {
 	return nil
 }
 
-func validateManifestProviders(configuredProviders []Provider) (map[string]string, error) {
+func validateManifestProviders(schemaVersion int, configuredProviders []Provider) (map[string]string, error) {
 	providerTypes := make(map[string]string, len(configuredProviders))
 	for index := range configuredProviders {
 		provider := &configuredProviders[index]
+		if schemaVersion < 3 && providerUsesSchemaV3CapabilityFields(*provider) {
+			return nil, fmt.Errorf("providers[%d]: responses capability requires schema_version 3", index)
+		}
 		if err := validateProvider(*provider); err != nil {
 			return nil, fmt.Errorf("providers[%d]: %w", index, err)
 		}
@@ -58,12 +61,23 @@ func validateManifestProviders(configuredProviders []Provider) (map[string]strin
 	return providerTypes, nil
 }
 
+func providerUsesSchemaV3CapabilityFields(provider Provider) bool {
+	if provider.Capabilities.Responses {
+		return true
+	}
+	_, ok := provider.Capabilities.presentFields["responses"]
+	return ok
+}
+
 func validateManifestModels(schemaVersion int, models []Model, providerTypes map[string]string) error {
 	modelAliases := make(map[string]struct{}, len(models))
 	for index := range models {
 		model := &models[index]
 		if schemaVersion == 1 && modelUsesCapabilityMetadata(*model) {
 			return fmt.Errorf("models[%d]: capability metadata requires schema_version 2", index)
+		}
+		if schemaVersion < 3 && modelUsesSchemaV3CapabilityFields(*model) {
+			return fmt.Errorf("models[%d]: supports_responses and supports_computer_use capability fields require schema_version 3", index)
 		}
 		if err := validateModel(*model, providerTypes); err != nil {
 			return fmt.Errorf("models[%d]: %w", index, err)
@@ -79,6 +93,13 @@ func validateManifestModels(schemaVersion int, models []Model, providerTypes map
 func modelUsesCapabilityMetadata(model Model) bool {
 	return model.DiscoveredCapabilities != nil || model.CapabilityOverrides != nil ||
 		model.CapabilitiesRefreshedAt != ""
+}
+
+func modelUsesSchemaV3CapabilityFields(model Model) bool {
+	if model.DiscoveredCapabilities != nil && modelcap.UsesSchemaV3Fields(model.DiscoveredCapabilities.Values) {
+		return true
+	}
+	return model.CapabilityOverrides != nil && modelcap.UsesSchemaV3Fields(*model.CapabilityOverrides)
 }
 
 func validateProvider(provider Provider) error {
@@ -97,6 +118,9 @@ func validateProvider(provider Provider) error {
 	}
 	if provider.Protocol != profile.Protocol {
 		return fmt.Errorf("provider type %q requires protocol %q", provider.Type, profile.Protocol)
+	}
+	if err := providers.ValidateResponsesCapability(provider.Protocol, provider.Capabilities.Responses); err != nil {
+		return err
 	}
 	if err := validateBaseURL(provider.BaseURL); err != nil {
 		return err

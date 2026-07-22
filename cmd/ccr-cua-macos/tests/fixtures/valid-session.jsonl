@@ -1,0 +1,10 @@
+{"version":1,"id":"start-1","type":"start","token":"test-session-token"}
+{"version":1,"id":"shot-1","type":"action","token":"test-session-token","action":{"kind":"screenshot"}}
+{"version":1,"id":"click-1","type":"action","token":"test-session-token","action":{"kind":"click","x":640,"y":480}}
+{"version":1,"id":"double-1","type":"action","token":"test-session-token","action":{"kind":"double_click","x":640,"y":480}}
+{"version":1,"id":"drag-1","type":"action","token":"test-session-token","action":{"kind":"drag","from":{"x":100,"y":100},"to":{"x":500,"y":400}}}
+{"version":1,"id":"type-1","type":"action","token":"test-session-token","action":{"kind":"type","text":"hello"}}
+{"version":1,"id":"key-1","type":"action","token":"test-session-token","action":{"kind":"keypress","keys":["command","a"]}}
+{"version":1,"id":"scroll-1","type":"action","token":"test-session-token","action":{"kind":"scroll","x":640,"y":480,"delta_x":0,"delta_y":-400}}
+{"version":1,"id":"wait-1","type":"action","token":"test-session-token","action":{"kind":"wait","milliseconds":250}}
+{"version":1,"id":"close-1","type":"close","token":"test-session-token"}

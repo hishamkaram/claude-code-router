@@ -24,6 +24,8 @@ const (
 	tokenCountFallbackTransport       = "transport"
 	tokenCountFallbackUpstreamStatus  = "upstream-status"
 	tokenCountFallbackInvalidResponse = "invalid-response"
+
+	tokenCountDiscardResponseBytes = 64 << 10
 )
 
 func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +140,7 @@ func (h *handler) callOpenAICompatibleCountTokens(ctx context.Context, provider 
 		return 0, tokenCountFallbackTransport, false
 	}
 	defer func() {
-		_, _ = io.Copy(io.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, tokenCountDiscardResponseBytes))
 		_ = resp.Body.Close()
 	}()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {

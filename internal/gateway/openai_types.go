@@ -53,43 +53,10 @@ type openAIJSONSchema struct {
 }
 
 type openAIMessage struct {
-	Role       string              `json:"role"`
-	Content    string              `json:"content"`
-	Parts      []openAIContentPart `json:"-"`
-	ToolCalls  []openAIToolCall    `json:"tool_calls,omitempty"`
-	ToolCallID string              `json:"tool_call_id,omitempty"`
-}
-
-// openAIContentPart is one element of a multipart OpenAI chat message content
-// array. Text-only messages continue to serialize Content as a plain string;
-// Parts is used only when a message carries non-text input such as an image.
-type openAIContentPart struct {
-	Type     string          `json:"type"`
-	Text     string          `json:"text,omitempty"`
-	ImageURL *openAIImageURL `json:"image_url,omitempty"`
-}
-
-type openAIImageURL struct {
-	URL string `json:"url"`
-}
-
-// MarshalJSON emits the OpenAI `content` field as a multipart array when Parts
-// is populated, otherwise as the plain Content string. This keeps the common
-// text-only wire format unchanged while supporting image_url content parts.
-func (m openAIMessage) MarshalJSON() ([]byte, error) {
-	type wireMessage struct {
-		Role       string           `json:"role"`
-		Content    any              `json:"content"`
-		ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
-		ToolCallID string           `json:"tool_call_id,omitempty"`
-	}
-	wire := wireMessage{Role: m.Role, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID}
-	if len(m.Parts) > 0 {
-		wire.Content = m.Parts
-	} else {
-		wire.Content = m.Content
-	}
-	return json.Marshal(wire)
+	Role       string           `json:"role"`
+	Content    any              `json:"content"`
+	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string           `json:"tool_call_id,omitempty"`
 }
 
 type openAITool struct {
@@ -115,16 +82,27 @@ type openAIFunctionCall struct {
 	Arguments string `json:"arguments"`
 }
 
+// openAIChatResponseMessage deliberately keeps content optional. OpenAI-compatible
+// providers commonly use null when a response contains only tool calls.
+type openAIChatResponseMessage struct {
+	Content      *string             `json:"content"`
+	ToolCalls    []openAIToolCall    `json:"tool_calls"`
+	FunctionCall *openAIFunctionCall `json:"function_call"`
+}
+
+func (m openAIChatResponseMessage) textContent() string {
+	if m.Content == nil {
+		return ""
+	}
+	return *m.Content
+}
+
 type openAIChatResponse struct {
 	ID      string `json:"id"`
 	Model   string `json:"model"`
 	Choices []struct {
-		Message struct {
-			Content      string              `json:"content"`
-			ToolCalls    []openAIToolCall    `json:"tool_calls"`
-			FunctionCall *openAIFunctionCall `json:"function_call"`
-		} `json:"message"`
-		FinishReason string `json:"finish_reason"`
+		Message      openAIChatResponseMessage `json:"message"`
+		FinishReason string                    `json:"finish_reason"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`

@@ -167,13 +167,22 @@ func providerWithCapabilities(name, providerType, baseURL, secretRef, mode strin
 		SupportsThinking:       caps.SupportsThinking,
 		SupportsModelDiscovery: caps.SupportsModelDiscovery,
 		SupportsCountTokens:    caps.SupportsCountTokens,
+		SupportsResponses:      caps.SupportsResponses,
 		Mode:                   caps.Mode,
 	}
 }
 
+func validateProviderResponsesCapability(provider store.Provider) error {
+	caps := effectiveProviderCapabilities(provider)
+	if err := providers.ValidateResponsesCapability(caps.Protocol, caps.SupportsResponses); err != nil {
+		return fmt.Errorf("provider %q: %w", provider.Name, err)
+	}
+	return nil
+}
+
 func providerCapabilitySummary(provider store.Provider) string {
 	caps := effectiveProviderCapabilities(provider)
-	enabled := make([]string, 0, 6)
+	enabled := make([]string, 0, 7)
 	if caps.SupportsTools {
 		enabled = append(enabled, "tools")
 	}
@@ -185,6 +194,9 @@ func providerCapabilitySummary(provider store.Provider) string {
 	}
 	if caps.SupportsModelDiscovery {
 		enabled = append(enabled, "models")
+	}
+	if caps.SupportsResponses {
+		enabled = append(enabled, "responses")
 	}
 	enabled = append(enabled, "token-count="+providerTokenCountMode(provider))
 	return strings.Join(enabled, ",")
@@ -206,6 +218,7 @@ func effectiveProviderCapabilities(provider store.Provider) providers.Capabiliti
 		SupportsThinking:       provider.SupportsThinking,
 		SupportsModelDiscovery: provider.SupportsModelDiscovery,
 		SupportsCountTokens:    provider.SupportsCountTokens,
+		SupportsResponses:      provider.SupportsResponses,
 		Mode:                   provider.Mode,
 	})
 }

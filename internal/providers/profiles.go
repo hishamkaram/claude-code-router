@@ -18,6 +18,7 @@ type Capabilities struct {
 	SupportsThinking       bool
 	SupportsModelDiscovery bool
 	SupportsCountTokens    bool
+	SupportsResponses      bool
 	Mode                   string
 }
 
@@ -111,6 +112,15 @@ func ValidateProtocol(protocol string) error {
 	}
 }
 
+// ValidateResponsesCapability ensures the provider can serve the OpenAI
+// Responses API before the capability is advertised to routing clients.
+func ValidateResponsesCapability(protocol string, supportsResponses bool) error {
+	if supportsResponses && protocol != ProtocolOpenAICompatible {
+		return fmt.Errorf("responses API capability requires provider protocol %q", ProtocolOpenAICompatible)
+	}
+	return nil
+}
+
 func DefaultCapabilities(providerType string) Capabilities {
 	profile, ok := (Registry{}).Profile(providerType)
 	if !ok {
@@ -120,9 +130,12 @@ func DefaultCapabilities(providerType string) Capabilities {
 }
 
 func NormalizeCapabilities(providerType string, caps Capabilities) Capabilities {
+	supportsResponses := caps.SupportsResponses
 	if caps.Protocol == "" && caps.Mode == "" && !caps.SupportsTools && !caps.SupportsStreaming &&
 		!caps.SupportsThinking && !caps.SupportsModelDiscovery && !caps.SupportsCountTokens {
-		return DefaultCapabilities(providerType)
+		caps = DefaultCapabilities(providerType)
+		caps.SupportsResponses = caps.SupportsResponses || supportsResponses
+		return caps
 	}
 	defaults := DefaultCapabilities(providerType)
 	if caps.Protocol == "" {
@@ -134,6 +147,7 @@ func NormalizeCapabilities(providerType string, caps Capabilities) Capabilities 
 	if providerType == "litellm" {
 		caps.SupportsCountTokens = true
 	}
+	caps.SupportsResponses = caps.SupportsResponses || supportsResponses
 	return caps
 }
 

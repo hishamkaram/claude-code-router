@@ -1,52 +1,28 @@
 package store
 
+import "github.com/hishamkaram/claude-code-router/internal/providers"
+
 func providerWithMetadataDefaults(provider Provider) Provider {
-	if provider.Protocol != "" || provider.Mode != "" || provider.SupportsTools ||
-		provider.SupportsStreaming || provider.SupportsThinking ||
-		provider.SupportsModelDiscovery || provider.SupportsCountTokens {
+	supportsResponses := provider.SupportsResponses
+	if providerHasMetadata(provider) {
 		return provider
 	}
-	switch provider.Type {
-	case "anthropic":
-		provider.Protocol = "anthropic-compatible"
-		provider.SupportsTools = true
-		provider.SupportsStreaming = true
-		provider.SupportsThinking = true
-		provider.SupportsModelDiscovery = true
-		provider.SupportsCountTokens = true
-		provider.Mode = "full"
-	case "zai":
-		provider.Protocol = "anthropic-compatible"
-		provider.SupportsTools = true
-		provider.SupportsStreaming = true
-		provider.SupportsThinking = true
-		provider.SupportsCountTokens = true
-		provider.Mode = "full"
-	case "anthropic-compatible":
-		provider.Protocol = "anthropic-compatible"
-		provider.SupportsTools = true
-		provider.SupportsStreaming = true
-		provider.SupportsThinking = true
-		provider.Mode = "degraded"
-	case "litellm":
-		provider.Protocol = "openai-compatible"
-		provider.SupportsTools = true
-		provider.SupportsStreaming = true
-		provider.SupportsThinking = true
-		provider.SupportsModelDiscovery = true
-		provider.SupportsCountTokens = true
-		provider.Mode = "degraded"
-	case "local", "openrouter", "zai-openai", "openai-compatible":
-		provider.Protocol = "openai-compatible"
-		provider.SupportsTools = true
-		provider.SupportsStreaming = true
-		provider.SupportsThinking = true
-		provider.SupportsModelDiscovery = true
-		provider.Mode = "degraded"
-	default:
-		provider.Mode = "degraded"
-	}
+	caps := providers.DefaultCapabilities(provider.Type)
+	provider.Protocol = caps.Protocol
+	provider.SupportsTools = caps.SupportsTools
+	provider.SupportsStreaming = caps.SupportsStreaming
+	provider.SupportsThinking = caps.SupportsThinking
+	provider.SupportsModelDiscovery = caps.SupportsModelDiscovery
+	provider.SupportsCountTokens = caps.SupportsCountTokens
+	provider.Mode = caps.Mode
+	provider.SupportsResponses = provider.SupportsResponses || supportsResponses
 	return provider
+}
+
+func providerHasMetadata(provider Provider) bool {
+	return provider.Protocol != "" || provider.Mode != "" || provider.SupportsTools ||
+		provider.SupportsStreaming || provider.SupportsThinking ||
+		provider.SupportsModelDiscovery || provider.SupportsCountTokens
 }
 
 func boolToInt(value bool) int {

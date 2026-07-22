@@ -104,8 +104,9 @@ func anthropicContentBlocksFromOpenAI(resp openAIChatResponse, finishReason stri
 		}}
 	}
 	blocks = make([]map[string]any, 0, 1+len(toolCalls))
-	if message.Content != "" || len(toolCalls) == 0 {
-		blocks = append(blocks, map[string]any{"type": "text", "text": message.Content})
+	textContent := message.textContent()
+	if textContent != "" || len(toolCalls) == 0 {
+		blocks = append(blocks, map[string]any{"type": "text", "text": textContent})
 	}
 	for _, toolCall := range toolCalls {
 		input := openAIToolArgumentsForTool(toolCall.Function.Name, toolCall.Function.Arguments)

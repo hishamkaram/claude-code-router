@@ -21,6 +21,10 @@ Anthropic models without authenticated gateway discovery. Pass `--model
 <alias>` when you want that alias to be the startup model, or when it is
 `chat-only` and needs tools disabled for the whole launch. See Claude Code's
 [`availableModels` documentation](https://code.claude.com/docs/en/model-config).
+Because the allowlist is launch-scoped, capability refreshes and local
+overrides affect new launches. Relaunch Claude Code after `ccr model refresh`,
+`ccr model update`, or alias changes when the `/model` picker needs updated
+rows or `[1m]` markers.
 
 Claude Code treats the strings `sonnet`, `opus`, and `haiku` inside custom IDs
 as native model-family signals. CCR selectively percent-escapes those substrings
@@ -132,6 +136,21 @@ system messages, structured responses, and input modalities. Unknown metadata
 remains unknown rather than being treated as unsupported. Inspect the effective
 values and their sources with `ccr model show <alias> --json`.
 
+Vision, PDF, audio, structured-output, and computer-use requests are rejected
+when the selected alias lacks the effective capability. CCR does not remove the
+unsupported part of the request, retry with text only, or fall back to a
+first-party model.
+
+Responses API routing is selected only for an OpenAI-compatible provider
+configured as Responses-capable and an alias whose effective kind or capability
+requires Responses. Managed CUA additionally requires effective computer-use
+support on that Responses route. An OpenAI Responses computer request without a
+launch-scoped managed executor is rejected before provider submission; CCR never
+re-emits it as a Claude Code computer action. Direct first-party Anthropic CUA
+is not managed by CCR; Claude Code owns that browser/session and approval flow.
+Responses-only aliases are omitted from gateway discovery and `/model` until
+their provider is explicitly configured as Responses-capable.
+
 Built-in `WebSearch` and `WebFetch` are Claude Code host tools. CCR forwards the
 model's tool protocol but cannot redirect those host-owned web operations to a
 model provider. Use a custom MCP search tool when you need a different
@@ -150,3 +169,25 @@ ccr launch --model coding-model --permission-mode auto
 Supported values are `default`, `manual`, `acceptEdits`, `plan`, `auto`,
 `dontAsk`, and `bypassPermissions`. Your organization policy and Claude Code
 settings can still restrict what is available.
+
+## Computer-Use Boundary
+
+Client-managed computer use applies to direct first-party Anthropic routes. In
+that mode, Claude Code owns the browser and local approvals while CCR records
+redacted route/audit metadata. OpenAI Responses computer use does not use the
+client-managed loop because its provider actions cannot safely be delegated to
+Claude Code; it requires managed mode.
+
+Managed computer use is opt-in and launch-scoped. Supported executor categories
+are Docker browser image, trusted host browser, external executor, and unsigned
+macOS helper preview. The Docker image is published to GHCR and signed during
+release. External executors must use a public HTTPS base URL without URL
+credentials, query, fragment, or redirects, and must provide the bearer token
+through `--ccr-cua-external-token-env`. The macOS helper is source-built only,
+is not packaged in Homebrew or GoReleaser archives, requires macOS Accessibility
+and Screen Recording grants for the launching process, and should not be treated
+as a hardened production helper. If an OpenAI Responses provider returns
+`pending_safety_checks`, CCR rejects the computer call before execution until
+those checks can be shown in the approval flow; it does not silently send
+`acknowledged_safety_checks`. In every managed mode, approval and audit records
+stay local and redacted.

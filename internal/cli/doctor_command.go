@@ -17,9 +17,10 @@ import (
 )
 
 type doctorCheckView struct {
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	Evidence string `json:"evidence"`
+	Name              string `json:"name"`
+	Status            string `json:"status"`
+	Evidence          string `json:"evidence"`
+	SupportsResponses *bool  `json:"supports_responses,omitempty"`
 }
 
 type doctorProbeView struct {
@@ -54,6 +55,14 @@ type doctorOptions struct {
 	jsonOutput bool
 }
 
+const doctorProbeStatusSkipped = "skipped"
+
+type doctorData struct {
+	document  doctorDocument
+	providers []store.Provider
+	models    []store.Model
+}
+
 func newDoctorCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	doctorOpts := doctorOptions{}
 	cmd := &cobra.Command{
@@ -82,7 +91,7 @@ func newDoctorCommand(ctx context.Context, opts *options, deps Dependencies) *co
 		},
 	}
 	cmd.Flags().BoolVar(&doctorOpts.live, "live", false, "Contact one configured alias per provider")
-	cmd.Flags().BoolVar(&doctorOpts.all, "all", false, "With --live, contact every non-blocked alias")
+	cmd.Flags().BoolVar(&doctorOpts.all, "all", false, "With --live, contact every probeable alias and report provider control models as skipped")
 	cmd.Flags().BoolVar(&doctorOpts.jsonOutput, "json", false, "Emit schema-versioned JSON")
 	return cmd
 }
@@ -93,44 +102,86 @@ func runDoctor(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 		return doctorDocument{}, err
 	}
 	defer closeStore(s)
+	data, err := collectDoctorData(ctx, s, dbPath, deps)
+	if err != nil {
+		return doctorDocument{}, err
+	}
+	if options.live {
+		runLiveDoctor(ctx, cmd, s, deps, options.all, &data)
+	}
+	updateDoctorStatus(&data.document)
+	return data.document, nil
+}
+
+func collectDoctorData(ctx context.Context, s *store.Store, dbPath string, deps Dependencies) (doctorData, error) {
 	document := doctorDocument{
 		SchemaVersion: 1, Status: "passed", Database: dbPath,
 		Checks: []doctorCheckView{}, Probes: []doctorProbeView{},
 	}
-	if document.StoreSchema, err = s.SchemaVersion(ctx); err != nil {
-		return doctorDocument{}, err
+	storeSchema, err := s.SchemaVersion(ctx)
+	if err != nil {
+		return doctorData{}, err
 	}
+	document.StoreSchema = storeSchema
 	document.Checks = append(document.Checks, doctorCheckView{
 		Name: "sqlite", Status: "passed",
 		Evidence: fmt.Sprintf("schema %d is readable", document.StoreSchema),
 	})
 	configuredProviders, err := s.ListProviders(ctx)
 	if err != nil {
-		return doctorDocument{}, err
+		return doctorData{}, err
 	}
 	models, err := s.ListModels(ctx)
 	if err != nil {
-		return doctorDocument{}, err
+		return doctorData{}, err
 	}
 	document.ProviderCount, document.ModelCount = len(configuredProviders), len(models)
 	document.Checks = append(document.Checks, offlineProviderChecks(configuredProviders)...)
 	document.Checks = append(document.Checks, localDependencyChecks(ctx, deps, s)...)
-	if options.live {
-		targets := selectDoctorTargets(models, options.all)
-		if len(targets) == 0 {
-			document.Checks = append(document.Checks, doctorCheckView{
-				Name: "live_targets", Status: "failed",
-				Evidence: "no non-blocked model aliases are configured",
-			})
-		} else {
-			for index := range targets {
-				model := &targets[index]
-				fmt.Fprintf(cmd.ErrOrStderr(), "Doctor live target: alias=%s provider=%s model=%s\n",
-					model.Alias, model.ProviderName, model.ProviderModel)
-			}
-			document.Probes = runDoctorProbes(ctx, s, deps, targets)
+	return doctorData{document: document, providers: configuredProviders, models: models}, nil
+}
+
+func runLiveDoctor(ctx context.Context, cmd *cobra.Command, s *store.Store, deps Dependencies, all bool, data *doctorData) {
+	providersByName := doctorProvidersByName(data.providers)
+	targets, skipped := selectDoctorTargets(data.models, providersByName, all)
+	data.document.Probes = append(data.document.Probes, skipped...)
+	if len(targets) == 0 {
+		data.document.Checks = append(data.document.Checks, doctorLiveTargetCheck(skipped))
+	} else {
+		writeDoctorLiveTargets(cmd, targets)
+		data.document.Probes = append(data.document.Probes, runDoctorProbes(ctx, s, deps, targets)...)
+	}
+	sort.SliceStable(data.document.Probes, func(i, j int) bool { return data.document.Probes[i].Alias < data.document.Probes[j].Alias })
+}
+
+func doctorProvidersByName(configuredProviders []store.Provider) map[string]store.Provider {
+	providersByName := make(map[string]store.Provider, len(configuredProviders))
+	for index := range configuredProviders {
+		provider := configuredProviders[index]
+		providersByName[provider.Name] = provider
+	}
+	return providersByName
+}
+
+func doctorLiveTargetCheck(skipped []doctorProbeView) doctorCheckView {
+	if len(skipped) > 0 {
+		return doctorCheckView{
+			Name: "live_targets", Status: doctorProbeStatusSkipped,
+			Evidence: "no eligible aliases require live probing; skipped aliases are excluded from routing",
 		}
 	}
+	return doctorCheckView{Name: "live_targets", Status: "failed", Evidence: "no non-blocked routable aliases are configured"}
+}
+
+func writeDoctorLiveTargets(cmd *cobra.Command, targets []store.Model) {
+	for index := range targets {
+		model := &targets[index]
+		fmt.Fprintf(cmd.ErrOrStderr(), "Doctor live target: alias=%s provider=%s model=%s\n",
+			model.Alias, model.ProviderName, model.ProviderModel)
+	}
+}
+
+func updateDoctorStatus(document *doctorDocument) {
 	for index := range document.Checks {
 		check := &document.Checks[index]
 		if check.Status == "failed" {
@@ -143,17 +194,17 @@ func runDoctor(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 			document.Status = "failed"
 		}
 	}
-	return document, nil
 }
 
 func offlineProviderChecks(configuredProviders []store.Provider) []doctorCheckView {
 	checks := make([]doctorCheckView, 0, len(configuredProviders))
 	for index := range configuredProviders {
 		provider := &configuredProviders[index]
+		capabilities := effectiveProviderCapabilities(*provider)
+		supportsResponses := capabilities.SupportsResponses
 		status := "passed"
-		evidence := fmt.Sprintf("protocol=%s mode=%s token-count=%s",
-			effectiveProviderCapabilities(*provider).Protocol,
-			effectiveProviderCapabilities(*provider).Mode, providerTokenCountMode(*provider))
+		evidence := fmt.Sprintf("protocol=%s mode=%s token-count=%s responses=%t",
+			capabilities.Protocol, capabilities.Mode, providerTokenCountMode(*provider), supportsResponses)
 		if _, err := resolveProviderType(provider.Name, provider.Type); err != nil {
 			status, evidence = "failed", "provider type is invalid"
 		} else if _, err := resolveBaseURL(provider.Type, provider.BaseURL); err != nil {
@@ -161,6 +212,7 @@ func offlineProviderChecks(configuredProviders []store.Provider) []doctorCheckVi
 		}
 		checks = append(checks, doctorCheckView{
 			Name: "provider:" + provider.Name, Status: status, Evidence: evidence,
+			SupportsResponses: &supportsResponses,
 		})
 	}
 	return checks
@@ -200,13 +252,34 @@ func localDependencyChecks(ctx context.Context, deps Dependencies, s *store.Stor
 	return append(checks, launchCheck)
 }
 
-func selectDoctorTargets(models []store.Model, all bool) []store.Model {
+func selectDoctorTargets(models []store.Model, providersByName map[string]store.Provider, all bool) ([]store.Model, []doctorProbeView) {
 	targets := make([]store.Model, 0, len(models))
+	skipped := make([]doctorProbeView, 0)
 	seenProviders := make(map[string]struct{})
 	for index := range models {
 		model := &models[index]
 		if model.Status == "blocked" {
 			continue
+		}
+		provider, providerFound := providersByName[model.ProviderName]
+		if providerFound {
+			skipReason, err := liveProbeSkipReason(*model, provider)
+			if err != nil {
+				skipped = append(skipped, doctorProbeView{
+					Alias: model.Alias, ProviderName: model.ProviderName, ProviderModel: model.ProviderModel,
+					Protocol: effectiveProviderCapabilities(provider).Protocol, Status: conformancecheck.StatusFailed,
+					FailureKind: "configuration", Evidence: err.Error(), Action: "ccr model show " + model.Alias,
+				})
+				continue
+			}
+			if skipReason != "" {
+				skipped = append(skipped, doctorProbeView{
+					Alias: model.Alias, ProviderName: model.ProviderName, ProviderModel: model.ProviderModel,
+					Protocol: effectiveProviderCapabilities(provider).Protocol, Status: doctorProbeStatusSkipped,
+					Evidence: skipReason,
+				})
+				continue
+			}
 		}
 		if !all {
 			if _, seen := seenProviders[model.ProviderName]; seen {
@@ -216,7 +289,7 @@ func selectDoctorTargets(models []store.Model, all bool) []store.Model {
 		}
 		targets = append(targets, *model)
 	}
-	return targets
+	return targets, skipped
 }
 
 func runDoctorProbes(ctx context.Context, s *store.Store, deps Dependencies, targets []store.Model) []doctorProbeView {
@@ -329,11 +402,14 @@ func writeHumanDoctor(cmd *cobra.Command, document doctorDocument) {
 		fmt.Fprintf(cmd.OutOrStdout(), "Live %s: %s provider=%s model=%s protocol=%s latency=%dms\n",
 			probe.Alias, probe.Status, probe.ProviderName, probe.ProviderModel,
 			probe.Protocol, probe.LatencyMS)
-		if probe.Status == conformancecheck.StatusFailed {
+		switch probe.Status {
+		case conformancecheck.StatusFailed:
 			fmt.Fprintf(cmd.OutOrStdout(), "  failure: check=%s kind=%s gateway_http=%d provider_http=%d\n",
 				probe.FailedCheck, probe.FailureKind, probe.HTTPStatus, probe.ProviderHTTPStatus)
 			fmt.Fprintf(cmd.OutOrStdout(), "  evidence: %s\n", probe.Evidence)
 			fmt.Fprintf(cmd.OutOrStdout(), "  action: %s\n", probe.Action)
+		case doctorProbeStatusSkipped:
+			fmt.Fprintf(cmd.OutOrStdout(), "  skipped: %s\n", probe.Evidence)
 		}
 	}
 }

@@ -58,7 +58,7 @@ func TestDecodeRejectsInvalidProfiles(t *testing.T) {
 	tests := map[string]string{
 		"unknown field":   `{"schema_version":1,"kind":"ccr-team-profile","providers":[],"models":[],"extra":true}`,
 		"duplicate field": `{"schema_version":1,"schema_version":1,"kind":"ccr-team-profile","providers":[],"models":[]}`,
-		"wrong version":   `{"schema_version":3,"kind":"ccr-team-profile","providers":[],"models":[]}`,
+		"wrong version":   `{"schema_version":4,"kind":"ccr-team-profile","providers":[],"models":[]}`,
 		"wrong kind":      `{"schema_version":1,"kind":"other","providers":[],"models":[]}`,
 		"trailing value":  valid + `{}`,
 		"empty":           "  \n",
@@ -69,6 +69,75 @@ func TestDecodeRejectsInvalidProfiles(t *testing.T) {
 			t.Parallel()
 			if _, err := Decode(strings.NewReader(input)); err == nil {
 				t.Fatalf("Decode(%q) succeeded", input)
+			}
+		})
+	}
+}
+
+func TestDecodeRejectsUnknownNestedCapabilityFields(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"provider capability typo": `{
+  "schema_version": 3,
+  "kind": "ccr-team-profile",
+  "providers": [{
+    "name": "litellm",
+    "type": "litellm",
+    "base_url": "http://localhost:4000",
+    "protocol": "openai-compatible",
+    "mode": "degraded",
+    "capabilities": {"tools": true, "streamng": true, "thinking": true, "model_discovery": true, "count_tokens": true},
+    "credential": {"required": false}
+  }],
+  "models": []
+}`,
+		"model override typo": `{
+  "schema_version": 3,
+  "kind": "ccr-team-profile",
+  "providers": [{
+    "name": "litellm",
+    "type": "litellm",
+    "base_url": "http://localhost:4000",
+    "protocol": "openai-compatible",
+    "mode": "degraded",
+    "capabilities": {"tools": true, "streaming": true, "thinking": true, "model_discovery": true, "count_tokens": true},
+    "credential": {"required": false}
+  }],
+  "models": [{
+    "alias": "glm",
+    "provider": "litellm",
+    "provider_model": "glm-5.2",
+    "compatibility": "full",
+    "capability_overrides": {"supports_reponses": true}
+  }]
+}`,
+		"model discovered values typo": `{
+  "schema_version": 3,
+  "kind": "ccr-team-profile",
+  "providers": [{
+    "name": "litellm",
+    "type": "litellm",
+    "base_url": "http://localhost:4000",
+    "protocol": "openai-compatible",
+    "mode": "degraded",
+    "capabilities": {"tools": true, "streaming": true, "thinking": true, "model_discovery": true, "count_tokens": true},
+    "credential": {"required": false}
+  }],
+  "models": [{
+    "alias": "glm",
+    "provider": "litellm",
+    "provider_model": "glm-5.2",
+    "compatibility": "full",
+    "discovered_capabilities": {"values": {"supports_reponses": true}}
+  }]
+}`,
+	}
+	for name, input := range tests {
+		input := input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Decode(strings.NewReader(input)); err == nil || !strings.Contains(err.Error(), "json: unknown field") {
+				t.Fatalf("Decode() error = %v, want unknown field rejection", err)
 			}
 		})
 	}
@@ -114,7 +183,7 @@ func TestBuildPlanImportRoundTripsModelCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if manifest.SchemaVersion != 2 || manifest.Models[0].DiscoveredCapabilities == nil || manifest.Models[0].CapabilityOverrides == nil {
+	if manifest.SchemaVersion != 3 || manifest.Models[0].DiscoveredCapabilities == nil || manifest.Models[0].CapabilityOverrides == nil {
 		t.Fatalf("Build() manifest = %#v", manifest)
 	}
 	plan, err := manifest.PlanImport(nil)
@@ -130,6 +199,111 @@ func TestBuildPlanImportRoundTripsModelCapabilities(t *testing.T) {
 		got.CapabilityOverrides.MaxOutputTokens == nil || *got.CapabilityOverrides.MaxOutputTokens != 64_000 ||
 		got.CapabilitiesRefreshedAt != stored.CapabilitiesRefreshedAt {
 		t.Fatalf("PlanImport() model = %#v", got)
+	}
+}
+
+func TestBuildPlanImportRoundTripsProviderResponsesCapability(t *testing.T) {
+	t.Parallel()
+
+	provider := profileProvider("responses", "openai-compatible", "https://responses.example", "")
+	provider.SupportsResponses = true
+	manifest, err := Build([]store.Provider{provider}, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if manifest.SchemaVersion != 3 || !manifest.Providers[0].Capabilities.Responses {
+		t.Fatalf("Build() manifest = %#v", manifest)
+	}
+	plan, err := manifest.PlanImport(nil)
+	if err != nil {
+		t.Fatalf("PlanImport() error = %v", err)
+	}
+	if len(plan.Providers) != 1 || !plan.Providers[0].SupportsResponses {
+		t.Fatalf("PlanImport() providers = %#v", plan.Providers)
+	}
+}
+
+func TestValidateRejectsResponsesCapabilityBeforeSchemaVersionThree(t *testing.T) {
+	t.Parallel()
+
+	provider := profileProvider("responses", "openai-compatible", "https://responses.example", "")
+	provider.SupportsResponses = true
+	manifest, err := Build([]store.Provider{provider}, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	manifest.SchemaVersion = 2
+	if validationErr := manifest.Validate(); validationErr == nil || !strings.Contains(validationErr.Error(), "responses capability requires schema_version 3") {
+		t.Fatalf("Validate() error = %v, want schema-version rejection", validationErr)
+	}
+}
+
+func TestDecodeRejectsProviderResponsesFieldBeforeSchemaVersionThree(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+  "schema_version": 2,
+  "kind": "ccr-team-profile",
+  "providers": [{
+    "name": "litellm",
+    "type": "litellm",
+    "base_url": "http://localhost:4000",
+    "protocol": "openai-compatible",
+    "mode": "degraded",
+    "capabilities": {"tools": true, "streaming": true, "thinking": true, "model_discovery": true, "count_tokens": true, "responses": false},
+    "credential": {"required": false}
+  }],
+  "models": []
+}`
+	if _, err := Decode(strings.NewReader(input)); err == nil || !strings.Contains(err.Error(), "responses capability requires schema_version 3") {
+		t.Fatalf("Decode() error = %v, want provider schema-version rejection", err)
+	}
+}
+
+func TestValidateRejectsModelSchemaV3CapabilitiesBeforeSchemaVersionThree(t *testing.T) {
+	t.Parallel()
+
+	manifest, err := Build(
+		[]store.Provider{profileProvider("litellm", "litellm", "http://localhost:4000", "")},
+		[]store.Model{{
+			Alias: "glm", ProviderName: "litellm", ProviderModel: "glm-5.2", Status: "full",
+			CapabilityOverrides: modelcap.Values{SupportsComputerUse: modelcap.Bool(true)},
+		}},
+	)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	manifest.SchemaVersion = 2
+	if validationErr := manifest.Validate(); validationErr == nil || !strings.Contains(validationErr.Error(), "require schema_version 3") {
+		t.Fatalf("Validate() error = %v, want schema-version rejection", validationErr)
+	}
+}
+
+func TestDecodeRejectsNullModelSchemaV3CapabilitiesBeforeSchemaVersionThree(t *testing.T) {
+	t.Parallel()
+
+	input := `{
+  "schema_version": 2,
+  "kind": "ccr-team-profile",
+  "providers": [{
+    "name": "litellm",
+    "type": "litellm",
+    "base_url": "http://localhost:4000",
+    "protocol": "openai-compatible",
+    "mode": "degraded",
+    "capabilities": {"tools": true, "streaming": true, "thinking": true, "model_discovery": true, "count_tokens": true},
+    "credential": {"required": false}
+  }],
+  "models": [{
+    "alias": "glm",
+    "provider": "litellm",
+    "provider_model": "glm-5.2",
+    "compatibility": "full",
+    "capability_overrides": {"supports_responses": null}
+  }]
+}`
+	if _, err := Decode(strings.NewReader(input)); err == nil || !strings.Contains(err.Error(), "require schema_version 3") {
+		t.Fatalf("Decode() error = %v, want schema-version rejection", err)
 	}
 }
 
@@ -226,6 +400,18 @@ func TestValidateRejectsInconsistentProviderSecurityAndCapabilities(t *testing.T
 	manifest.Providers[0].Capabilities.Tools = true
 	if validationErr := manifest.Validate(); validationErr == nil || !strings.Contains(validationErr.Error(), "cannot declare tools") {
 		t.Fatalf("Validate() error = %v, want chat-only tools error", validationErr)
+	}
+
+	manifest, err = Build(
+		[]store.Provider{profileProvider("anthropic", "anthropic", "https://api.anthropic.com", secret.EnvRef("ANTHROPIC_API_KEY"))},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	manifest.Providers[0].Capabilities.Responses = true
+	if validationErr := manifest.Validate(); validationErr == nil || !strings.Contains(validationErr.Error(), `responses API capability requires provider protocol "openai-compatible"`) {
+		t.Fatalf("Validate() error = %v, want Responses protocol error", validationErr)
 	}
 }
 
