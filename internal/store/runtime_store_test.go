@@ -89,6 +89,39 @@ func TestRuntimeStateRoundTripAndAbandonment(t *testing.T) {
 	}
 }
 
+func TestLaunchAuthMetadataRoundTrip(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+
+	legacyID, err := s.CreateLaunch(ctx, "coder", "pending", "pending")
+	if err != nil {
+		t.Fatalf("CreateLaunch() error = %v", err)
+	}
+	legacy, err := s.GetLaunch(ctx, legacyID)
+	if err != nil {
+		t.Fatalf("GetLaunch(legacy) error = %v", err)
+	}
+	if legacy.AuthMode != "" || legacy.ClaudeAccountName != "" {
+		t.Fatalf("legacy launch auth metadata = %q, %q", legacy.AuthMode, legacy.ClaudeAccountName)
+	}
+
+	authID, err := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "subscription-pool", "work")
+	if err != nil {
+		t.Fatalf("CreateLaunchWithAuth() error = %v", err)
+	}
+	authLaunch, err := s.GetLaunch(ctx, authID)
+	if err != nil {
+		t.Fatalf("GetLaunch(auth) error = %v", err)
+	}
+	if authLaunch.AuthMode != "subscription-pool" || authLaunch.ClaudeAccountName != "work" {
+		t.Fatalf("auth launch metadata = %#v", authLaunch)
+	}
+	if _, err := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "claude-account", "bad/name"); err == nil {
+		t.Fatal("CreateLaunchWithAuth() error = nil for invalid account name")
+	}
+}
+
 func TestMigrateV3PreservesRuntimeAndConfiguration(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

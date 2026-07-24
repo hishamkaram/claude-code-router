@@ -33,6 +33,13 @@ type Config struct {
 	Tracker           *session.Tracker
 	ManagedCUA        *cua.ManagedRuntime
 	ManagedCUAProject string
+
+	// AnthropicSubscriptionExhaustion receives safe metadata when a first-party
+	// Anthropic pass-through request receives HTTP 429. The gateway sends with a
+	// nonblocking select and drops the event if the caller-owned sink is not
+	// ready. Keep the sink open while the gateway is running. Events never carry
+	// headers, bodies, URLs, provider identifiers, or auth material.
+	AnthropicSubscriptionExhaustion chan<- AnthropicSubscriptionExhaustionEvent
 }
 
 type Server struct {

@@ -101,11 +101,11 @@ model:
 ccr launch --model coding-model
 ```
 
-CCR reserves `--model`, `--auth-mode`, `--permission-mode`, `--print`/`-p`, and
-`--db`. Use `ccr launch --help` for CCR help, or `ccr launch -- --help` for
-underlying Claude Code help without starting CCR. CCR rejects options that would
-override its selected model, generated model allowlist, or tool-safety
-restrictions.
+CCR reserves `--model`, `--auth-mode`, `--claude-account`,
+`--permission-mode`, `--print`/`-p`, and `--db`. Use `ccr launch --help` for CCR
+help, or `ccr launch -- --help` for underlying Claude Code help without starting
+CCR. CCR rejects options that would override its selected model, generated model
+allowlist, or tool-safety restrictions.
 
 ## Scripted Alternatives
 
@@ -180,6 +180,56 @@ discovery metadata:
 ccr launch --auth-mode gateway-token --model coding-model
 ```
 
+`--auth-mode subscription-pool` selects a registered local Claude subscription
+account and injects that account's OAuth token into the Claude Code process:
+
+```bash
+ccr launch --auth-mode subscription-pool
+ccr launch --auth-mode subscription-pool --claude-account personal
+```
+
+Register accounts with `ccr claude-account`. Each command exists as a supported
+CLI surface:
+
+```bash
+ccr claude-account import personal --from current
+claude setup-token
+ccr claude-account import work --oauth-token-stdin
+ccr claude-account list
+ccr claude-account show personal
+ccr claude-account test personal
+ccr claude-account refresh personal --from current
+ccr claude-account disable work
+ccr claude-account enable work
+ccr claude-account remove work --yes
+```
+
+Import and refresh require exactly one source: `--from current` or
+`--oauth-token-stdin`. `--from current` reads the current Claude login on Linux
+and Windows. On macOS, current-login import is unsupported because Claude keeps
+that login in Keychain; use `claude setup-token` with `--oauth-token-stdin`
+instead. `ccr claude-account test <name>` verifies that the keychain credential
+resolves locally and does not make a network request. Terminal input for
+`--oauth-token-stdin` is read without echo.
+
+Automatic pool selection atomically selects and stamps the least recently used
+enabled, unexpired, non-cooling account. The timestamp provides load balancing,
+not an exclusive lifetime lease; overlapping launches may reuse accounts.
+`--claude-account <name>` selects only that account. Account identity is fixed
+for the Claude Code process; there is no in-process identity swap. If a plain
+interactive pool launch hits a first-party Anthropic HTTP 429, CCR marks the
+account cooling down, stops Claude Code, and relaunches with the next usable
+account using `--continue`. This automatic
+relaunch applies only when the launch has no `--print`, no `--claude-account`,
+no managed CUA options, and no extra Claude Code arguments. If every account is
+disabled, expired, cooling down, or has an unavailable credential, CCR fails
+visibly instead of falling back to the default Claude login.
+
+Claude subscription account pools are for local individual use. Teams,
+automation, hosted tools, and third-party products should use Anthropic's
+official API authentication instead of sharing or pooling personal subscription
+logins.
+
 ## Inspect Local State
 
 ```bash
@@ -189,11 +239,13 @@ ccr status
 ccr trace --since 30m
 ccr sessions --active
 ccr agents --active
+ccr claude-account list
 ```
 
 Add `--json` to these inspection commands for stable, schema-versioned output.
 With `ccr trace --follow --json`, each event is emitted as one versioned JSON
-document. `ccr status` shows the latest observed route, while
+document. `ccr status` shows the latest observed route and launch auth mode,
+including the selected Claude account for subscription-pool launches, while
 `ccr trace --follow` follows new redacted route and lifecycle events. Use
 `ccr trace purge --all --yes` when retained history is no longer needed.
 Redacted route and lifecycle metadata is retained for 30 days and at most

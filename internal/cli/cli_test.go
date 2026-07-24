@@ -357,9 +357,12 @@ func (p *fakeProcess) PID() int {
 	return p.pid
 }
 
-func (p *fakeProcess) Wait() error {
+func (p *fakeProcess) Done() <-chan error {
 	p.waited = true
-	return p.waitErr
+	done := make(chan error, 1)
+	done <- p.waitErr
+	close(done)
+	return done
 }
 
 func (p *fakeProcess) Stop() error {

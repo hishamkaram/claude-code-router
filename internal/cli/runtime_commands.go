@@ -24,11 +24,11 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 		Short: "Launch Claude Code through the local router",
 		Long: `Launch Claude Code through the local router.
 
-CCR owns --model, --auth-mode, --permission-mode, --print/-p, and --db. All
-other options and positional arguments are passed to Claude Code unchanged
-unless they would override CCR's selected model, generated model allowlist, or
-tool-safety restrictions. For example ccr launch --chrome starts Claude Code
-with its Chrome integration.
+CCR owns --model, --auth-mode, --claude-account, --permission-mode, --print/-p,
+and --db. All other options and positional arguments are passed to Claude Code
+unchanged unless they would override CCR's selected model, generated model
+allowlist, or tool-safety restrictions. For example ccr launch --chrome starts
+Claude Code with its Chrome integration.
 
 Fallback and detached background modes are rejected because they cannot preserve
 CCR's selected route and local gateway ownership.
@@ -38,6 +38,11 @@ registered, compatible aliases to the visual /model picker alongside the
 permitted Anthropic models while preserving subscription or API-key
 authentication. Pass --model <alias> when you want that CCR alias to be the
 startup model.
+
+Use --auth-mode subscription-pool to select a registered local Claude account
+for this process. CCR rotates only by ending and relaunching Claude Code; it
+never changes account identity inside a running session. Use --claude-account
+to select one account explicitly.
 
 Use ccr launch --help for router-specific help. To ask Claude Code for its own
 help, use ccr launch -- --help.`,
@@ -60,7 +65,8 @@ help, use ccr launch -- --help.`,
 		},
 	}
 	cmd.Flags().String("model", "", "Optional CCR model alias to use as the startup model")
-	cmd.Flags().String("auth-mode", launchAuthModePreserve, "Gateway auth mode: preserve or gateway-token")
+	cmd.Flags().String("auth-mode", launchAuthModePreserve, "Gateway auth mode: preserve, gateway-token, or subscription-pool")
+	cmd.Flags().String("claude-account", "", "Named Claude account to use with subscription-pool auth")
 	cmd.Flags().String("permission-mode", "", "Optional Claude Code permission mode to pass through")
 	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
 	cmd.Flags().Bool("no-history", false, "Disable redacted route history for this launch")
@@ -81,12 +87,13 @@ func runClaudeMetadata(ctx context.Context, cmd *cobra.Command, deps Dependencie
 	if err != nil {
 		return fmt.Errorf("running Claude Code metadata command: %w", err)
 	}
-	return process.Wait()
+	return <-process.Done()
 }
 
 const (
-	launchAuthModePreserve     = "preserve"
-	launchAuthModeGatewayToken = "gateway-token"
+	launchAuthModePreserve         = "preserve"
+	launchAuthModeGatewayToken     = "gateway-token"
+	launchAuthModeSubscriptionPool = "subscription-pool"
 )
 
 type resolvedLaunch struct {
@@ -107,10 +114,25 @@ type launchExecution struct {
 	recorder      *observability.Recorder
 	managedCUA    *managedCUALaunch
 	cuaProject    string
+	claudeAccount *selectedClaudeAccount
+	exhaustion    chan gateway.AnthropicSubscriptionExhaustionEvent
 }
 
-func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Dependencies, invocation launchInvocation) (resultErr error) {
-	if err := validateLaunchInputs(invocation.modelAlias, invocation.authMode, invocation.permissionMode); err != nil {
+func runLaunchAttempt(
+	ctx context.Context,
+	cmd *cobra.Command,
+	opts *options,
+	deps Dependencies,
+	invocation launchInvocation,
+	selectedAccount *selectedClaudeAccount,
+	exhaustion chan gateway.AnthropicSubscriptionExhaustionEvent,
+) (resultErr error) {
+	if err := validateLaunchInputs(
+		invocation.modelAlias,
+		invocation.authMode,
+		invocation.claudeAccount,
+		invocation.permissionMode,
+	); err != nil {
 		return err
 	}
 	if err := validateLaunchPassthroughArgs(invocation.claudeArgs); err != nil {
@@ -123,36 +145,22 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	}
 	defer closeStore(s)
 
-	resolved, err := resolveLaunch(ctx, deps, s, invocation)
+	resolved, err := preflightLaunchWithStore(ctx, deps, s, invocation)
 	if err != nil {
 		return err
 	}
-	if passthroughErr := validateResolvedLaunchPassthroughArgs(ctx, s, invocation, resolved); passthroughErr != nil {
-		return passthroughErr
-	}
-	if cuaErr := validateManagedCUALaunch(ctx, s, deps, invocation, resolved); cuaErr != nil {
-		return cuaErr
-	}
-	lifecycleState, statuslineState := launchObservationStates(invocation)
-	launchID, err := s.CreateLaunch(ctx, resolved.modelAlias, lifecycleState, statuslineState)
+	execution, err := createLaunchExecution(
+		ctx, s, invocation, resolved, selectedAccount, exhaustion,
+	)
 	if err != nil {
-		return fmt.Errorf("creating launch record: %w", err)
-	}
-	finalizer := &launchFinalizer{store: s, launchID: launchID}
-	execution := &launchExecution{
-		store: s, launchID: launchID, finalizer: finalizer,
-		resolved: resolved, invocation: invocation,
+		return err
 	}
 	defer func() {
-		if finalizer.finished {
+		if execution.finalizer.finished {
 			return
 		}
-		resultErr = errors.Join(resultErr, finalizer.Finish(ctx, "failed", "startup_failed", nil))
+		resultErr = errors.Join(resultErr, execution.finalizer.Finish(ctx, "failed", "startup_failed", nil))
 	}()
-	execution.recorder = observability.NewRecorder(ctx, observability.Config{
-		Store: execution.store, LaunchID: execution.launchID,
-		Enabled: !execution.invocation.noHistory,
-	})
 	if startErr := startLaunchManagedCUA(ctx, cmd, deps, execution); startErr != nil {
 		return startErr
 	}
@@ -172,13 +180,78 @@ func runLaunch(ctx context.Context, cmd *cobra.Command, opts *options, deps Depe
 	if err != nil {
 		return err
 	}
-	if statusErr := s.SetLaunchStatuslineState(ctx, launchID, claudeSettings.StatuslineState); statusErr != nil {
+	if statusErr := s.SetLaunchStatuslineState(ctx, execution.launchID, claudeSettings.StatuslineState); statusErr != nil {
 		return statusErr
 	}
 	if passthroughErr := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, claudeSettings.JSON != ""); passthroughErr != nil {
 		return passthroughErr
 	}
 	return runClaudeLaunchProcess(ctx, cmd, deps, execution, claudeSettings.JSON)
+}
+
+func preflightLaunch(
+	ctx context.Context,
+	opts *options,
+	deps Dependencies,
+	invocation launchInvocation,
+) error {
+	s, _, err := openMigratedStore(ctx, opts)
+	if err != nil {
+		return err
+	}
+	defer closeStore(s)
+	_, err = preflightLaunchWithStore(ctx, deps, s, invocation)
+	return err
+}
+
+func preflightLaunchWithStore(
+	ctx context.Context,
+	deps Dependencies,
+	s *store.Store,
+	invocation launchInvocation,
+) (resolvedLaunch, error) {
+	resolved, err := resolveLaunch(ctx, deps, s, invocation)
+	if err != nil {
+		return resolvedLaunch{}, err
+	}
+	if passthroughErr := validateResolvedLaunchPassthroughArgs(ctx, s, invocation, resolved); passthroughErr != nil {
+		return resolvedLaunch{}, passthroughErr
+	}
+	if cuaErr := validateManagedCUALaunch(ctx, s, deps, invocation, resolved); cuaErr != nil {
+		return resolvedLaunch{}, cuaErr
+	}
+	return resolved, nil
+}
+
+func createLaunchExecution(
+	ctx context.Context,
+	s *store.Store,
+	invocation launchInvocation,
+	resolved resolvedLaunch,
+	selectedAccount *selectedClaudeAccount,
+	exhaustion chan gateway.AnthropicSubscriptionExhaustionEvent,
+) (*launchExecution, error) {
+	lifecycleState, statuslineState := launchObservationStates(invocation)
+	accountName := ""
+	if selectedAccount != nil {
+		accountName = selectedAccount.Account.Name
+	}
+	launchID, err := s.CreateLaunchWithAuth(
+		ctx, resolved.modelAlias, lifecycleState, statuslineState, invocation.authMode, accountName,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating launch record: %w", err)
+	}
+	execution := &launchExecution{
+		store: s, launchID: launchID, finalizer: &launchFinalizer{store: s, launchID: launchID},
+		resolved: resolved, invocation: invocation,
+		claudeAccount: selectedAccount, exhaustion: exhaustion,
+	}
+	execution.recorder = observability.NewRecorder(ctx, observability.Config{
+		Store: execution.store, LaunchID: execution.launchID,
+		Enabled: !execution.invocation.noHistory,
+	})
+	return execution, nil
 }
 
 func startLaunchManagedCUA(ctx context.Context, cmd *cobra.Command, deps Dependencies, execution *launchExecution) error {
@@ -309,6 +382,7 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 		DefaultModelAlias: execution.resolved.modelAlias,
 		Recorder:          recorder, Tracker: tracker,
 		ManagedCUA: execution.managedCUA.Runtime(), ManagedCUAProject: execution.cuaProject,
+		AnthropicSubscriptionExhaustion: execution.exhaustion,
 	})
 	if err != nil {
 		return fmt.Errorf("starting local gateway: %w", err)
@@ -330,6 +404,7 @@ func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Depend
 		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
 		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
 		DisableTools: resolved.disableTools, AuthMode: invocation.authMode,
+		ClaudeOAuthToken:       selectedClaudeAccountToken(execution.claudeAccount),
 		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
 	})
 	outputLock := &sync.Mutex{}
@@ -351,15 +426,22 @@ func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Depend
 	}
 	writeLaunchSummary(ctx, summaryOut, execution.store, execution.server.URL(), execution.launchID,
 		process.PID(), resolved.modelAlias, resolved.disableTools, invocation.authMode, invocation.permissionMode)
-	waitErr := process.Wait()
+	waitErr, exhaustionEvent, stopErr := waitForClaudeProcess(ctx, process, execution.exhaustion)
 	shutdownGateway(ctx, execution.server)
 	managedCUAErr := shutdownManagedCUA(ctx, &execution.managedCUA)
+	if exhaustionEvent != nil {
+		finishErr := execution.finalizer.Finish(ctx, "failed", "subscription_exhausted", nil)
+		return &subscriptionExhaustedError{
+			Event:      *exhaustionEvent,
+			CleanupErr: errors.Join(stopErr, managedCUAErr, finishErr),
+		}
+	}
 	state, reason := launchExitState(ctx, waitErr)
 	finishErr := execution.finalizer.Finish(ctx, state, reason, launchExitCode(waitErr))
-	return errors.Join(waitErr, managedCUAErr, finishErr)
+	return errors.Join(waitErr, stopErr, managedCUAErr, finishErr)
 }
 
-func validateLaunchInputs(modelAlias, authMode, permissionMode string) error {
+func validateLaunchInputs(modelAlias, authMode, claudeAccount, permissionMode string) error {
 	if modelAlias != "" {
 		if err := validateName("model alias", modelAlias); err != nil {
 			return err
@@ -368,15 +450,26 @@ func validateLaunchInputs(modelAlias, authMode, permissionMode string) error {
 	if err := validateLaunchAuthMode(authMode); err != nil {
 		return err
 	}
+	if claudeAccount != "" {
+		if err := validateName("Claude account name", claudeAccount); err != nil {
+			return err
+		}
+		if authMode != launchAuthModeSubscriptionPool {
+			return fmt.Errorf("--claude-account requires --auth-mode %s", launchAuthModeSubscriptionPool)
+		}
+	}
 	return validateClaudePermissionMode(permissionMode)
 }
 
 func validateLaunchAuthMode(value string) error {
 	switch value {
-	case launchAuthModePreserve, launchAuthModeGatewayToken:
+	case launchAuthModePreserve, launchAuthModeGatewayToken, launchAuthModeSubscriptionPool:
 		return nil
 	default:
-		return fmt.Errorf("invalid launch auth mode %q; expected %s or %s", value, launchAuthModePreserve, launchAuthModeGatewayToken)
+		return fmt.Errorf(
+			"invalid launch auth mode %q; expected %s, %s, or %s",
+			value, launchAuthModePreserve, launchAuthModeGatewayToken, launchAuthModeSubscriptionPool,
+		)
 	}
 }
 

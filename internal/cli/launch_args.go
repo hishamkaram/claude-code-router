@@ -15,6 +15,7 @@ type launchInvocation struct {
 	modelAlias     string
 	printMode      bool
 	authMode       string
+	claudeAccount  string
 	permissionMode string
 	dbPath         string
 	dbPathSet      bool
@@ -35,7 +36,8 @@ type launchInvocation struct {
 
 func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
 	if invocation.modelAlias != "" || invocation.printMode ||
-		invocation.authMode != launchAuthModePreserve || invocation.permissionMode != "" ||
+		invocation.authMode != launchAuthModePreserve || invocation.claudeAccount != "" ||
+		invocation.permissionMode != "" ||
 		invocation.noHistory || invocation.noLifecycle || invocation.noStatusline ||
 		invocation.cuaOptionsConfigured() {
 		return nil, false
@@ -246,7 +248,9 @@ func reservedLaunchExternalTokenEnvName(value string) bool {
 	switch value {
 	case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
 		"ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
-		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_USE_GATEWAY",
+		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "CLAUDE_CODE_OAUTH_TOKEN",
+		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
+		"CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_USE_GATEWAY",
 		"ENABLE_TOOL_SEARCH", "CCR_LAUNCH_ID", statuslineGatewayURLEnv, statuslineTokenEnv:
 		return true
 	default:
@@ -396,6 +400,8 @@ func launchStringOptionTarget(invocation *launchInvocation, option string) (targ
 		return &invocation.modelAlias, nil
 	case "--auth-mode":
 		return &invocation.authMode, nil
+	case "--claude-account":
+		return &invocation.claudeAccount, nil
 	case "--permission-mode":
 		return &invocation.permissionMode, nil
 	case "--db":
@@ -433,7 +439,7 @@ func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, pe
 }
 
 func validateLaunchPassthroughArgs(args []string) error {
-	if option := findLaunchOption(args, "--model", "--auth-mode", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline"); option != "" {
+	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline"); option != "" {
 		return fmt.Errorf("%s is managed by ccr launch; pass its CCR value before other Claude Code options", option)
 	}
 	if option := findLaunchOption(args, "--fallback-model"); option != "" {

@@ -9,7 +9,7 @@ DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILT_BY ?= make
 LDFLAGS := -s -w -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Version=$(VERSION) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Commit=$(COMMIT) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Date=$(DATE) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.BuiltBy=$(BUILT_BY)
 
-.PHONY: build build-cua-macos test test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
+.PHONY: build build-cua-macos test test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-subscription-pool-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -48,6 +48,9 @@ test-live:
 test-live-fixture:
 	$(GO) test -tags=live -count=1 -p 1 -run '^(TestLiveFixture.*|TestLiveClaudeConformanceMatrix|TestLiveLaunchOpenAIProviderStreamsAgentToolInput|TestLiveLaunchOpenAIProviderRunsDynamicWorkflow|TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent)$$' ./internal/cli
 
+test-live-subscription-pool-fixture:
+	$(GO) test -tags=live -count=1 -p 1 -run '^TestLiveFixtureSubscriptionPool(FirstParty|RelaunchesOnFirstParty429|RelaunchesRealClaudeOnFirstParty429)$$' ./internal/cli
+
 test-live-real-routing:
 	@test "$$CCR_LIVE_REAL_MATRIX" = "1" || (echo "CCR_LIVE_REAL_MATRIX=1 is required" >&2; exit 1)
 	CCR_LIVE_CONFIGURED_PROVIDER=1 $(GO) test -tags=live -count=1 -p 1 -timeout 30m -run '^(TestLiveRealProviderMatrix|TestLiveConfiguredProviderAutoModeAgentWebFetch|TestLiveConfiguredProviderAutoModeWorkflow)$$' ./internal/cli
@@ -71,9 +74,12 @@ test-live-real-cua-executors:
 	trap 'if [ -n "$$cleanup_docker_image" ]; then docker image rm ccr-cua-browser-fixture:local >/dev/null 2>&1 || true; fi' EXIT; \
 	CCR_LIVE_REAL_CUA_EXECUTORS=1 CCR_CUA_DOCKER_IMAGE=ccr-cua-browser-fixture:local $(GO) test -tags=live -count=1 -p 1 -timeout 30m -run '^TestLiveLocalRealCUAExecutors$$' ./internal/cli
 
+test-live-real-subscription-pool:
+	CCR_LIVE_REAL_SUBSCRIPTION_POOL=1 $(GO) test -v -tags=live -count=1 -p 1 -timeout 10m -run '^TestLiveLocalRealSubscriptionPoolAccount$$' ./internal/cli
+
 test-live-real: test-live-real-routing
 
-test-live-real-full: test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors
+test-live-real-full: test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool
 
 test-live-matrix: test-live-fixture test-live-real
 

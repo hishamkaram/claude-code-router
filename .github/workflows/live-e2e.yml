@@ -8,6 +8,12 @@ on:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
+    inputs:
+      run-subscription-pool-real:
+        description: "Run opt-in local-real subscription-pool account probe using repository secrets"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: live-e2e-${{ github.workflow }}-${{ github.ref }}
@@ -43,6 +49,13 @@ jobs:
         run: claude --version
       - name: Fixture Claude Code E2E
         run: make test-live-fixture
+      - name: Opt-in local-real subscription pool contract
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs['run-subscription-pool-real'] && matrix.os == 'ubuntu-latest' && matrix.claude-version == 'latest' && matrix.protocol == 'anthropic-native' }}
+        env:
+          CCR_LIVE_REAL_SUBSCRIPTION_POOL: "1"
+          CCR_LIVE_REAL_SUBSCRIPTION_OAUTH_TOKEN: ${{ secrets.CCR_LIVE_REAL_SUBSCRIPTION_OAUTH_TOKEN }}
+          CCR_LIVE_REAL_SUBSCRIPTION_ACCOUNT: ${{ secrets.CCR_LIVE_REAL_SUBSCRIPTION_ACCOUNT }}
+        run: make test-live-real-subscription-pool
 
   macos-cua-helper:
     name: macOS CUA helper

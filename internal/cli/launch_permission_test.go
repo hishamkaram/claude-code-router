@@ -311,6 +311,7 @@ func TestValidateLaunchPassthroughArgs(t *testing.T) {
 		{name: "allows Claude Code options", args: []string{"--chrome", "--verbose"}},
 		{name: "allows reserved-looking prompt after terminator", args: []string{"--chrome", "--", "--model=sonnet"}},
 		{name: "rejects model override", args: []string{"--model=sonnet"}, wantErr: "--model is managed"},
+		{name: "rejects Claude account override", args: []string{"--claude-account", "work"}, wantErr: "--claude-account is managed"},
 		{name: "rejects print override", args: []string{"-p=true"}, wantErr: "-p is managed"},
 		{name: "rejects fallback model", args: []string{"--fallback-model", "sonnet"}, wantErr: "bypass the selected model route"},
 		{name: "rejects background mode", args: []string{"--bg"}, wantErr: "detached agents"},

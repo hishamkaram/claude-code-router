@@ -166,6 +166,48 @@ CREATE INDEX idx_event_log_kind_time ON event_log(kind, occurred_at DESC);
 CREATE INDEX idx_conformance_checks_run ON conformance_checks(run_id, id);
 `
 
+const migrateV6ToV7LaunchesSQL = `
+CREATE TABLE IF NOT EXISTS launches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  gateway_url TEXT NOT NULL DEFAULT '',
+  pid INTEGER NOT NULL DEFAULT 0,
+  model_alias TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'starting',
+  lifecycle_state TEXT NOT NULL DEFAULT 'pending',
+  statusline_state TEXT NOT NULL DEFAULT 'not-configured',
+  auth_mode TEXT NOT NULL DEFAULT '',
+  claude_account_name TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  started_at TEXT NOT NULL DEFAULT '',
+  ended_at TEXT NOT NULL DEFAULT '',
+  exit_code INTEGER,
+  end_reason TEXT NOT NULL DEFAULT ''
+);
+`
+
+const migrateV6ToV7ClaudeAccountsSQL = `
+CREATE TABLE IF NOT EXISTS claude_accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  access_token_ref TEXT NOT NULL,
+  refresh_token_ref TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  scopes_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  cooldown_until TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_used_at TEXT NOT NULL DEFAULT '',
+  last_refresh_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT ''
+);
+`
+
+const migrateV6ToV7IndexesSQL = `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_claude_accounts_name ON claude_accounts(name);
+CREATE INDEX IF NOT EXISTS idx_claude_accounts_claim ON claude_accounts(enabled, expires_at, cooldown_until, last_used_at, id);
+`
+
 const currentSchemaSQL = `
 CREATE TABLE IF NOT EXISTS providers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -204,11 +246,29 @@ CREATE TABLE IF NOT EXISTS launches (
   state TEXT NOT NULL DEFAULT 'starting',
   lifecycle_state TEXT NOT NULL DEFAULT 'pending',
   statusline_state TEXT NOT NULL DEFAULT 'not-configured',
+  auth_mode TEXT NOT NULL DEFAULT '',
+  claude_account_name TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   started_at TEXT NOT NULL DEFAULT '',
   ended_at TEXT NOT NULL DEFAULT '',
   exit_code INTEGER,
   end_reason TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS claude_accounts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  access_token_ref TEXT NOT NULL,
+  refresh_token_ref TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  scopes_json TEXT NOT NULL DEFAULT '[]',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  cooldown_until TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_used_at TEXT NOT NULL DEFAULT '',
+  last_refresh_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -333,6 +393,8 @@ CREATE INDEX IF NOT EXISTS idx_event_log_launch_time ON event_log(launch_id, occ
 CREATE INDEX IF NOT EXISTS idx_event_log_session_time ON event_log(session_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_event_log_kind_time ON event_log(kind, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conformance_checks_run ON conformance_checks(run_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_claude_accounts_name ON claude_accounts(name);
+CREATE INDEX IF NOT EXISTS idx_claude_accounts_claim ON claude_accounts(enabled, expires_at, cooldown_until, last_used_at, id);
 `
 
 const legacyV2SchemaSQL = `

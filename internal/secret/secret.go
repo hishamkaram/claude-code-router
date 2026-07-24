@@ -16,10 +16,19 @@ const (
 	fileSecretPerm os.FileMode = 0o600
 )
 
+var ErrNotFound = errors.New("secret not found")
+
 type Backend interface {
 	Available(ctx context.Context) error
 	Store(ctx context.Context, ref string, value string) error
 	Resolve(ctx context.Context, ref string) (string, error)
+}
+
+// Deleter is the optional secret-backend capability used when durable metadata
+// is removed. Keeping it separate preserves compatibility with read/store test
+// backends and external integrations.
+type Deleter interface {
+	Delete(ctx context.Context, ref string) error
 }
 
 type DefaultBackend struct{}
@@ -29,7 +38,7 @@ func (DefaultBackend) Available(ctx context.Context) error {
 		return fmt.Errorf("secret.DefaultBackend.Available: context canceled: %w", err)
 	}
 	if _, err := keyring.Get(serviceName, "__availability_probe__"); err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return fmt.Errorf("secret.DefaultBackend.Available: OS keychain unavailable: %w; use --api-key-env <ENV> or --api-key-file <PATH> to store a secret reference instead", err)
+		return fmt.Errorf("secret.DefaultBackend.Available: OS keychain unavailable: %w", err)
 	}
 	return nil
 }
@@ -39,16 +48,31 @@ func (DefaultBackend) Store(ctx context.Context, ref, value string) error {
 		return fmt.Errorf("secret.DefaultBackend.Store: context canceled: %w", err)
 	}
 	account, ok := strings.CutPrefix(ref, "keyring:")
-	if !ok {
+	if !ok || !validWritableKeyringAccount(account) {
 		return fmt.Errorf("secret.DefaultBackend.Store: unsupported writable secret ref %q", RedactRef(ref))
 	}
 	if strings.TrimSpace(value) == "" {
 		return fmt.Errorf("secret.DefaultBackend.Store: empty secret for %q", RedactRef(ref))
 	}
 	if err := keyring.Set(serviceName, account, value); err != nil {
-		return fmt.Errorf("secret.DefaultBackend.Store: storing %q in OS keychain: %w; use --api-key-env <ENV> or --api-key-file <PATH> to store a secret reference instead", RedactRef(ref), err)
+		return keyringStoreError(ref, account, err)
 	}
 	return nil
+}
+
+func keyringStoreError(ref, account string, err error) error {
+	if validClaudeAccountKeyringAccount(account) {
+		return fmt.Errorf(
+			"secret.DefaultBackend.Store: storing %q in OS keychain: %w; configure or unlock the keychain and retry because Claude account OAuth credentials cannot use API-key environment or file references",
+			RedactRef(ref),
+			err,
+		)
+	}
+	return fmt.Errorf(
+		"secret.DefaultBackend.Store: storing %q in OS keychain: %w; use --api-key-env <ENV> or --api-key-file <PATH> to store a provider secret reference instead",
+		RedactRef(ref),
+		err,
+	)
 }
 
 func (DefaultBackend) Resolve(ctx context.Context, ref string) (string, error) {
@@ -63,8 +87,18 @@ func (DefaultBackend) Resolve(ctx context.Context, ref string) (string, error) {
 		return value, nil
 	}
 	if account, ok := strings.CutPrefix(ref, "keyring:"); ok {
+		if !validWritableKeyringAccount(account) {
+			return "", fmt.Errorf("secret.DefaultBackend.Resolve: unsupported secret ref %q", RedactRef(ref))
+		}
 		value, err := keyring.Get(serviceName, account)
 		if err != nil {
+			if errors.Is(err, keyring.ErrNotFound) {
+				return "", fmt.Errorf(
+					"secret.DefaultBackend.Resolve: reading %q from OS keychain: %w",
+					RedactRef(ref),
+					ErrNotFound,
+				)
+			}
 			return "", fmt.Errorf("secret.DefaultBackend.Resolve: reading %q from OS keychain: %w", RedactRef(ref), err)
 		}
 		return value, nil
@@ -77,6 +111,20 @@ func (DefaultBackend) Resolve(ctx context.Context, ref string) (string, error) {
 		return value, nil
 	}
 	return "", fmt.Errorf("secret.DefaultBackend.Resolve: unsupported secret ref %q", RedactRef(ref))
+}
+
+func (DefaultBackend) Delete(ctx context.Context, ref string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("secret.DefaultBackend.Delete: context canceled: %w", err)
+	}
+	account, ok := strings.CutPrefix(ref, "keyring:")
+	if !ok || !validWritableKeyringAccount(account) {
+		return fmt.Errorf("secret.DefaultBackend.Delete: unsupported secret ref %q", RedactRef(ref))
+	}
+	if err := keyring.Delete(serviceName, account); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return fmt.Errorf("secret.DefaultBackend.Delete: deleting %q from OS keychain: %w", RedactRef(ref), err)
+	}
+	return nil
 }
 
 func EnvRef(name string) string {
@@ -104,6 +152,14 @@ func FileRefFromPath(path string) (string, error) {
 
 func KeyringRef(providerName string) string {
 	return "keyring:provider/" + providerName + "/api-key"
+}
+
+func ClaudeAccountAccessTokenRef(accountName string) string {
+	return "keyring:claude-account/" + accountName + "/access-token"
+}
+
+func ClaudeAccountRefreshTokenRef(accountName string) string {
+	return "keyring:claude-account/" + accountName + "/refresh-token"
 }
 
 // ValidateRef accepts only the durable secret-reference formats CCR supports.
@@ -167,15 +223,27 @@ func validEnvName(value string) bool {
 }
 
 func validKeyringAccount(account string) bool {
-	provider, suffix, found := strings.Cut(account, "/")
-	if !found || provider != "provider" {
-		return false
-	}
-	providerName, keyName, found := strings.Cut(suffix, "/")
-	if !found || keyName != "api-key" || providerName == "" {
-		return false
-	}
-	return !strings.ContainsAny(providerName, "\\/\t\r\n ")
+	parts := strings.Split(account, "/")
+	return len(parts) == 3 &&
+		parts[0] == "provider" &&
+		validKeyringName(parts[1]) &&
+		parts[2] == "api-key"
+}
+
+func validWritableKeyringAccount(account string) bool {
+	return validKeyringAccount(account) || validClaudeAccountKeyringAccount(account)
+}
+
+func validClaudeAccountKeyringAccount(account string) bool {
+	parts := strings.Split(account, "/")
+	return len(parts) == 3 &&
+		parts[0] == "claude-account" &&
+		validKeyringName(parts[1]) &&
+		(parts[2] == "access-token" || parts[2] == "refresh-token")
+}
+
+func validKeyringName(value string) bool {
+	return value != "" && !strings.ContainsAny(value, "\\/\t\r\n ")
 }
 
 func readFileSecret(path string) (string, error) {

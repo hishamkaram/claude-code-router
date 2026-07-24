@@ -37,6 +37,8 @@ type launchView struct {
 	ProcessState    string `json:"process_state"`
 	LifecycleState  string `json:"lifecycle_state"`
 	StatuslineState string `json:"statusline_state"`
+	AuthMode        string `json:"auth_mode,omitempty"`
+	ClaudeAccount   string `json:"claude_account,omitempty"`
 	CreatedAt       string `json:"created_at"`
 	StartedAt       string `json:"started_at,omitempty"`
 	EndedAt         string `json:"ended_at,omitempty"`
@@ -117,6 +119,7 @@ func newLaunchView(launch store.Launch) launchView {
 		ID: launch.ID, GatewayURL: launch.GatewayURL, PID: launch.PID,
 		ModelAlias: launch.ModelAlias, State: launch.State, ProcessState: processState,
 		LifecycleState: launch.LifecycleState, StatuslineState: launch.StatuslineState,
+		AuthMode: launch.AuthMode, ClaudeAccount: launch.ClaudeAccountName,
 		CreatedAt: launch.CreatedAt, StartedAt: launch.StartedAt, EndedAt: launch.EndedAt,
 		ExitCode: launch.ExitCode, EndReason: launch.EndReason,
 	}
