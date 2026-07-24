@@ -42,18 +42,15 @@ func (s *liveSubscriptionPTYStart) UsesToken(token string) bool {
 	return s.OAuthToken == token
 }
 
-func (s *liveSubscriptionPTYStart) Write(t *testing.T, input string) {
-	t.Helper()
-	if _, err := s.session.pty.Write([]byte(input)); err != nil {
-		t.Fatalf("writing to real Claude PTY: %v", err)
-	}
-}
-
 func (s *liveSubscriptionPTYStart) Submit(t *testing.T, input string) {
 	t.Helper()
-	s.Write(t, input)
-	time.Sleep(100 * time.Millisecond)
-	s.Write(t, "\r")
+	if _, err := s.session.pty.Write([]byte(input + "\r")); err != nil {
+		t.Fatalf(
+			"submitting to real Claude PTY: %v\ntranscript:\n%s",
+			err,
+			redactLiveSubscriptionOutput(s.Transcript.String()),
+		)
+	}
 }
 
 func (s *liveSubscriptionPTYStart) WaitReady(t *testing.T, ctx context.Context, commandDone <-chan error) {

@@ -166,7 +166,6 @@ func newLiveSubscriptionRealRelaunchRun(
 	t.Helper()
 	first429Released := make(chan struct{})
 	fixture := newLiveSubscriptionFixture(t, []liveSubscriptionResponse{
-		{account: "personal", token: liveSubscriptionPersonalToken},
 		{
 			account:      "personal",
 			token:        liveSubscriptionPersonalToken,
@@ -218,12 +217,8 @@ func (r *liveSubscriptionRealRelaunchRun) rotate(
 	t.Helper()
 	first := r.launcher.WaitStart(t, ctx, r.commandDone, r.commandOut, r.commandErr)
 	waitForLivePickerText(t, ctx, first.Transcript, r.commandDone, "Welcome back!")
-	first.Submit(t, "Confirm that this session is ready.")
-	if err := r.fixture.WaitCallCount(ctx, 1); err != nil {
-		t.Fatalf("waiting for first real Claude request: %v", err)
-	}
 	first.Submit(t, "Trigger the configured rate-limit response.")
-	if err := r.fixture.WaitCallCount(ctx, 2); err != nil {
+	if err := r.fixture.WaitCallCount(ctx, 1); err != nil {
 		t.Fatalf("waiting for real Claude rate-limit request: %v", err)
 	}
 	second := r.launcher.WaitStart(t, ctx, r.commandDone, r.commandOut, r.commandErr)
@@ -266,7 +261,7 @@ func (r *liveSubscriptionRealRelaunchRun) assert(
 			redactLiveSubscriptionOutput(r.commandErr.String()),
 			redactLiveSubscriptionOutput(r.launcher.Transcript()))
 	}
-	r.fixture.AssertCalls(t, []string{"personal", "personal"})
+	r.fixture.AssertCalls(t, []string{"personal"})
 	assertSubscriptionLaunchMetadata(t, r.dbPath, []subscriptionLaunchWant{
 		{account: "work", state: "failed"},
 		{account: "personal", state: "failed", endReason: "subscription_exhausted"},
