@@ -5,12 +5,16 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.0
+
 - Add local Claude subscription account pools with keychain-backed account
   management, process-bound selection, visible 429 cooldown/relaunch behavior,
   launch observability, and fixture/live verification.
-- Prepare v0.3.0 documentation and draft-first release automation.
-- Skip legacy provider control aliases in aggregate Doctor and conformance
-  diagnostics instead of sending them to a provider.
+- Add strict account import, inspection, refresh, enable/disable, test, and
+  removal commands with redacted human and JSON output.
+- Keep pool exhaustion safe and visible: eligible interactive launches restart
+  with the next account, while unsupported launch shapes fail without silently
+  falling back to another identity or provider.
 
 ## v0.3.0
 
