@@ -8,18 +8,20 @@ import (
 )
 
 type Launch struct {
-	ID              int64
-	GatewayURL      string
-	PID             int
-	ModelAlias      string
-	State           string
-	LifecycleState  string
-	StatuslineState string
-	CreatedAt       string
-	StartedAt       string
-	EndedAt         string
-	ExitCode        *int
-	EndReason       string
+	ID                int64
+	GatewayURL        string
+	PID               int
+	ModelAlias        string
+	State             string
+	LifecycleState    string
+	StatuslineState   string
+	AuthMode          string
+	ClaudeAccountName string
+	CreatedAt         string
+	StartedAt         string
+	EndedAt           string
+	ExitCode          *int
+	EndReason         string
 }
 
 type ClaudeSession struct {
@@ -53,20 +55,32 @@ type Task struct {
 }
 
 func (s *Store) CreateLaunch(ctx context.Context, modelAlias, lifecycleState, statuslineState string) (int64, error) {
+	return s.CreateLaunchWithAuth(ctx, modelAlias, lifecycleState, statuslineState, "", "")
+}
+
+func (s *Store) CreateLaunchWithAuth(
+	ctx context.Context,
+	modelAlias, lifecycleState, statuslineState, authMode, claudeAccountName string,
+) (int64, error) {
+	if claudeAccountName != "" {
+		if err := validateClaudeAccountName(claudeAccountName); err != nil {
+			return 0, fmt.Errorf("store.CreateLaunchWithAuth: %w", err)
+		}
+	}
 	now := runtimeTimestamp()
 	result, err := s.db.ExecContext(ctx, `
 INSERT INTO launches (
   gateway_url, pid, model_alias, state, lifecycle_state, statusline_state,
-  created_at, started_at
+  auth_mode, claude_account_name, created_at, started_at
 )
-VALUES ('', 0, ?, 'starting', ?, ?, ?, '')
-`, modelAlias, lifecycleState, statuslineState, now)
+VALUES ('', 0, ?, 'starting', ?, ?, ?, ?, ?, '')
+`, modelAlias, lifecycleState, statuslineState, authMode, claudeAccountName, now)
 	if err != nil {
-		return 0, fmt.Errorf("store.CreateLaunch: inserting launch: %w", err)
+		return 0, fmt.Errorf("store.CreateLaunchWithAuth: inserting launch: %w", err)
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
-		return 0, fmt.Errorf("store.CreateLaunch: reading launch id: %w", err)
+		return 0, fmt.Errorf("store.CreateLaunchWithAuth: reading launch id: %w", err)
 	}
 	return id, nil
 }
@@ -431,7 +445,8 @@ WHERE event_id IN (
 
 const launchSelectSQL = `
 SELECT id, gateway_url, pid, model_alias, state, lifecycle_state,
-  statusline_state, created_at, started_at, ended_at, exit_code, end_reason
+  statusline_state, auth_mode, claude_account_name, created_at, started_at,
+  ended_at, exit_code, end_reason
 FROM launches`
 
 const claudeSessionSelectSQL = `
@@ -449,8 +464,8 @@ func scanLaunch(row rowScanner) (Launch, error) {
 	var exitCode sql.NullInt64
 	err := row.Scan(&launch.ID, &launch.GatewayURL, &launch.PID, &launch.ModelAlias,
 		&launch.State, &launch.LifecycleState, &launch.StatuslineState,
-		&launch.CreatedAt, &launch.StartedAt, &launch.EndedAt, &exitCode,
-		&launch.EndReason)
+		&launch.AuthMode, &launch.ClaudeAccountName, &launch.CreatedAt,
+		&launch.StartedAt, &launch.EndedAt, &exitCode, &launch.EndReason)
 	if exitCode.Valid {
 		code := int(exitCode.Int64)
 		launch.ExitCode = &code

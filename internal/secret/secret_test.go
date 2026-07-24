@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,11 +48,15 @@ func TestValidateRef(t *testing.T) {
 		{name: "file", ref: FileRef(filePath)},
 		{name: "missing file remains portable", ref: FileRef(filepath.Join(t.TempDir(), "missing.key"))},
 		{name: "keyring", ref: "keyring:provider/openrouter/api-key"},
+		{name: "Claude account access token is not a provider ref", ref: ClaudeAccountAccessTokenRef("personal"), want: "invalid keyring secret reference"},
+		{name: "Claude account refresh token is not a provider ref", ref: ClaudeAccountRefreshTokenRef("work"), want: "invalid keyring secret reference"},
 		{name: "raw secret", ref: "sk-live-secret", want: "unsupported secret reference"},
 		{name: "surrounding whitespace", ref: " env:OPENROUTER_API_KEY ", want: "surrounding whitespace"},
 		{name: "bad env", ref: "env:lowercase", want: "invalid environment secret reference"},
 		{name: "relative file", ref: "file:relative.key", want: "absolute path"},
 		{name: "bad keyring", ref: "keyring:other/account", want: "invalid keyring secret reference"},
+		{name: "bad Claude account token kind", ref: "keyring:claude-account/personal/api-key", want: "invalid keyring secret reference"},
+		{name: "bad Claude account name", ref: "keyring:claude-account/bad name/access-token", want: "invalid keyring secret reference"},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -70,6 +75,33 @@ func TestValidateRef(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestKeyringStoreErrorUsesCredentialSpecificGuidance(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("keychain locked")
+	accountErr := keyringStoreError(
+		ClaudeAccountAccessTokenRef("personal"),
+		"claude-account/personal/access-token",
+		cause,
+	)
+	if !errors.Is(accountErr, cause) ||
+		!strings.Contains(accountErr.Error(), "configure or unlock the keychain") ||
+		strings.Contains(accountErr.Error(), "--api-key-env") ||
+		strings.Contains(accountErr.Error(), "--api-key-file") {
+		t.Fatalf("Claude account keyring error = %q", accountErr)
+	}
+	providerErr := keyringStoreError(
+		KeyringRef("openrouter"),
+		"provider/openrouter/api-key",
+		cause,
+	)
+	if !errors.Is(providerErr, cause) ||
+		!strings.Contains(providerErr.Error(), "--api-key-env") ||
+		!strings.Contains(providerErr.Error(), "--api-key-file") {
+		t.Fatalf("provider keyring error = %q", providerErr)
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7
 
 type Store struct {
 	db *sql.DB
@@ -183,6 +183,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return s.migrateFromV4(ctx)
 	case 5:
 		return s.migrateFromV5(ctx)
+	case 6:
+		return s.migrateFromV6(ctx)
 	case CurrentSchemaVersion:
 		return s.ensureCurrentSchema(ctx)
 	default:
@@ -206,6 +208,9 @@ func (s *Store) migrateFromV1(ctx context.Context) error {
 	if err := s.migrateV5ToV6(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 6: %w", err)
 	}
+	if err := s.migrateV6ToV7(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 7: %w", err)
+	}
 	return nil
 }
 
@@ -222,6 +227,9 @@ func (s *Store) migrateFromV2(ctx context.Context) error {
 	if err := s.migrateV5ToV6(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 6: %w", err)
 	}
+	if err := s.migrateV6ToV7(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 7: %w", err)
+	}
 	return nil
 }
 
@@ -235,6 +243,9 @@ func (s *Store) migrateFromV3(ctx context.Context) error {
 	if err := s.migrateV5ToV6(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 6: %w", err)
 	}
+	if err := s.migrateV6ToV7(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 7: %w", err)
+	}
 	return nil
 }
 
@@ -245,12 +256,25 @@ func (s *Store) migrateFromV4(ctx context.Context) error {
 	if err := s.migrateV5ToV6(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 4 to 6: %w", err)
 	}
+	if err := s.migrateV6ToV7(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 4 to 7: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) migrateFromV5(ctx context.Context) error {
 	if err := s.migrateV5ToV6(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 5 to 6: %w", err)
+	}
+	if err := s.migrateV6ToV7(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 5 to 7: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateFromV6(ctx context.Context) error {
+	if err := s.migrateV6ToV7(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 6 to 7: %w", err)
 	}
 	return nil
 }

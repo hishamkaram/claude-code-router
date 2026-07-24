@@ -49,6 +49,10 @@ ccr version
 - Sign in to Claude Code when you want to use first-party Anthropic routes.
 - Set any external-provider credentials in environment variables, a `0600` key
   file, or the OS keychain. CCR never stores raw API keys in SQLite.
+- Local Claude subscription account pools require individual Claude Code
+  subscription accounts that you personally control. For teams, services, and
+  third-party products, use Anthropic's official API authentication instead of
+  pooling personal subscription logins.
 
 Run this after installation to check the local setup:
 
@@ -81,6 +85,57 @@ tools for the launch, pass it explicitly:
 ```bash
 ccr launch --model <alias> --chrome
 ```
+
+### Local Claude Subscription Account Pool
+
+`ccr claude-account` registers local Claude subscription accounts for
+`ccr launch --auth-mode subscription-pool`. OAuth access and refresh tokens are
+stored only in the OS keychain. SQLite stores account metadata and keyring
+references; CLI output redacts those refs as `keyring:***`. Raw OAuth tokens are
+never stored in SQLite or printed.
+
+Import exactly one credential source. On Linux and Windows, `--from current`
+reads the current Claude login from the local Claude credentials file. On macOS,
+Claude stores the current login in Keychain, so `--from current` is unsupported;
+run `claude setup-token`, then provide only the generated token to
+`--oauth-token-stdin`.
+`--oauth-token-stdin` stores an access token only, with unknown expiry, and does
+not contact Anthropic. When stdin is a terminal, CCR reads the token without
+echoing it.
+
+```bash
+ccr claude-account import personal --from current
+claude setup-token
+ccr claude-account import work --oauth-token-stdin
+ccr claude-account list
+ccr claude-account show personal
+ccr claude-account test personal
+ccr claude-account refresh personal --from current
+ccr claude-account disable work
+ccr claude-account enable work
+ccr claude-account remove work --yes
+```
+
+Use the pool for a plain interactive launch:
+
+```bash
+ccr launch --auth-mode subscription-pool
+ccr launch --auth-mode subscription-pool --claude-account personal
+```
+
+Automatic pool selection atomically selects and stamps the least recently used
+enabled, unexpired, non-cooling account. This is load balancing, not an
+exclusive lifetime lease; overlapping launches can reuse an account after each
+eligible account has been selected. An explicit `--claude-account` selects only
+that account and never rotates to another one. Claude Code account identity is fixed
+for the launched process; CCR does not swap identity inside a running session.
+If a first-party Anthropic route returns HTTP 429 during a plain interactive
+pool launch, CCR marks that account cooling down, stops Claude Code, and
+relaunches with the next account using `--continue`. That automatic relaunch is
+only for `ccr launch --auth-mode subscription-pool` without `--print`, without
+`--claude-account`, without managed CUA options, and without extra Claude Code
+arguments. Other launches fail visibly and tell you to rerun after selecting
+another usable account.
 
 ### Scripted Setup
 
@@ -155,6 +210,9 @@ ccr conformance run <alias>       # record compatibility checks
 ccr conformance run --all         # check every registered non-blocked routable alias
 ccr launch                        # preserve subscription; expose aliases in /model
 ccr launch --model <alias>        # start directly on one CCR alias
+ccr claude-account import personal --from current
+ccr claude-account list
+ccr launch --auth-mode subscription-pool
 ccr status                        # show the latest observed route and health
 ccr trace --follow                # follow redacted route and lifecycle events
 ccr sessions --active             # list active launches and Claude sessions
@@ -202,8 +260,10 @@ database. By default it uses
 `~/.local/share/claude-code-router/ccr.db` when `XDG_DATA_HOME` is unset. Use
 `--db <path>` to keep state elsewhere.
 
-SQLite contains only secret references such as `env:OPENROUTER_API_KEY`, never
-the API-key value. Route history never stores prompts, responses, tool
+SQLite contains only secret references such as `env:OPENROUTER_API_KEY` or
+redacted `keyring:***`, never the API-key or OAuth-token value. Claude account
+access and refresh tokens are stored only in the OS keychain. Route history
+never stores prompts, responses, tool
 arguments, hook bodies, transcript paths, or authorization headers. CCR records
 provider-reported token usage when available but does not estimate monetary
 cost. Redacted route and lifecycle metadata is bounded by the local retention

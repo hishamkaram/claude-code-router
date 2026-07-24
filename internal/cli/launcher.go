@@ -21,7 +21,9 @@ type ClaudeLauncher interface {
 
 type ClaudeProcess interface {
 	PID() int
-	Wait() error
+	// Done returns one completion result for the owned process. Stop must cause
+	// this channel to become ready when process termination succeeds.
+	Done() <-chan error
 	Stop() error
 }
 
@@ -36,7 +38,12 @@ func (ExecClaudeLauncher) Start(ctx context.Context, args []string, env ClaudeEn
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting Claude Code: %w", err)
 	}
-	return execClaudeProcess{cmd: cmd}, nil
+	done := make(chan error, 1)
+	go func() {
+		done <- waitForExecClaudeCommand(cmd)
+		close(done)
+	}()
+	return execClaudeProcess{cmd: cmd, done: done}, nil
 }
 
 func applyClaudeEnvironment(base []string, overlay ClaudeEnvironment) []string {
@@ -65,7 +72,8 @@ func applyClaudeEnvironment(base []string, overlay ClaudeEnvironment) []string {
 }
 
 type execClaudeProcess struct {
-	cmd *exec.Cmd
+	cmd  *exec.Cmd
+	done <-chan error
 }
 
 func (p execClaudeProcess) PID() int {
@@ -75,11 +83,12 @@ func (p execClaudeProcess) PID() int {
 	return p.cmd.Process.Pid
 }
 
-func (p execClaudeProcess) Wait() error {
-	if p.cmd == nil {
-		return nil
-	}
-	if err := p.cmd.Wait(); err != nil {
+func (p execClaudeProcess) Done() <-chan error {
+	return p.done
+}
+
+func waitForExecClaudeCommand(cmd *exec.Cmd) error {
+	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("waiting for Claude Code: %w", err)
 	}
 	return nil

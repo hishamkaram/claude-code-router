@@ -195,6 +195,56 @@ func (s *Store) migrateV5ToV6(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) migrateV6ToV7(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v6 to v7 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if _, err := tx.ExecContext(ctx, migrateV6ToV7LaunchesSQL); err != nil {
+		return fmt.Errorf("ensuring launches table for v7: %w", err)
+	}
+	launchColumns := [...]migrationColumn{
+		{name: "auth_mode", definition: "auth_mode TEXT NOT NULL DEFAULT ''"},
+		{name: "claude_account_name", definition: "claude_account_name TEXT NOT NULL DEFAULT ''"},
+	}
+	if err := addMigrationColumnsIfMissing(ctx, tx, "launches", launchColumns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, migrateV6ToV7ClaudeAccountsSQL); err != nil {
+		return fmt.Errorf("ensuring Claude account table: %w", err)
+	}
+	accountColumns := [...]migrationColumn{
+		{name: "name", definition: "name TEXT NOT NULL DEFAULT ''"},
+		{name: "access_token_ref", definition: "access_token_ref TEXT NOT NULL DEFAULT ''"},
+		{name: "refresh_token_ref", definition: "refresh_token_ref TEXT NOT NULL DEFAULT ''"},
+		{name: "expires_at", definition: "expires_at TEXT NOT NULL DEFAULT ''"},
+		{name: "scopes_json", definition: "scopes_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "enabled", definition: "enabled INTEGER NOT NULL DEFAULT 1"},
+		{name: "cooldown_until", definition: "cooldown_until TEXT NOT NULL DEFAULT ''"},
+		{name: "created_at", definition: "created_at TEXT NOT NULL DEFAULT ''"},
+		{name: "updated_at", definition: "updated_at TEXT NOT NULL DEFAULT ''"},
+		{name: "last_used_at", definition: "last_used_at TEXT NOT NULL DEFAULT ''"},
+		{name: "last_refresh_at", definition: "last_refresh_at TEXT NOT NULL DEFAULT ''"},
+		{name: "last_error", definition: "last_error TEXT NOT NULL DEFAULT ''"},
+	}
+	if err := addMigrationColumnsIfMissing(ctx, tx, "claude_accounts", accountColumns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, migrateV6ToV7IndexesSQL); err != nil {
+		return fmt.Errorf("creating v7 indexes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 7 WHERE id = 1 AND version = 6`); err != nil {
+		return fmt.Errorf("updating schema version to 7: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v6 to v7 migration: %w", err)
+	}
+	return nil
+}
+
 func tableColumnExists(ctx context.Context, tx *sql.Tx, table, name string) (bool, error) {
 	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
@@ -226,6 +276,22 @@ func addMigrationColumns(ctx context.Context, tx *sql.Tx, table string, definiti
 	for _, definition := range definitions {
 		if _, err := tx.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+definition); err != nil {
 			return fmt.Errorf("adding %s column %q: %w", table, definition, err)
+		}
+	}
+	return nil
+}
+
+func addMigrationColumnsIfMissing(ctx context.Context, tx *sql.Tx, table string, columns []migrationColumn) error {
+	for _, column := range columns {
+		exists, err := tableColumnExists(ctx, tx, table, column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column.definition); err != nil {
+			return fmt.Errorf("adding %s.%s column: %w", table, column.name, err)
 		}
 	}
 	return nil

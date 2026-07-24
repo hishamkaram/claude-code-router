@@ -292,7 +292,12 @@ func (l *livePickerLauncher) Start(ctx context.Context, args []string, env Claud
 		_ = pty.Close()
 		return nil, fmt.Errorf("starting Claude Code in PTY: %w", err)
 	}
-	process := &livePickerProcess{ctx: ctx, cmd: cmd, pty: pty}
+	done := make(chan error, 1)
+	process := &livePickerProcess{ctx: ctx, cmd: cmd, pty: pty, done: done}
+	go func() {
+		done <- process.wait()
+		close(done)
+	}()
 	l.started <- livePickerSession{pty: pty, process: process}
 	return process, nil
 }
@@ -301,6 +306,7 @@ type livePickerProcess struct {
 	ctx      context.Context
 	cmd      *exec.Cmd
 	pty      xpty.Pty
+	done     <-chan error
 	waitOnce sync.Once
 	waitErr  error
 }
@@ -312,7 +318,11 @@ func (p *livePickerProcess) PID() int {
 	return p.cmd.Process.Pid
 }
 
-func (p *livePickerProcess) Wait() error {
+func (p *livePickerProcess) Done() <-chan error {
+	return p.done
+}
+
+func (p *livePickerProcess) wait() error {
 	if p == nil || p.cmd == nil {
 		return nil
 	}

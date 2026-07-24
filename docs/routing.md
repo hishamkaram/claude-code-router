@@ -117,6 +117,76 @@ startup alias. Claude Code can authenticate to `/v1/models` in this mode and use
 its friendly discovery metadata. See Anthropic's
 [gateway documentation](https://code.claude.com/docs/en/llm-gateway).
 
+### `subscription-pool`
+
+```bash
+ccr launch --auth-mode subscription-pool
+ccr launch --auth-mode subscription-pool --claude-account personal
+```
+
+CCR selects a registered local Claude subscription account and launches Claude
+Code with that account's OAuth token. The selected account is visible in launch
+stderr and in `ccr status` as `Launch auth: mode=subscription-pool
+account=<name>`. Account identity is process-scoped: CCR does not swap accounts
+inside a running Claude Code session.
+
+The pool command surface is:
+
+```bash
+ccr claude-account import <name> --from current
+ccr claude-account import <name> --oauth-token-stdin
+ccr claude-account list
+ccr claude-account show <name>
+ccr claude-account test <name>
+ccr claude-account refresh <name> --from current
+ccr claude-account refresh <name> --oauth-token-stdin
+ccr claude-account enable <name>
+ccr claude-account disable <name>
+ccr claude-account remove <name> --yes
+```
+
+`import` and `refresh` require exactly one credential source.
+`--from current` reads the current Claude login on Linux and Windows. On macOS,
+current-login import is unsupported because Claude stores that login in
+Keychain; generate a token with `claude setup-token`, then provide only that
+token to `--oauth-token-stdin`. `--oauth-token-stdin` reads one OAuth token from
+stdin into the OS keychain and disables terminal echo for interactive input.
+`refresh` is an explicit replacement; CCR does not call an undocumented OAuth
+refresh endpoint. `test` resolves and validates the local credential only; it
+does not make a network request.
+
+Without `--claude-account`, CCR atomically selects and stamps the least recently
+used enabled, unexpired account whose cooldown has elapsed. The timestamp is a
+load-balancing marker, not an exclusive process-lifetime lease, so overlapping
+launches can reuse an account after every eligible account has been selected. A
+selected account is skipped and cooled down briefly if its keychain credential
+cannot be resolved. With `--claude-account`, CCR selects only that account;
+disabled, expired, cooling, or credential-unavailable state fails visibly and
+does not rotate to another account.
+
+First-party Anthropic HTTP 429 responses are treated as subscription
+exhaustion only when the gateway is using the selected account on the
+first-party Anthropic pass-through route. Registered Anthropic-compatible
+providers and OpenAI-compatible providers do not trigger pool cooldown or
+relaunch behavior from their 429 responses.
+
+Automatic relaunch is intentionally narrow. It runs only for a plain interactive
+pool launch: no `--print`, no explicit `--claude-account`, no managed CUA
+options, and no extra Claude Code arguments. In that case CCR marks the
+exhausted account cooling down, stops Claude Code, and starts a new process with
+the next usable account using `--continue`. Other pool launches return a
+visible rate-limit error and tell you to rerun after selecting another account.
+If all accounts are disabled, expired, cooling down, excluded, or
+credential-unavailable, the launch fails with an all-exhausted message; CCR
+never silently falls back to the default Claude login, Anthropic API key, or
+another provider.
+
+Secrets remain local. SQLite stores only account metadata and keyring refs,
+which CLI output redacts as `keyring:***`; OAuth token values are stored only in
+the OS keychain. This mode is for local individual use. Teams, automation,
+hosted products, and third-party integrations should use Anthropic's official
+API authentication.
+
 ## Capability Handling
 
 CCR translates between Anthropic-compatible and OpenAI-compatible provider

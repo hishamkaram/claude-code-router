@@ -150,6 +150,21 @@ func TestParseLaunchInvocationRejectsInvalidCUAExternalExecutorFlags(t *testing.
 			wantErr: "reserved by CCR or Claude Code",
 		},
 		{
+			name:    "external token environment rejects Claude OAuth access token",
+			args:    []string{"--ccr-cua-mode=managed", "--ccr-cua-executor=external:browser", "--ccr-cua-external-url=https://executor.example/cua", "--ccr-cua-external-token-env=CLAUDE_CODE_OAUTH_TOKEN"},
+			wantErr: "reserved by CCR or Claude Code",
+		},
+		{
+			name:    "external token environment rejects Claude OAuth refresh token",
+			args:    []string{"--ccr-cua-mode=managed", "--ccr-cua-executor=external:browser", "--ccr-cua-external-url=https://executor.example/cua", "--ccr-cua-external-token-env=CLAUDE_CODE_OAUTH_REFRESH_TOKEN"},
+			wantErr: "reserved by CCR or Claude Code",
+		},
+		{
+			name:    "external token environment rejects Claude OAuth scopes",
+			args:    []string{"--ccr-cua-mode=managed", "--ccr-cua-executor=external:browser", "--ccr-cua-external-url=https://executor.example/cua", "--ccr-cua-external-token-env=CLAUDE_CODE_OAUTH_SCOPES"},
+			wantErr: "reserved by CCR or Claude Code",
+		},
+		{
 			name:    "external URL requires external executor",
 			args:    []string{"--ccr-cua-mode=managed", "--ccr-cua-executor=docker", "--ccr-cua-external-url=https://executor.example/cua"},
 			wantErr: "requires --ccr-cua-executor external:<name>",

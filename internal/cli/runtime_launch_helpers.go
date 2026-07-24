@@ -63,13 +63,17 @@ func writePreserveAuthModelGuidance(ctx context.Context, out io.Writer, s *store
 }
 
 func writeLaunchAuthSummary(out io.Writer, authMode string) {
-	if authMode == launchAuthModeGatewayToken {
+	switch authMode {
+	case launchAuthModeGatewayToken:
 		fmt.Fprintln(out, "Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN for this process.")
 		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in --auth-mode gateway-token.")
-		return
+	case launchAuthModeSubscriptionPool:
+		fmt.Fprintln(out, "Gateway accepts the generated local X-CCR-Session-Token for this process.")
+		fmt.Fprintln(out, "The selected Claude account OAuth identity is fixed for this process; inherited Claude login and Anthropic API-key auth are not active.")
+	default:
+		fmt.Fprintln(out, "Gateway accepts the generated local X-CCR-Session-Token for this process.")
+		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are preserved for first-party Anthropic routes.")
 	}
-	fmt.Fprintln(out, "Gateway accepts the generated local X-CCR-Session-Token for this process.")
-	fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are preserved for first-party Anthropic routes.")
 }
 
 func writeLaunchCompatibilitySummary(ctx context.Context, out io.Writer, s *store.Store, modelAlias string) {
@@ -223,12 +227,7 @@ func cleanupStartedClaudeProcess(process ClaudeProcess) error {
 	if process == nil {
 		return nil
 	}
-	stopErr := process.Stop()
-	if stopErr != nil {
-		return stopErr
-	}
-	_ = process.Wait()
-	return nil
+	return stopClaudeProcessAndWait(process, process.Done(), claudeProcessStopTimeout)
 }
 
 func shutdownGateway(parent context.Context, server *gateway.Server) {

@@ -71,6 +71,7 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	defer func() { _ = resp.Body.Close() }()
+	h.notifyAnthropicSubscriptionExhaustion(resp, provider, authMode)
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	return copyProviderResponseBody(w, resp, responseModel)

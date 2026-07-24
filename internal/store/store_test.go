@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
+	"github.com/hishamkaram/claude-code-router/internal/secret"
 )
 
 func TestOpenReadOnlyHandlesEscapedPathsAndRejectsWrites(t *testing.T) {
@@ -49,6 +50,38 @@ func TestOpenReadOnlyDoesNotCreateMissingDatabase(t *testing.T) {
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("OpenReadOnly() created parent directory: %v", err)
+	}
+}
+
+func TestProviderRejectsClaudeAccountSecretRef(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "ccr.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if migrateErr := s.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("Migrate() error = %v", migrateErr)
+	}
+	accountRef := secret.ClaudeAccountAccessTokenRef("personal")
+	err = s.AddProvider(ctx, Provider{
+		Name: "external", Type: "openai-compatible", BaseURL: "https://provider.example",
+		SecretRef: accountRef,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid keyring secret reference") {
+		t.Fatalf("AddProvider() error = %v", err)
+	}
+	if strings.Contains(err.Error(), accountRef) {
+		t.Fatalf("AddProvider() leaked Claude account keyring ref: %v", err)
+	}
+	exists, err := s.ProviderExists(ctx, "external")
+	if err != nil {
+		t.Fatalf("ProviderExists() error = %v", err)
+	}
+	if exists {
+		t.Fatal("AddProvider() persisted a provider using Claude account credentials")
 	}
 }
 

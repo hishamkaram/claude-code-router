@@ -112,6 +112,13 @@ func writeHumanStatus(cmd *cobra.Command, document statusDocument) {
 		launch := document.LatestLaunch
 		fmt.Fprintf(out, "Latest launch: %d state=%s process=%s lifecycle=%s statusline=%s\n",
 			launch.ID, launch.State, launch.ProcessState, launch.LifecycleState, launch.StatuslineState)
+		if launch.AuthMode != "" {
+			fmt.Fprintf(out, "Launch auth: mode=%s", launch.AuthMode)
+			if launch.ClaudeAccount != "" {
+				fmt.Fprintf(out, " account=%s", launch.ClaudeAccount)
+			}
+			fmt.Fprintln(out)
+		}
 	}
 	if document.LastRoute == nil {
 		fmt.Fprintln(out, "Last route: none observed")

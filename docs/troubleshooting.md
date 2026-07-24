@@ -228,6 +228,72 @@ Use the default `--auth-mode preserve` and verify the ordinary `claude` CLI is
 signed in. `gateway-token` intentionally disables original Anthropic
 subscription and API-key authentication, so it cannot use a first-party route.
 
+## Claude Subscription Pool Has No Usable Account
+
+Inspect local account state:
+
+```bash
+ccr claude-account list
+ccr claude-account show <name>
+ccr claude-account test <name>
+```
+
+`list` and `show` report redacted metadata only. A status of `disabled`,
+`expired`, or `cooldown` makes the account ineligible for automatic selection.
+Enable or replace credentials explicitly:
+
+```bash
+ccr claude-account enable <name>
+ccr claude-account refresh <name> --from current
+claude setup-token
+ccr claude-account refresh <name> --oauth-token-stdin
+```
+
+`--from current` works on Linux and Windows when the current Claude credentials
+file exists and has safe permissions. On macOS it is unsupported because Claude
+stores the active login in Keychain; use `claude setup-token` and
+`--oauth-token-stdin`.
+
+If every account is disabled, expired, cooling down, or has an unavailable
+keychain credential, `ccr launch --auth-mode subscription-pool` fails visibly.
+CCR does not silently fall back to your default Claude login or an Anthropic API
+key.
+
+## Subscription Pool Relaunch Did Not Happen
+
+Automatic relaunch after a first-party Anthropic HTTP 429 only applies to a
+plain interactive launch:
+
+```bash
+ccr launch --auth-mode subscription-pool
+```
+
+CCR does not automatically relaunch when you use `--print`, pass
+`--claude-account`, configure managed CUA, or pass extra Claude Code arguments
+or prompts. In those cases the selected account is marked cooling down and the
+command returns a visible rate-limit error. Rerun the launch after choosing
+another account or waiting for the cooldown:
+
+```bash
+ccr launch --auth-mode subscription-pool --claude-account other
+```
+
+When automatic relaunch does run, CCR stops the current Claude Code process and
+starts a new one with `--continue`. It cannot swap identities inside an existing
+Claude Code process.
+
+## Remove a Claude Subscription Account
+
+Removal deletes the account's OS keychain credentials before deleting its
+SQLite metadata:
+
+```bash
+ccr claude-account remove <name> --yes
+```
+
+The `--yes` confirmation is required. If keychain cleanup fails, CCR retains the
+metadata and refs so the cleanup can be retried.
+
 ## Web Search Reports No Results
 
 `WebSearch` and `WebFetch` are run by the Claude Code host, not by CCR or the
