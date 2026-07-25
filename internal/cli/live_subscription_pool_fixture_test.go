@@ -33,17 +33,27 @@ func TestLiveFixtureSubscriptionPoolFirstParty(t *testing.T) {
 	if _, err := liveclaude.Check(ctx); err != nil {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
-	isolateLiveSubscriptionClaudeHome(t)
+	configDir := isolateLiveSubscriptionClaudeHome(t)
+	settingsPath := filepath.Join(configDir, "settings.json")
+	staleStatusline := "CCR_STALE_SHARED_PROFILE_LIMITS"
+	writeLiveSubscriptionJSON(t, settingsPath, map[string]any{
+		"theme": "dark",
+		"statusLine": map[string]any{
+			"type": "command", "command": "printf " + staleStatusline,
+		},
+	})
 
 	fixture := newLiveSubscriptionFixture(t, []liveSubscriptionResponse{
-		{account: "personal", token: liveSubscriptionPersonalToken, text: "CCR_LIVE_SUBSCRIPTION_POOL_OK"},
+		{account: "work", token: liveSubscriptionWorkToken, text: "CCR_LIVE_SUBSCRIPTION_POOL_OK"},
 	})
 	defer fixture.Close()
 	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
 		{name: "personal", token: liveSubscriptionPersonalToken},
+		{name: "work", token: liveSubscriptionWorkToken},
 	})
 	secrets := &accountTestSecrets{values: map[string]string{
 		secret.ClaudeAccountAccessTokenRef("personal"): liveSubscriptionPersonalToken,
+		secret.ClaudeAccountAccessTokenRef("work"):     liveSubscriptionWorkToken,
 	}}
 	deps := Dependencies{
 		In:           strings.NewReader("Reply exactly CCR_LIVE_SUBSCRIPTION_POOL_OK.\n"),
@@ -53,8 +63,8 @@ func TestLiveFixtureSubscriptionPoolFirstParty(t *testing.T) {
 
 	out, errOut, err := runLiveCommand(ctx, deps,
 		"--db", dbPath, "launch",
-		"--auth-mode", "subscription-pool", "--claude-account", "personal",
-		"--print", "--no-lifecycle", "--no-statusline",
+		"--auth-mode", "subscription-pool", "--claude-account", "work",
+		"--print", "--no-lifecycle",
 	)
 	if err != nil {
 		t.Fatalf("subscription-pool live fixture error = %s\nstdout:\n%s\nstderr:\n%s",
@@ -62,27 +72,54 @@ func TestLiveFixtureSubscriptionPoolFirstParty(t *testing.T) {
 			redactLiveSubscriptionOutput(out),
 			redactLiveSubscriptionOutput(errOut))
 	}
-	if !strings.Contains(out, "CCR_LIVE_SUBSCRIPTION_POOL_OK") {
-		t.Fatalf("subscription-pool live fixture output missing sentinel\nstdout:\n%s\nstderr:\n%s",
-			redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
+	assertLiveSubscriptionFirstPartyOutput(t, out, errOut, staleStatusline)
+	settings, readErr := os.ReadFile(settingsPath)
+	if readErr != nil || !strings.Contains(string(settings), staleStatusline) {
+		t.Fatalf("subscription-pool launch changed user settings: %q, %v", settings, readErr)
 	}
-	if !strings.Contains(errOut, "Claude account selected: personal") {
-		t.Fatalf("subscription-pool selection metadata not visible\nstdout:\n%s\nstderr:\n%s",
-			redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
-	}
-	fixture.AssertCalls(t, []string{"personal"})
+	fixture.AssertCalls(t, []string{"work"})
 	assertSubscriptionLaunchMetadata(t, dbPath, []subscriptionLaunchWant{
-		{account: "personal", state: "completed"},
+		{account: "work", state: "completed"},
 	})
+	launches := loadSubscriptionLaunches(t, dbPath)
+	if len(launches) != 1 || launches[0].StatuslineState != "replaced" {
+		t.Fatalf("subscription-pool live status-line state = %#v, want replaced", launches)
+	}
 	statusOut, _, err := runLiveCommand(ctx, Dependencies{Secrets: secrets}, "--db", dbPath, "status")
 	if err != nil {
 		t.Fatalf("subscription-pool status error = %v", err)
 	}
-	if !strings.Contains(statusOut, "Launch auth: mode=subscription-pool account=personal") {
+	if !strings.Contains(statusOut, "Launch auth: mode=subscription-pool account=work") {
 		t.Fatalf("subscription-pool status did not expose launch auth metadata: %s", statusOut)
 	}
-	assertSubscriptionDatabaseRedaction(t, dbPath, liveSubscriptionPersonalToken)
-	assertNoSubscriptionTokenLeak(t, out+errOut+statusOut, liveSubscriptionPersonalToken)
+	assertSubscriptionDatabaseRedaction(t, dbPath, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
+	assertNoSubscriptionTokenLeak(t, out+errOut+statusOut, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
+}
+
+func assertLiveSubscriptionFirstPartyOutput(t *testing.T, out, errOut, staleStatusline string) {
+	t.Helper()
+	if !strings.Contains(out, "CCR_LIVE_SUBSCRIPTION_POOL_OK") {
+		t.Fatalf("subscription-pool live fixture output missing sentinel\nstdout:\n%s\nstderr:\n%s",
+			redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
+	}
+	if !strings.Contains(errOut, "Claude model-request account selected: work") {
+		t.Fatalf("subscription-pool selection metadata not visible\nstdout:\n%s\nstderr:\n%s",
+			redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
+	}
+	for _, want := range []string{
+		"Subscription limits for account work: unknown",
+		"Existing Claude statusLine bypassed for this launch",
+		"Automatic account rotation: disabled because --print is a one-shot",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Fatalf("subscription-pool status-line evidence missing %q\nstdout:\n%s\nstderr:\n%s",
+				want, redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
+		}
+	}
+	if strings.Contains(out+errOut, staleStatusline) {
+		t.Fatalf("subscription-pool live output used the shared-profile status line: %s",
+			redactLiveSubscriptionOutput(out+errOut))
+	}
 }
 
 func TestLiveFixtureSubscriptionPoolRelaunchesOnFirstParty429(t *testing.T) {
@@ -228,7 +265,7 @@ func newLiveSubscriptionRealRelaunchRun(
 		secret.ClaudeAccountAccessTokenRef("personal"): liveSubscriptionPersonalToken,
 		secret.ClaudeAccountAccessTokenRef("work"):     liveSubscriptionWorkToken,
 	}}
-	launcher := newLiveSubscriptionPTYLauncher()
+	launcher := newLiveSubscriptionPTYLauncher("")
 	run := &liveSubscriptionRealRelaunchRun{
 		dbPath: dbPath, secrets: secrets, fixture: fixture, launcher: launcher,
 		commandOut: &bytes.Buffer{}, commandErr: &bytes.Buffer{}, commandDone: make(chan error, 1),
@@ -556,7 +593,7 @@ func assertSubscriptionLaunchMetadata(t *testing.T, dbPath string, wants []subsc
 	}
 }
 
-func isolateLiveSubscriptionClaudeHome(t *testing.T) {
+func isolateLiveSubscriptionClaudeHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".claude")
@@ -588,6 +625,7 @@ func isolateLiveSubscriptionClaudeHome(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
 	t.Setenv("DISABLE_AUTOUPDATER", "1")
 	t.Setenv("DISABLE_TELEMETRY", "1")
+	return configDir
 }
 
 func writeLiveSubscriptionJSON(t *testing.T, path string, value any) {

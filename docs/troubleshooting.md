@@ -167,9 +167,17 @@ agent, or task is marked abandoned when Claude Code exits abruptly.
 
 ## The CCR Status Line Is Missing
 
-CCR does not replace an existing Claude Code status line. Run `ccr status` to
-inspect the same route state outside Claude Code. Also check that the launch was
-not started with `--no-statusline`.
+Outside subscription-pool mode, CCR does not replace an existing Claude Code
+status line. Pool launches replace it only for the launched process so the line
+can show the selected `account=<name>` and truthful `limits=unknown`; the user
+settings file is unchanged. Run `ccr status` to inspect the same route and
+selected launch account outside Claude Code. Also check that the launch was not
+started with `--no-statusline`.
+
+Claude Code's built-in usage display or a status line exposed with
+`--no-statusline` may use another local profile or cached usage data. CCR cannot
+query fresh per-account subscription quota with a Claude Code OAuth token. It
+therefore never labels those numbers as belonging to the selected pool account.
 
 ## Remove Runtime History
 
@@ -228,6 +236,37 @@ Use the default `--auth-mode preserve` and verify the ordinary `claude` CLI is
 signed in. `gateway-token` intentionally disables original Anthropic
 subscription and API-key authentication, so it cannot use a first-party route.
 
+## Claude Account Import Has No Linux Keychain
+
+`--oauth-token-stdin` controls how the token enters CCR, but account credentials
+still require an OS secret store. Headless Linux installations need a Secret
+Service implementation such as GNOME Keyring:
+
+```bash
+sudo apt install gnome-keyring libsecret-tools
+```
+
+If the `login` collection already exists but is locked, unlock it with its
+existing password:
+
+```bash
+read -rsp "Keyring password: " K; echo; printf '%s' "$K" | gnome-keyring-daemon --unlock; unset K
+```
+
+For a new, dedicated headless environment with no existing keyring data, start
+one daemon and initialize its collection in the same shell:
+
+```bash
+pkill -u "$USER" -f '^gnome-keyring-daemon ' 2>/dev/null || true
+read -rsp "New keyring password: " K; echo; eval "$(printf %s "$K" | gnome-keyring-daemon --login --components=secrets)"; eval "$(gnome-keyring-daemon --start --components=secrets)"; export GNOME_KEYRING_CONTROL; unset K
+printf probe | secret-tool store --label=CCR service ccr-bootstrap account probe && secret-tool clear service ccr-bootstrap account probe
+```
+
+Do not stop or replace the keyring daemon on a desktop session or a machine
+with existing keyring data. Use the desktop keyring manager or login password
+to unlock that collection instead. CCR checks keychain availability before
+reading stdin, so a failed preflight does not consume or persist the token.
+
 ## Claude Subscription Pool Has No Usable Account
 
 Inspect local account state:
@@ -256,6 +295,20 @@ file exists and has safe permissions. On macOS it is unsupported because Claude
 stores the active login in Keychain; use `claude setup-token` and
 `--oauth-token-stdin`.
 
+CCR account names are local labels, not identities returned by Anthropic. If
+several labels appear to use the same subscription, each setup token may have
+authorized the same browser account. Generate a fresh token and select the
+intended account in the setup-token OAuth flow before refreshing each label:
+
+```bash
+claude setup-token
+ccr claude-account refresh <name> --oauth-token-stdin
+```
+
+`claude setup-token` does not replace the CLI's saved login. That shared login
+can remain visible in the UI for every launch while model requests use the
+selected label's stored token.
+
 If every account is disabled, expired, cooling down, or has an unavailable
 keychain credential, `ccr launch --auth-mode subscription-pool` fails visibly.
 CCR does not silently fall back to your default Claude login or an Anthropic API
@@ -273,16 +326,20 @@ Automatic relaunch requires a first-party Anthropic `/v1/messages` HTTP 429
 whose `anthropic-ratelimit-unified-status` response header is `rejected`.
 Temporary or ambiguous 429 responses are left to Claude Code's retry handling
 and intentionally do not trigger account rotation. Confirmed exhaustion only
-relaunches a plain interactive launch:
+relaunches a plain interactive or explicitly resumable launch:
 
 ```bash
 ccr launch --auth-mode subscription-pool
+ccr launch --auth-mode subscription-pool \
+  --worktree mcp-stateless-ha --resume <session-id>
 ```
 
-CCR does not automatically relaunch when you use `--print`, pass
-`--claude-account`, configure managed CUA, or pass extra Claude Code arguments
-or prompts. In those cases the selected account is marked cooling down and the
-command returns a visible rate-limit error. Rerun the launch after choosing
+The second form replays the named worktree and resume ID unchanged. CCR does not
+automatically relaunch when you use `--print`, pass `--claude-account`,
+configure managed CUA, provide a prompt, or pass other Claude Code arguments.
+Launch stderr says whether rotation is enabled and why. In non-rotating cases
+the selected account is marked cooling down only after confirmed exhaustion,
+and the command returns a visible rate-limit error. Rerun after choosing
 another account or waiting for the cooldown:
 
 ```bash
@@ -290,8 +347,17 @@ ccr launch --auth-mode subscription-pool --claude-account other
 ```
 
 When automatic relaunch does run, CCR stops the current Claude Code process and
-starts a new one with `--continue`. It cannot swap identities inside an existing
-Claude Code process.
+starts a new one with `--continue` or the original explicit resume/worktree
+arguments. It cannot swap identities inside an existing Claude Code process.
+Claude Code restores the conversation, but CCR does not synthesize or replay
+the interrupted user input because doing so could repeat tool side effects. If
+the turn did not complete before rotation, continue it in the relaunched
+session.
+
+An exit such as `No deferred tool marker found` is a Claude Code resume error,
+not subscription exhaustion. Provide a prompt for `--print --resume` or use an
+interactive resume. CCR intentionally does not cycle every account for a CLI,
+session, settings, or worktree error.
 
 ## Remove a Claude Subscription Account
 

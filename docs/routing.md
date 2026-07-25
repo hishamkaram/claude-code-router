@@ -85,9 +85,10 @@ ccr agents --active
 
 The hook and status endpoints listen only on the launch gateway's loopback
 address and require a separate ephemeral token. Existing user hooks are kept.
-An existing status line wins over CCR's launch-only status line. The
-`--no-history`, `--no-lifecycle`, and `--no-statusline` flags disable their
-respective feature for one launch.
+An existing status line wins outside subscription-pool mode. Pool launches
+replace it only in the generated launch settings with an account-aware line;
+the user settings file remains unchanged. The `--no-history`, `--no-lifecycle`,
+and `--no-statusline` flags disable their respective feature for one launch.
 
 ## Authentication Modes
 
@@ -125,10 +126,11 @@ ccr launch --auth-mode subscription-pool --claude-account personal
 ```
 
 CCR selects a registered local Claude subscription account and launches Claude
-Code with that account's OAuth token. The selected account is visible in launch
-stderr and in `ccr status` as `Launch auth: mode=subscription-pool
-account=<name>`. Account identity is process-scoped: CCR does not swap accounts
-inside a running Claude Code session.
+Code with that label's OAuth token for model requests. The selected label is
+visible in launch stderr and in `ccr status` as
+`Launch auth: mode=subscription-pool account=<name>`. Claude's visible UI profile
+may remain the shared local login. Model-request identity is process-scoped:
+CCR does not swap credentials inside a running Claude Code session.
 
 The pool command surface is:
 
@@ -151,8 +153,11 @@ ccr claude-account remove <name> --yes
 `--from current` reads the current Claude login on Linux and Windows. On macOS,
 current-login import is unsupported because Claude stores that login in
 Keychain; generate a token with `claude setup-token`, then provide only that
-token to `--oauth-token-stdin`. `--oauth-token-stdin` reads one OAuth token from
-stdin into the OS keychain and disables terminal echo for interactive input.
+token to `--oauth-token-stdin`. The setup-token command runs a separate OAuth
+authorization flow and does not replace the CLI login; authorize the intended
+browser account for each local CCR label. CCR cannot identify the subscription
+behind a token. `--oauth-token-stdin` reads one OAuth token from stdin into the
+OS keychain and disables terminal echo for interactive input.
 `refresh` is an explicit replacement; CCR does not call an undocumented OAuth
 refresh endpoint. `test` resolves and validates the local credential only; it
 does not make a network request.
@@ -176,16 +181,32 @@ does not cool or rotate the account. Token-count 429 responses, registered
 Anthropic-compatible providers, and OpenAI-compatible providers do not trigger
 pool cooldown or relaunch behavior.
 
-Automatic relaunch is intentionally narrow. It runs only for a plain interactive
-pool launch: no `--print`, no explicit `--claude-account`, no managed CUA
-options, and no extra Claude Code arguments. In that case CCR marks the
-exhausted account cooling down, stops Claude Code, and starts a new process with
-the next usable account using `--continue`. Other pool launches return a
-visible rate-limit error and tell you to rerun after selecting another account.
+Automatic relaunch is intentionally narrow. It runs for a plain interactive
+pool launch or an interactive launch with `--resume <session-id>`, optionally
+combined with a named `--worktree`. Plain launches resume with `--continue`;
+explicit resume/worktree continuity arguments are replayed unchanged. `--print`,
+an explicit `--claude-account`, managed CUA, prompts, and other passthrough
+arguments disable rotation. CCR prints the eligibility decision before Claude
+Code starts. In eligible cases CCR marks the exhausted account cooling down,
+stops Claude Code, and starts a new process with the next usable account. Other
+pool launches return a visible rate-limit error and tell you to rerun after
+selecting another account.
 If all accounts are disabled, expired, cooling down, excluded, or
 credential-unavailable, the launch fails with an all-exhausted message; CCR
 never silently falls back to the default Claude login, Anthropic API key, or
 another provider.
+
+Account names are local CCR labels. Model requests use the selected label's
+stored OAuth token, while Claude's visible profile and cached usage can still
+show the shared local login. Authorize the subscription represented by each
+label in that setup-token browser flow.
+
+The pool status line identifies the selected model-request label as
+`account=<name>` and reports `limits=unknown`. Claude Code OAuth tokens provide
+no supported account-scoped subscription-quota endpoint. CCR does not parse
+Claude profile caches or show shared-profile quota as selected-account data. An
+existing status line is bypassed only in launch-generated settings;
+`--no-statusline` is an explicit opt-out and prints a warning.
 
 `clear-cooldown <name>` and `clear-cooldown --all` clear only cooldown and
 last-error metadata. Use them after independently confirming that a cooldown is

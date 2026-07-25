@@ -220,15 +220,27 @@ func TestFetchStatuslineUsesObserverEndpoint(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	line, err := fetchStatusline(context.Background(), server.URL, "observer-token")
+	line, err := fetchStatusline(context.Background(), server.URL, "observer-token", "personal")
 	if err != nil {
 		t.Fatalf("fetchStatusline() error = %v", err)
 	}
-	if line != "CCR | coder | fixture/model-v1 | agents 2 | tasks 1" {
+	if line != "CCR | account=personal | limits=unknown | coder | fixture/model-v1 | agents 2 | tasks 1" {
 		t.Fatalf("fetchStatusline() = %q", line)
 	}
 	if _, err := statuslineEndpoint("https://example.com"); err == nil {
 		t.Fatal("statuslineEndpoint(non-loopback) error = nil")
+	}
+}
+
+func TestFormatStatuslineOmitsSubscriptionStateWithoutAccount(t *testing.T) {
+	t.Parallel()
+
+	line := formatStatusline(session.Snapshot{
+		Route:         session.Route{ModelAlias: "coder"},
+		Observability: observability.Snapshot{Healthy: true},
+	}, "")
+	if line != "CCR | coder" {
+		t.Fatalf("formatStatusline() = %q", line)
 	}
 }
 

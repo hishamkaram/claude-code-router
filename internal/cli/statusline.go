@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	statuslineGatewayURLEnv  = "CCR_GATEWAY_URL"
-	statuslineTokenEnv       = "CCR_OBSERVER_TOKEN"
-	statuslineRequestTimeout = 2 * time.Second
+	statuslineGatewayURLEnv    = "CCR_GATEWAY_URL"
+	statuslineTokenEnv         = "CCR_OBSERVER_TOKEN"
+	statuslineClaudeAccountEnv = "CCR_CLAUDE_ACCOUNT"
+	statuslineRequestTimeout   = 2 * time.Second
 )
 
 func newStatuslineCommand() *cobra.Command {
@@ -29,7 +30,12 @@ func newStatuslineCommand() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			line, err := fetchStatusline(cmd.Context(), os.Getenv(statuslineGatewayURLEnv), os.Getenv(statuslineTokenEnv))
+			line, err := fetchStatusline(
+				cmd.Context(),
+				os.Getenv(statuslineGatewayURLEnv),
+				os.Getenv(statuslineTokenEnv),
+				os.Getenv(statuslineClaudeAccountEnv),
+			)
 			if err == nil && line != "" {
 				fmt.Fprintln(cmd.OutOrStdout(), line)
 			}
@@ -37,7 +43,7 @@ func newStatuslineCommand() *cobra.Command {
 	}
 }
 
-func fetchStatusline(ctx context.Context, gatewayURL, token string) (string, error) {
+func fetchStatusline(ctx context.Context, gatewayURL, token, claudeAccount string) (string, error) {
 	endpoint, err := statuslineEndpoint(gatewayURL)
 	if err != nil {
 		return "", err
@@ -64,7 +70,7 @@ func fetchStatusline(ctx context.Context, gatewayURL, token string) (string, err
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&snapshot); err != nil {
 		return "", fmt.Errorf("decoding runtime status: %w", err)
 	}
-	return formatStatusline(snapshot), nil
+	return formatStatusline(snapshot, claudeAccount), nil
 }
 
 func statuslineEndpoint(gatewayURL string) (string, error) {
@@ -83,8 +89,11 @@ func statuslineEndpoint(gatewayURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func formatStatusline(snapshot session.Snapshot) string {
+func formatStatusline(snapshot session.Snapshot, claudeAccount string) string {
 	parts := []string{"CCR"}
+	if claudeAccount = strings.TrimSpace(claudeAccount); claudeAccount != "" {
+		parts = append(parts, "account="+claudeAccount, "limits=unknown")
+	}
 	if snapshot.Route.ModelAlias == "" {
 		parts = append(parts, "waiting for route")
 	} else {
