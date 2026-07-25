@@ -5,6 +5,8 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.2
+
 - Make subscription-pool status lines account-aware and report
   `limits=unknown` instead of presenting shared-profile quota as selected-account
   data; existing user settings remain unchanged.
