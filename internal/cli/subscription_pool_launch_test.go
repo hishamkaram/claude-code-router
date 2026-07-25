@@ -414,27 +414,64 @@ func TestStopClaudeProcessAndWaitIsBounded(t *testing.T) {
 	}
 }
 
-func TestSubscriptionCooldownUsesRetryAfterWithCap(t *testing.T) {
+func TestSubscriptionCooldownClassifiesConfirmedAndTransientLimits(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	confirmed := func(event gateway.AnthropicSubscriptionExhaustionEvent) gateway.AnthropicSubscriptionExhaustionEvent {
+		event.RepresentativeClaim = gateway.AnthropicRateLimitClaimFiveHour
+		return event
+	}
 	tests := []struct {
 		name  string
 		event gateway.AnthropicSubscriptionExhaustionEvent
 		want  time.Duration
 	}{
-		{name: "default", want: defaultSubscriptionCooldown},
-		{name: "duration", event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterDuration: time.Hour}, want: time.Hour},
-		{name: "date", event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterTime: now.Add(2 * time.Hour)}, want: 2 * time.Hour},
+		{name: "unclassified default", want: defaultTransientRateLimitCooldown},
 		{
-			name: "unified reset before retry after",
+			name:  "unclassified retry after",
+			event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterDuration: 30 * time.Second},
+			want:  30 * time.Second,
+		},
+		{
+			name:  "unclassified cap",
+			event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterTime: now.Add(time.Hour)},
+			want:  maxTransientRateLimitCooldown,
+		},
+		{
+			name: "model fallback uses transient retry after",
 			event: gateway.AnthropicSubscriptionExhaustionEvent{
+				RepresentativeClaim: gateway.AnthropicRateLimitClaimSevenDayOpus,
+				FallbackAvailable:   true,
+				RetryAfterDuration:  time.Minute,
+				RetryAfterTime:      now.Add(7 * 24 * time.Hour),
+			},
+			want: time.Minute,
+		},
+		{name: "confirmed default", event: confirmed(gateway.AnthropicSubscriptionExhaustionEvent{}), want: defaultSubscriptionCooldown},
+		{
+			name:  "confirmed duration",
+			event: confirmed(gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterDuration: time.Hour}),
+			want:  time.Hour,
+		},
+		{
+			name:  "confirmed date",
+			event: confirmed(gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterTime: now.Add(2 * time.Hour)}),
+			want:  2 * time.Hour,
+		},
+		{
+			name: "confirmed unified reset before retry after",
+			event: confirmed(gateway.AnthropicSubscriptionExhaustionEvent{
 				RetryAfterDuration: time.Hour,
 				RetryAfterTime:     now.Add(2 * time.Hour),
-			},
+			}),
 			want: 2 * time.Hour,
 		},
-		{name: "cap", event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterDuration: 72 * time.Hour}, want: maxSubscriptionCooldown},
+		{
+			name:  "confirmed cap",
+			event: confirmed(gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterDuration: 72 * time.Hour}),
+			want:  maxSubscriptionCooldown,
+		},
 	}
 	for _, test := range tests {
 		test := test
@@ -443,6 +480,55 @@ func TestSubscriptionCooldownUsesRetryAfterWithCap(t *testing.T) {
 			got := subscriptionCooldownUntil(now, test.event)
 			if got.Sub(now) != test.want {
 				t.Fatalf("cooldown = %s, want %s", got.Sub(now), test.want)
+			}
+		})
+	}
+}
+
+func TestSubscriptionRateLimitClassification(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		event       gateway.AnthropicSubscriptionExhaustionEvent
+		confirmed   bool
+		failure     string
+		description string
+	}{
+		{
+			name: "unclassified", failure: "transient_rate_limit",
+			description: "received an unclassified rate limit",
+		},
+		{
+			name:    "fallback without claim",
+			event:   gateway.AnthropicSubscriptionExhaustionEvent{FallbackAvailable: true},
+			failure: "model_rate_limit", description: "hit a model limit",
+		},
+		{
+			name: "model limit",
+			event: gateway.AnthropicSubscriptionExhaustionEvent{
+				RepresentativeClaim: gateway.AnthropicRateLimitClaimSevenDayOpus, FallbackAvailable: true,
+			},
+			failure: "model_limit_seven_day_opus", description: "hit model limit seven_day_opus",
+		},
+		{
+			name:      "account limit",
+			event:     gateway.AnthropicSubscriptionExhaustionEvent{RepresentativeClaim: gateway.AnthropicRateLimitClaimFiveHour},
+			confirmed: true, failure: "subscription_limit_five_hour",
+			description: "reached subscription limit five_hour",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := confirmedAccountSubscriptionLimit(test.event); got != test.confirmed {
+				t.Fatalf("confirmedAccountSubscriptionLimit() = %t, want %t", got, test.confirmed)
+			}
+			if got := subscriptionRateLimitFailureClass(test.event); got != test.failure {
+				t.Fatalf("subscriptionRateLimitFailureClass() = %q, want %q", got, test.failure)
+			}
+			if got := subscriptionRateLimitDescription(test.event); !strings.Contains(got, test.description) {
+				t.Fatalf("subscriptionRateLimitDescription() = %q, want substring %q", got, test.description)
 			}
 		})
 	}

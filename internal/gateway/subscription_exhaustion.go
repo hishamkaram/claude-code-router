@@ -10,17 +10,36 @@ import (
 )
 
 const (
-	anthropicUnifiedRateLimitStatusHeader = "Anthropic-Ratelimit-Unified-Status"
-	anthropicUnifiedRateLimitResetHeader  = "Anthropic-Ratelimit-Unified-Reset"
-	anthropicUnifiedRateLimitRejected     = "rejected"
+	anthropicUnifiedRateLimitStatusHeader              = "Anthropic-Ratelimit-Unified-Status"
+	anthropicUnifiedRateLimitResetHeader               = "Anthropic-Ratelimit-Unified-Reset"
+	anthropicUnifiedRateLimitRepresentativeClaimHeader = "Anthropic-Ratelimit-Unified-Representative-Claim"
+	anthropicUnifiedRateLimitFallbackHeader            = "Anthropic-Ratelimit-Unified-Fallback"
+	anthropicUnifiedRateLimitRejected                  = "rejected"
+	anthropicUnifiedRateLimitFallbackAvailable         = "available"
+)
+
+// AnthropicRateLimitClaim is a closed set of quota buckets observed from
+// Claude Code's first-party response metadata.
+type AnthropicRateLimitClaim uint8
+
+const (
+	AnthropicRateLimitClaimUnknown AnthropicRateLimitClaim = iota
+	AnthropicRateLimitClaimFiveHour
+	AnthropicRateLimitClaimSevenDay
+	AnthropicRateLimitClaimSevenDayOpus
+	AnthropicRateLimitClaimSevenDaySonnet
+	AnthropicRateLimitClaimSevenDayOAuthApps
+	AnthropicRateLimitClaimOverage
 )
 
 // AnthropicSubscriptionExhaustionEvent reports safe metadata from a first-party
 // Anthropic response that explicitly identifies subscription quota exhaustion.
 type AnthropicSubscriptionExhaustionEvent struct {
-	StatusCode         int
-	RetryAfterDuration time.Duration
-	RetryAfterTime     time.Time
+	StatusCode          int
+	RetryAfterDuration  time.Duration
+	RetryAfterTime      time.Time
+	RepresentativeClaim AnthropicRateLimitClaim
+	FallbackAvailable   bool
 }
 
 func (h *handler) notifyAnthropicSubscriptionExhaustion(
@@ -57,7 +76,16 @@ func (h *handler) isFirstPartyAnthropicPassThrough(provider store.Provider, auth
 }
 
 func newAnthropicSubscriptionExhaustionEvent(resp *http.Response) AnthropicSubscriptionExhaustionEvent {
-	event := AnthropicSubscriptionExhaustionEvent{StatusCode: resp.StatusCode}
+	event := AnthropicSubscriptionExhaustionEvent{
+		StatusCode: resp.StatusCode,
+		RepresentativeClaim: normalizeAnthropicRateLimitClaim(
+			resp.Header.Get(anthropicUnifiedRateLimitRepresentativeClaimHeader),
+		),
+		FallbackAvailable: strings.EqualFold(
+			strings.TrimSpace(resp.Header.Get(anthropicUnifiedRateLimitFallbackHeader)),
+			anthropicUnifiedRateLimitFallbackAvailable,
+		),
+	}
 	if resetAt, ok := parseAnthropicUnifiedRateLimitReset(resp.Header); ok {
 		event.RetryAfterTime = resetAt
 	}
@@ -75,6 +103,44 @@ func newAnthropicSubscriptionExhaustionEvent(resp *http.Response) AnthropicSubsc
 		event.RetryAfterTime = retryAfterTime
 	}
 	return event
+}
+
+func normalizeAnthropicRateLimitClaim(value string) AnthropicRateLimitClaim {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "five_hour":
+		return AnthropicRateLimitClaimFiveHour
+	case "seven_day":
+		return AnthropicRateLimitClaimSevenDay
+	case "seven_day_opus":
+		return AnthropicRateLimitClaimSevenDayOpus
+	case "seven_day_sonnet":
+		return AnthropicRateLimitClaimSevenDaySonnet
+	case "seven_day_oauth_apps":
+		return AnthropicRateLimitClaimSevenDayOAuthApps
+	case "overage":
+		return AnthropicRateLimitClaimOverage
+	default:
+		return AnthropicRateLimitClaimUnknown
+	}
+}
+
+func (claim AnthropicRateLimitClaim) String() string {
+	switch claim {
+	case AnthropicRateLimitClaimFiveHour:
+		return "five_hour"
+	case AnthropicRateLimitClaimSevenDay:
+		return "seven_day"
+	case AnthropicRateLimitClaimSevenDayOpus:
+		return "seven_day_opus"
+	case AnthropicRateLimitClaimSevenDaySonnet:
+		return "seven_day_sonnet"
+	case AnthropicRateLimitClaimSevenDayOAuthApps:
+		return "seven_day_oauth_apps"
+	case AnthropicRateLimitClaimOverage:
+		return "overage"
+	default:
+		return "unknown"
+	}
 }
 
 func parseAnthropicUnifiedRateLimitReset(header http.Header) (time.Time, bool) {

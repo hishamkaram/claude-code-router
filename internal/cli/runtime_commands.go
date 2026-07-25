@@ -40,16 +40,18 @@ authentication. Pass --model <alias> when you want that CCR alias to be the
 startup model.
 
 Use --auth-mode subscription-pool to select a registered local Claude account
-for this process. On confirmed subscription exhaustion, eligible interactive
-launches rotate only by ending Claude Code and relaunching with the next account.
-Plain launches use --continue; an explicit --resume, optionally combined with a
-named --worktree, is replayed unchanged. Launch output says whether rotation is
-enabled. --print, --claude-account, managed CUA, prompts, and other passthrough
-arguments disable rotation. CCR never changes identity inside a running process.
+for this process. On an explicit rejected first-party quota response, eligible
+interactive launches rotate only by ending Claude Code and relaunching with the
+next account. Plain launches use --continue; an explicit --resume, optionally
+combined with a named --worktree, is replayed unchanged. Launch output says
+whether rotation is enabled. --print, --claude-account, managed CUA, prompts,
+and other passthrough arguments disable rotation. CCR never changes identity
+inside a running process.
 
 Pool launches use a launch-only account-aware status line by default, including
-account=<name> and limits=unknown. CCR cannot query account-scoped subscription
-quota from a Claude Code OAuth token and does not reuse shared-profile values.
+account=<name> and limits=unknown. CCR does not use Claude Code's private
+advisory quota service for routing or reuse shared-profile values. Run
+ccr claude-account test <name> --live for an explicit best-effort quota check.
 Use --no-statusline only when you intentionally want to opt out.
 
 Use ccr launch --help for router-specific help. To ask Claude Code for its own

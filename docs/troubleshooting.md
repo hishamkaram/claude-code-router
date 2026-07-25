@@ -275,6 +275,7 @@ Inspect local account state:
 ccr claude-account list
 ccr claude-account show <name>
 ccr claude-account test <name>
+ccr claude-account test --all --live
 ```
 
 `list` and `show` report redacted metadata only. A status of `disabled`,
@@ -305,6 +306,20 @@ claude setup-token
 ccr claude-account refresh <name> --oauth-token-stdin
 ```
 
+`test --all --live` reports a non-reversible identity fingerprint for each
+token and fails when fingerprints are duplicated. It also reports known
+five-hour, seven-day, and model-specific utilization and reset windows. The
+probe is advisory and can fail when Claude Code's private usage service changes;
+pool routing does not depend on it.
+
+An HTTP 403 from the private profile service does not prove that a setup token
+is invalid for model requests. Some inference-valid tokens cannot access the
+advisory profile endpoint, and the usage endpoint may be independently rate
+limited. In that case CCR reports the diagnostic failure without changing
+account state. Use a pinned `--claude-account <name> --print` request to verify
+that exact identity, and rely on the gateway's first-party quota response for
+cooldown classification.
+
 `claude setup-token` does not replace the CLI's saved login. That shared login
 can remain visible in the UI for every launch while model requests use the
 selected label's stored token.
@@ -314,19 +329,25 @@ keychain credential, `ccr launch --auth-mode subscription-pool` fails visibly.
 CCR does not silently fall back to your default Claude login or an Anthropic API
 key.
 
-If several accounts entered cooldown after a temporary service throttle, update
-CCR to a version that distinguishes Anthropic's unified rate-limit status,
-verify the accounts independently, then clear the stale state with
-`clear-cooldown`. This command does not contact Anthropic or change keychain
-credentials, expiry, or enablement.
+Current CCR versions also distinguish account-wide subscription claims from
+model limits with fallback available and unclassified rejections. The latter
+states are capped at five minutes instead of inheriting a long unified reset.
+`claude-account list` shows `until=<timestamp>` and `reason=<class>` for every
+active cooldown. Schema v8 automatically clears only the legacy generic
+`rate_limited` marker so the next rejection can be classified accurately. For
+any other state you have independently verified as stale, use `clear-cooldown`;
+it does not contact Anthropic or change keychain credentials, expiry, or
+enablement.
 
 ## Subscription Pool Relaunch Did Not Happen
 
 Automatic relaunch requires a first-party Anthropic `/v1/messages` HTTP 429
 whose `anthropic-ratelimit-unified-status` response header is `rejected`.
-Temporary or ambiguous 429 responses are left to Claude Code's retry handling
-and intentionally do not trigger account rotation. Confirmed exhaustion only
-relaunches a plain interactive or explicitly resumable launch:
+Rejected model limits and unclassified rejections rotate with only a bounded
+transient cooldown; a representative account-wide claim with no fallback uses
+Anthropic's longer reset. Other temporary or ambiguous 429 responses are left
+to Claude Code's retry handling. Pool rotation only relaunches a plain
+interactive or explicitly resumable launch:
 
 ```bash
 ccr launch --auth-mode subscription-pool

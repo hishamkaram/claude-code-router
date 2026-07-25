@@ -49,8 +49,13 @@ func TestLiveConfiguredProviderAutoModeAgentWebFetch(t *testing.T) {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
 	prompt := `Use the Agent tool to launch one general-purpose subagent. The subagent must use WebFetch on https://example.com and then return exactly CCR_LIVE_REAL_WEBFETCH_CHILD_OK. After the subagent finishes, reply exactly CCR_LIVE_REAL_WEBFETCH_PARENT_OK. Do not use Bash or shell.`
-	out, errOut, modelAlias := runConfiguredProviderProbeWithAuthMode(t, ctx, "preserve", prompt)
-	assertConfiguredProviderProbeWithAuthMode(t, out, errOut, modelAlias, "preserve", "CCR_LIVE_REAL_WEBFETCH_PARENT_OK")
+	auth := configuredLiveRealFirstPartyAuth()
+	out, errOut, modelAlias := runConfiguredProviderProbeWithAuthMode(
+		t, ctx, auth.mode, prompt, auth.accountArgs()...,
+	)
+	assertConfiguredProviderProbeWithAuthMode(
+		t, out, errOut, modelAlias, auth.mode, "CCR_LIVE_REAL_WEBFETCH_PARENT_OK",
+	)
 }
 
 func TestLiveConfiguredProviderAutoModeWorkflow(t *testing.T) {
@@ -80,11 +85,16 @@ return result
 		"After the workflow completes, reply exactly CCR_LIVE_REAL_WORKFLOW_PARENT_OK. Do not use Bash or shell."
 	input := liveStreamInput(t, "/model sonnet", prompt)
 	dbPath := configuredLiveDBPath(t)
-	out, errOut, err := runLiveCommand(
-		ctx, Dependencies{In: strings.NewReader(input)},
-		"--db", dbPath, "launch", "--print", "--auth-mode", "preserve",
+	auth := configuredLiveRealFirstPartyAuth()
+	args := []string{"--db", dbPath, "launch", "--print"}
+	args = append(args, auth.args()...)
+	args = append(args,
 		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "auto", "--tools", "Workflow",
+	)
+	out, errOut, err := runLiveCommand(
+		ctx, Dependencies{In: strings.NewReader(input)},
+		args...,
 	)
 	if err != nil {
 		failLiveRealCommand(t, "configured Anthropic-to-provider Workflow", err, out, errOut)
@@ -96,7 +106,7 @@ return result
 		}
 	}
 	for _, want := range []string{
-		"Anthropic subscription login and Anthropic API-key auth are preserved",
+		auth.diagnostic(),
 		"Registered ccr models are available in Claude Code's /model picker",
 	} {
 		if !strings.Contains(combined, want) {
@@ -159,22 +169,53 @@ func assertConfiguredProviderProbeWithAuthMode(t *testing.T, out, errOut, modelA
 	wants := []string{
 		`Selected ccr model alias "` + modelAlias + `"`,
 	}
-	if authMode == "preserve" {
-		wants = append(wants,
-			"Gateway accepts the generated local X-CCR-Session-Token",
-			"Original Anthropic subscription login and Anthropic API-key auth are preserved",
-			"Registered ccr models are available in Claude Code's /model picker",
-		)
-	} else {
-		wants = append(wants,
-			"Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN",
-			"Original Anthropic subscription login and Anthropic API-key auth are not active",
-		)
+	wants = append(wants, configuredProviderAuthDiagnostics(authMode)...)
+	if authMode != launchAuthModeGatewayToken {
+		wants = append(wants, "Registered ccr models are available in Claude Code's /model picker")
 	}
 	for _, want := range wants {
 		if !strings.Contains(combined, want) {
 			failLiveRealOutput(t, fmt.Sprintf("configured provider diagnostics missing %q", want), out, errOut)
 		}
+	}
+}
+
+func configuredProviderAuthDiagnostics(authMode string) []string {
+	switch authMode {
+	case launchAuthModePreserve:
+		return []string{
+			"Gateway accepts the generated local X-CCR-Session-Token",
+			"Original Anthropic subscription login and Anthropic API-key auth are preserved",
+		}
+	case launchAuthModeSubscriptionPool:
+		return []string{
+			"Gateway accepts the generated local X-CCR-Session-Token",
+			"Model requests use the selected account's stored OAuth token",
+			"The account name is a local CCR label",
+		}
+	default:
+		return []string{
+			"Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN",
+			"Original Anthropic subscription login and Anthropic API-key auth are not active",
+		}
+	}
+}
+
+func TestConfiguredProviderAuthDiagnosticsMatchLaunchSummary(t *testing.T) {
+	for _, authMode := range []string{
+		launchAuthModePreserve,
+		launchAuthModeGatewayToken,
+		launchAuthModeSubscriptionPool,
+	} {
+		t.Run(authMode, func(t *testing.T) {
+			var summary strings.Builder
+			writeLaunchAuthSummary(&summary, authMode)
+			for _, want := range configuredProviderAuthDiagnostics(authMode) {
+				if !strings.Contains(summary.String(), want) {
+					t.Fatalf("writeLaunchAuthSummary(%q) missing %q", authMode, want)
+				}
+			}
+		})
 	}
 }
 
@@ -329,15 +370,19 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 		)
 	}
 	input := liveStreamInput(t, messages...)
-	out, errOut, err := runLiveCommand(
-		ctx, Dependencies{In: strings.NewReader(input)},
-		"--db", dbPath, "launch", "--print",
+	args := []string{"--db", dbPath, "launch", "--print"}
+	args = append(args, configuredLiveRealFirstPartyAuth().args()...)
+	args = append(args,
 		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "auto",
 	)
+	out, errOut, err := runLiveCommand(
+		ctx, Dependencies{In: strings.NewReader(input)},
+		args...,
+	)
 	if err != nil {
 		if liveAnthropicAuthUnavailable(out + "\n" + errOut) {
-			t.Fatalf("real provider switch matrix requires valid first-party Anthropic authentication; sign in to Claude Code or configure ANTHROPIC_API_KEY, then retry; %s", liveRealOutputSummary(out, errOut))
+			t.Fatalf("real provider switch matrix requires valid first-party Anthropic authentication; sign in to Claude Code, configure ANTHROPIC_API_KEY, or set CCR_LIVE_REAL_CLAUDE_ACCOUNT to an available pooled account, then retry; %s", liveRealOutputSummary(out, errOut))
 		}
 		failLiveRealCommand(t, "real provider switch matrix", err, out, errOut)
 	}
@@ -353,6 +398,60 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 	}
 	if !strings.Contains(out, "CCR_LIVE_REAL_ANTHROPIC_INITIAL") {
 		failLiveRealOutput(t, "real provider matrix output missing first-party sentinel", out, errOut)
+	}
+}
+
+type liveRealFirstPartyAuth struct {
+	mode    string
+	account string
+}
+
+func configuredLiveRealFirstPartyAuth() liveRealFirstPartyAuth {
+	account := strings.TrimSpace(os.Getenv("CCR_LIVE_REAL_CLAUDE_ACCOUNT"))
+	if account == "" {
+		return liveRealFirstPartyAuth{mode: "preserve"}
+	}
+	return liveRealFirstPartyAuth{mode: "subscription-pool", account: account}
+}
+
+func (a liveRealFirstPartyAuth) args() []string {
+	args := []string{"--auth-mode", a.mode}
+	if a.account != "" {
+		args = append(args, "--claude-account", a.account)
+	}
+	return args
+}
+
+func (a liveRealFirstPartyAuth) accountArgs() []string {
+	if a.account == "" {
+		return nil
+	}
+	return []string{"--claude-account", a.account}
+}
+
+func (a liveRealFirstPartyAuth) diagnostic() string {
+	if a.account == "" {
+		return "Anthropic subscription login and Anthropic API-key auth are preserved"
+	}
+	return "Claude model-request account selected: " + a.account
+}
+
+func TestConfiguredLiveRealFirstPartyAuth(t *testing.T) {
+	t.Setenv("CCR_LIVE_REAL_CLAUDE_ACCOUNT", "")
+	auth := configuredLiveRealFirstPartyAuth()
+	if got, want := strings.Join(auth.args(), "\x00"), "--auth-mode\x00preserve"; got != want {
+		t.Fatalf("configuredLiveRealFirstPartyAuth().args() = %q, want %q", got, want)
+	}
+
+	t.Setenv("CCR_LIVE_REAL_CLAUDE_ACCOUNT", " account-1 ")
+	auth = configuredLiveRealFirstPartyAuth()
+	got := auth.args()
+	want := []string{"--auth-mode", "subscription-pool", "--claude-account", "account-1"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("configuredLiveRealFirstPartyAuth().args() = %q, want %q", got, want)
+	}
+	if auth.diagnostic() != "Claude model-request account selected: account-1" {
+		t.Fatalf("configuredLiveRealFirstPartyAuth().diagnostic() = %q", auth.diagnostic())
 	}
 }
 

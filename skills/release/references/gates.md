@@ -14,18 +14,45 @@
 Run the affected subset first, then the full release gate:
 
 ```bash
-go test ./...
-go test -race -count=1 -p 4 ./...
-go vet ./...
-golangci-lint run ./...
-govulncheck ./...
+make check
 make test-cua-macos-fixture
+make test-cua-docker-fixture
+make test-live-subscription-pool-fixture
 make test-live-fixture
 CCR_LIVE_REAL_MATRIX=1 make test-live-real
 CCR_LIVE_REAL_MATRIX=1 make test-live-matrix
 go test -tags=live -count=1 -p 1 ./...
 goreleaser check
 goreleaser release --snapshot --clean
+actionlint
+git diff --check
+```
+
+When the current Claude login is unavailable or exhausted, select an exact
+registered account without weakening the real matrix:
+
+```bash
+go run ./cmd/ccr claude-account test --all --live
+printf '%s\n' 'Reply exactly CCR_RELEASE_ACCOUNT_OK.' |
+  go run ./cmd/ccr launch --auth-mode subscription-pool \
+    --claude-account <name> --print
+CCR_LIVE_REAL_MATRIX=1 CCR_LIVE_REAL_CLAUDE_ACCOUNT=<name> make test-live-matrix
+```
+
+The keychain must be unlocked. Treat live profile and quota output as advisory:
+when it succeeds, resolve duplicate identity fingerprints before continuing.
+When the private service rejects an inference-valid setup token, record the
+failure and require the pinned native request to pass before using that account
+for the matrix.
+
+Run the exact uncommitted review after the final source and documentation edit:
+
+```bash
+codex review -c 'sandbox_mode="danger-full-access"' \
+  -c 'approval_policy="never"' \
+  -c 'mcp_servers.playwright.enabled=false' \
+  -c 'mcp_servers.chrome-devtools.enabled=false' \
+  --uncommitted
 ```
 
 When release claims include real vision, Anthropic CUA, OpenAI Responses CUA, or

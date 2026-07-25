@@ -72,12 +72,28 @@ func writeClaudeAccountList(
 	}
 	for index := range accounts {
 		account := &accounts[index]
+		status := claudeAccountStatus(*account, now)
+		if status == "cooldown" {
+			fmt.Fprintf(
+				out, "%s\tstatus=%s\tuntil=%s\treason=%s\tlast_used=%s\n",
+				account.Name, status, account.CooldownUntil,
+				displayClaudeAccountFailure(account.LastError), displayTimestamp(account.LastUsedAt),
+			)
+			continue
+		}
 		fmt.Fprintf(
 			out, "%s\tstatus=%s\tlast_used=%s\n",
-			account.Name, claudeAccountStatus(*account, now), displayTimestamp(account.LastUsedAt),
+			account.Name, status, displayTimestamp(account.LastUsedAt),
 		)
 	}
 	return nil
+}
+
+func displayClaudeAccountFailure(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func newClaudeAccountShowCommand(ctx context.Context, opts *options) *cobra.Command {
