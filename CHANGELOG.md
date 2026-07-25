@@ -10,6 +10,16 @@ lives under `docs/acceptance/`.
 - Make subscription-pool status lines account-aware and report
   `limits=unknown` instead of presenting shared-profile quota as selected-account
   data; existing user settings remain unchanged.
+- Classify rejected Anthropic limits by representative quota claim and fallback
+  availability, retaining long cooldowns only for account-wide exhaustion and
+  bounding model or unclassified cooldowns to five minutes.
+- Add `ccr claude-account test --all --live` for advisory per-account quota
+  windows and non-reversible identity fingerprints, including duplicate-login
+  detection.
+- Clear legacy unclassified `rate_limited` cooldowns automatically during the
+  schema v8 migration so the next request records the precise failure class.
+- Let the required real provider matrix use an exact registered account through
+  `CCR_LIVE_REAL_CLAUDE_ACCOUNT`.
 - Support automatic confirmed-quota rotation for interactive
   `--resume <session-id>` launches, optionally with a named `--worktree`, while
   preserving the original continuity arguments.

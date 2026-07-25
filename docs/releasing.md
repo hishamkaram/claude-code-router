@@ -53,7 +53,11 @@ builds the release Docker browser image and exercises its published loopback
 CDP endpoint through a real screenshot. The default real target uses first-party
 Anthropic authentication and every configured non-blocked routable alias in the
 selected database; set `CCR_LIVE_CONFIGURED_DB` when the release matrix is not
-in the default data directory. Opt-in local real targets cover vision,
+in the default data directory. Set
+`CCR_LIVE_REAL_CLAUDE_ACCOUNT=<registered-account>` when the matrix must use an
+exact subscription-pool account instead of the currently logged-in Claude
+identity. The named account must be available from the active OS keychain.
+Opt-in local real targets cover vision,
 Anthropic client-managed CUA, OpenAI Responses managed CUA, and CUA executors.
 If a required live target skips or cannot run, do not claim that the routing
 change is verified.

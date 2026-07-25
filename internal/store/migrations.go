@@ -245,6 +245,30 @@ func (s *Store) migrateV6ToV7(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) migrateV7ToV8(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v7 to v8 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if _, err := tx.ExecContext(ctx, `
+UPDATE claude_accounts
+SET cooldown_until = '', last_error = ''
+WHERE last_error = 'rate_limited'
+`); err != nil {
+		return fmt.Errorf("clearing legacy unclassified account cooldowns: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 8 WHERE id = 1 AND version = 7`); err != nil {
+		return fmt.Errorf("updating schema version to 8: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v7 to v8 migration: %w", err)
+	}
+	return nil
+}
+
 func tableColumnExists(ctx context.Context, tx *sql.Tx, table, name string) (bool, error) {
 	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {

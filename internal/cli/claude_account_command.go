@@ -43,6 +43,7 @@ Examples:
   ccr claude-account import work --oauth-token-stdin
   ccr claude-account list
   ccr claude-account test personal
+  ccr claude-account test --all --live
   ccr claude-account clear-cooldown --all
   ccr claude-account refresh personal --from current
   ccr claude-account disable work
@@ -386,37 +387,6 @@ func saveClaudeAccount(ctx context.Context, s *store.Store, account store.Claude
 		return fmt.Errorf("adding Claude account %q: %w", account.Name, err)
 	}
 	return nil
-}
-
-func newClaudeAccountTestCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
-	return &cobra.Command{
-		Use:   "test <name>",
-		Short: "Verify that a registered account credential resolves locally",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateName("Claude account name", args[0]); err != nil {
-				return err
-			}
-			s, _, err := openMigratedStore(ctx, opts)
-			if err != nil {
-				return err
-			}
-			defer closeStore(s)
-			account, err := s.GetClaudeAccount(ctx, args[0])
-			if err != nil {
-				return err
-			}
-			token, err := deps.Secrets.Resolve(ctx, account.AccessTokenRef)
-			if err != nil {
-				return fmt.Errorf("resolving Claude account %q credential: %w", account.Name, err)
-			}
-			if _, err := claudeaccount.ValidateToken(token); err != nil {
-				return fmt.Errorf("claude account %q credential is invalid", account.Name)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Claude account %s: passed (credential resolved; no network request)\n", account.Name)
-			return nil
-		},
-	}
 }
 
 func newClaudeAccountEnableCommand(ctx context.Context, opts *options, enabled bool) *cobra.Command {

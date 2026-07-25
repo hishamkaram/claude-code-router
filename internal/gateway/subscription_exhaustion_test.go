@@ -33,6 +33,7 @@ func TestGatewayFirstPartyAnthropic429ReportsSubscriptionExhaustion(t *testing.T
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set(anthropicUnifiedRateLimitStatusHeader, anthropicUnifiedRateLimitRejected)
+		w.Header().Set(anthropicUnifiedRateLimitRepresentativeClaimHeader, "five_hour")
 		w.Header().Set("Retry-After", "7")
 		w.Header().Set("X-Upstream-Secret", headerSecret)
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -68,6 +69,10 @@ func TestGatewayFirstPartyAnthropic429ReportsSubscriptionExhaustion(t *testing.T
 	}
 	if event.RetryAfterDuration != 7*time.Second || !event.RetryAfterTime.IsZero() {
 		t.Fatalf("event retry metadata = duration %s time %s, want 7s and zero time", event.RetryAfterDuration, event.RetryAfterTime)
+	}
+	if event.RepresentativeClaim != AnthropicRateLimitClaimFiveHour || event.FallbackAvailable {
+		t.Fatalf("event classification = claim %s fallback %t, want five_hour and false",
+			event.RepresentativeClaim, event.FallbackAvailable)
 	}
 	assertSubscriptionEventHasNoRawData(t, event, []string{
 		headerSecret,
@@ -317,6 +322,33 @@ func TestAnthropicSubscriptionExhaustionEventPrefersUnifiedReset(t *testing.T) {
 	event := newAnthropicSubscriptionExhaustionEvent(resp)
 	if !event.RetryAfterTime.Equal(resetAt) || event.RetryAfterDuration != 7*time.Second {
 		t.Fatalf("event = %#v, want reset-at %s and retry duration 7s", event, resetAt)
+	}
+}
+
+func TestAnthropicSubscriptionExhaustionEventValidatesClassificationHeaders(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		claim        string
+		fallback     string
+		wantClaim    AnthropicRateLimitClaim
+		wantFallback bool
+	}{
+		{name: "valid", claim: " Seven_Day_Opus ", fallback: " AVAILABLE ", wantClaim: AnthropicRateLimitClaimSevenDayOpus, wantFallback: true},
+		{name: "unsafe claim", claim: "five_hour\nsecret", fallback: "available", wantFallback: true},
+		{name: "unknown claim", claim: "future_limit", wantClaim: AnthropicRateLimitClaimUnknown},
+		{name: "unknown fallback", claim: "five_hour", fallback: "yes", wantClaim: AnthropicRateLimitClaimFiveHour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)}
+			resp.Header.Set(anthropicUnifiedRateLimitRepresentativeClaimHeader, tc.claim)
+			resp.Header.Set(anthropicUnifiedRateLimitFallbackHeader, tc.fallback)
+			event := newAnthropicSubscriptionExhaustionEvent(resp)
+			if event.RepresentativeClaim != tc.wantClaim || event.FallbackAvailable != tc.wantFallback {
+				t.Fatalf("classification = claim %s fallback %t, want %s and %t",
+					event.RepresentativeClaim, event.FallbackAvailable, tc.wantClaim, tc.wantFallback)
+			}
+		})
 	}
 }
 

@@ -112,6 +112,7 @@ ccr claude-account import work --oauth-token-stdin
 ccr claude-account list
 ccr claude-account show personal
 ccr claude-account test personal
+ccr claude-account test --all --live
 ccr claude-account clear-cooldown personal
 ccr claude-account clear-cooldown --all
 ccr claude-account refresh personal --from current
@@ -136,18 +137,29 @@ the label's stored OAuth token, while Claude's UI profile and cached usage may
 still show the shared local login. CCR does not swap model-request credentials
 inside a running process.
 CCR treats a first-party Anthropic HTTP 429 as subscription exhaustion only
-when Anthropic explicitly reports a rejected unified usage limit. Temporary or
-ambiguous 429 responses remain with Claude Code for its normal retry handling
-and do not cool the account. During a plain interactive pool launch, confirmed
-exhaustion marks the account cooling down, stops Claude Code, and relaunches
-with the next account using `--continue`. Automatic relaunch also supports an
+when Anthropic reports a rejected unified usage limit with a representative
+claim and no available model fallback. A rejected model limit with fallback
+available, or a rejection without a representative claim, receives only a
+bounded transient cooldown. Other temporary or ambiguous 429 responses remain
+with Claude Code for its normal retry handling. During a plain interactive pool
+launch, either rejection rotates to the next account, but only confirmed
+account-wide exhaustion retains Anthropic's longer reset. Automatic relaunch
+also supports an
 interactive `--resume <session-id>`, optionally combined with a named
 `--worktree`; CCR replays those continuity arguments unchanged. It remains
 disabled for `--print`, `--claude-account`, managed CUA, prompts, and other
 passthrough arguments. Launch stderr reports whether rotation is enabled and
-why. Other launches fail visibly and tell you to select another usable account.
-Use `clear-cooldown` after independently verifying a false or stale cooldown;
-it does not change credentials, expiry, or enablement.
+why. `claude-account list` reports the cooldown deadline and safe reason class.
+Other launches fail visibly and tell you to select another usable account. Use
+`clear-cooldown` after independently verifying a false or stale cooldown; it
+does not change credentials, expiry, or enablement.
+
+`claude-account test --all --live` resolves every keychain credential, queries
+the same advisory profile and usage services used by Claude Code, and reports a
+non-reversible identity fingerprint plus known quota-window utilization and
+reset times. Matching fingerprints identify labels backed by the same
+subscription. This diagnostic fails visibly when the private service is
+unavailable; routing does not depend on it.
 
 ### Scripted Setup
 
@@ -338,7 +350,10 @@ job validates the portable helper protocol fixtures and compiles the source-buil
 preview helper. The default real target uses first-party Anthropic
 authentication and every configured non-blocked routable alias in the selected
 database. `test-live-matrix` runs the fixture target plus that default real
-target locally. Real vision, Anthropic CUA, OpenAI Responses CUA, and executor
+target locally. Set `CCR_LIVE_REAL_CLAUDE_ACCOUNT=<name>` to run the matrix's
+first-party Anthropic checks with that exact registered subscription-pool
+account instead of the currently logged-in Claude identity. Real vision,
+Anthropic CUA, OpenAI Responses CUA, and executor
 coverage stay opt-in through the individual `test-live-real-*` targets or the
 `test-live-real-full` aggregate; skipped real tests are not evidence of a
 verified runtime route.

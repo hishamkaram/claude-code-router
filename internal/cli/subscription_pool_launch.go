@@ -16,10 +16,12 @@ import (
 )
 
 const (
-	defaultSubscriptionCooldown = 15 * time.Minute
-	credentialFailureCooldown   = 5 * time.Minute
-	maxSubscriptionCooldown     = 24 * time.Hour
-	claudeProcessStopTimeout    = 5 * time.Second
+	defaultSubscriptionCooldown       = 15 * time.Minute
+	defaultTransientRateLimitCooldown = time.Minute
+	maxTransientRateLimitCooldown     = 5 * time.Minute
+	credentialFailureCooldown         = 5 * time.Minute
+	maxSubscriptionCooldown           = 24 * time.Hour
+	claudeProcessStopTimeout          = 5 * time.Second
 )
 
 type selectedClaudeAccount struct {
@@ -111,7 +113,10 @@ func runSubscriptionPoolLaunch(
 		}
 		excluded = append(excluded, selected.Account.Name)
 		cooldownUntil := subscriptionCooldownUntil(time.Now().UTC(), rateLimited.Event)
-		if markErr := markClaudeAccountExhausted(ctx, opts, selected.Account.Name, cooldownUntil); markErr != nil {
+		failureClass := subscriptionRateLimitFailureClass(rateLimited.Event)
+		if markErr := markClaudeAccountRateLimited(
+			ctx, opts, selected.Account.Name, cooldownUntil, failureClass,
+		); markErr != nil {
 			return errors.Join(err, markErr)
 		}
 		if rateLimited.CleanupErr != nil {
@@ -119,8 +124,9 @@ func runSubscriptionPoolLaunch(
 		}
 		if !relaunch.enabled {
 			return fmt.Errorf(
-				"claude account %q is rate limited until %s; select another account or clear a false cooldown with ccr claude-account clear-cooldown %s: %w",
+				"claude account %q %s; unavailable until %s; select another account or clear a false cooldown with ccr claude-account clear-cooldown %s: %w",
 				selected.Account.Name,
+				subscriptionRateLimitDescription(rateLimited.Event),
 				cooldownUntil.Format(time.RFC3339),
 				selected.Account.Name,
 				err,
@@ -128,8 +134,9 @@ func runSubscriptionPoolLaunch(
 		}
 		fmt.Fprintf(
 			cmd.ErrOrStderr(),
-			"Claude account %s is rate limited until %s; relaunching with the next available account.\n",
+			"Claude account %s %s; unavailable until %s; relaunching with the next available account.\n",
 			selected.Account.Name,
+			subscriptionRateLimitDescription(rateLimited.Event),
 			cooldownUntil.Format(time.RFC3339),
 		)
 		attempt.claudeArgs = append([]string(nil), relaunch.args...)
@@ -217,7 +224,7 @@ func (s *subscriptionPoolContinuityState) accept(option string, inline bool) boo
 
 func writeSubscriptionRotationNotice(out io.Writer, plan subscriptionPoolRelaunchPlan) {
 	if plan.enabled {
-		fmt.Fprintln(out, "Automatic account rotation: enabled for confirmed subscription exhaustion.")
+		fmt.Fprintln(out, "Automatic account rotation: enabled for rejected first-party quota responses.")
 		return
 	}
 	fmt.Fprintf(out, "Automatic account rotation: disabled because %s.\n", plan.reason)
@@ -326,18 +333,19 @@ func noUsableClaudeAccountError(explicitName string) error {
 	)
 }
 
-func markClaudeAccountExhausted(
+func markClaudeAccountRateLimited(
 	ctx context.Context,
 	opts *options,
 	name string,
 	cooldownUntil time.Time,
+	failureClass string,
 ) error {
 	s, _, err := openMigratedStore(ctx, opts)
 	if err != nil {
 		return err
 	}
 	defer closeStore(s)
-	if err := s.MarkClaudeAccountFailure(ctx, name, cooldownUntil, "rate_limited"); err != nil {
+	if err := s.MarkClaudeAccountFailure(ctx, name, cooldownUntil, failureClass); err != nil {
 		return fmt.Errorf("marking Claude account %q rate limited: %w", name, err)
 	}
 	return nil
@@ -347,6 +355,9 @@ func subscriptionCooldownUntil(
 	now time.Time,
 	event gateway.AnthropicSubscriptionExhaustionEvent,
 ) time.Time {
+	if !confirmedAccountSubscriptionLimit(event) {
+		return now.Add(transientRateLimitCooldown(now, event))
+	}
 	cooldown := defaultSubscriptionCooldown
 	if event.RetryAfterTime.After(now) {
 		cooldown = event.RetryAfterTime.Sub(now)
@@ -360,6 +371,57 @@ func subscriptionCooldownUntil(
 		cooldown = defaultSubscriptionCooldown
 	}
 	return now.Add(cooldown)
+}
+
+func transientRateLimitCooldown(
+	now time.Time,
+	event gateway.AnthropicSubscriptionExhaustionEvent,
+) time.Duration {
+	cooldown := defaultTransientRateLimitCooldown
+	if event.RetryAfterDuration > 0 {
+		cooldown = event.RetryAfterDuration
+	} else if event.RetryAfterTime.After(now) {
+		cooldown = event.RetryAfterTime.Sub(now)
+	}
+	if cooldown > maxTransientRateLimitCooldown {
+		return maxTransientRateLimitCooldown
+	}
+	if cooldown <= 0 {
+		return defaultTransientRateLimitCooldown
+	}
+	return cooldown
+}
+
+func confirmedAccountSubscriptionLimit(event gateway.AnthropicSubscriptionExhaustionEvent) bool {
+	return event.RepresentativeClaim != gateway.AnthropicRateLimitClaimUnknown && !event.FallbackAvailable
+}
+
+func subscriptionRateLimitFailureClass(event gateway.AnthropicSubscriptionExhaustionEvent) string {
+	claim := event.RepresentativeClaim.String()
+	switch {
+	case event.FallbackAvailable && event.RepresentativeClaim != gateway.AnthropicRateLimitClaimUnknown:
+		return "model_limit_" + claim
+	case event.FallbackAvailable:
+		return "model_rate_limit"
+	case event.RepresentativeClaim != gateway.AnthropicRateLimitClaimUnknown:
+		return "subscription_limit_" + claim
+	default:
+		return "transient_rate_limit"
+	}
+}
+
+func subscriptionRateLimitDescription(event gateway.AnthropicSubscriptionExhaustionEvent) string {
+	claim := event.RepresentativeClaim.String()
+	switch {
+	case event.FallbackAvailable && event.RepresentativeClaim != gateway.AnthropicRateLimitClaimUnknown:
+		return fmt.Sprintf("hit model limit %s (Anthropic reports fallback available)", claim)
+	case event.FallbackAvailable:
+		return "hit a model limit (Anthropic reports fallback available)"
+	case event.RepresentativeClaim != gateway.AnthropicRateLimitClaimUnknown:
+		return fmt.Sprintf("reached subscription limit %s", claim)
+	default:
+		return "received an unclassified rate limit"
+	}
 }
 
 func selectedClaudeAccountToken(account *selectedClaudeAccount) string {
@@ -395,7 +457,8 @@ func writeSubscriptionStatuslineNotice(
 	}
 	fmt.Fprintf(
 		out,
-		"Subscription limits for account %s: unknown (CCR has no account-scoped quota source and will not reuse shared-profile data).\n",
+		"Subscription limits for account %s: unknown in the status line (use ccr claude-account test %s --live for advisory quota; routing does not reuse shared-profile data).\n",
+		account.Account.Name,
 		account.Account.Name,
 	)
 	if replacedExisting {

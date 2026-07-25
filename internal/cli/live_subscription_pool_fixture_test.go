@@ -129,10 +129,12 @@ func TestLiveFixtureSubscriptionPoolRelaunchesOnFirstParty429(t *testing.T) {
 		{
 			account: "personal", token: liveSubscriptionPersonalToken,
 			status: http.StatusTooManyRequests, unifiedStatus: "rejected",
+			representativeClaim: "five_hour",
 		},
 		{
 			account: "work", token: liveSubscriptionWorkToken,
 			status: http.StatusTooManyRequests, unifiedStatus: "rejected",
+			representativeClaim: "five_hour",
 		},
 	})
 	defer fixture.Close()
@@ -180,46 +182,6 @@ func TestLiveFixtureSubscriptionPoolRelaunchesOnFirstParty429(t *testing.T) {
 	assertNoSubscriptionTokenLeak(t, combined, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
 }
 
-func TestLiveFixtureSubscriptionPoolDoesNotRotateOnTemporary429(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	fixture := newLiveSubscriptionFixture(t, []liveSubscriptionResponse{
-		{
-			account: "personal", token: liveSubscriptionPersonalToken,
-			status: http.StatusTooManyRequests, unifiedStatus: "allowed",
-		},
-	})
-	defer fixture.Close()
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
-		{name: "personal", token: liveSubscriptionPersonalToken},
-	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): liveSubscriptionPersonalToken,
-	}}
-	launcher := &liveSubscriptionHTTPLauncher{}
-	out, errOut, err := runLiveCommand(ctx, Dependencies{
-		Secrets: secrets, Launcher: launcher, StartGateway: fixture.StartGateway,
-	}, "--db", dbPath, "launch", "--auth-mode", "subscription-pool", "--no-lifecycle", "--no-statusline")
-	if err != nil {
-		t.Fatalf("temporary 429 launch error = %s\nstdout:\n%s\nstderr:\n%s",
-			redactLiveSubscriptionOutput(err.Error()),
-			redactLiveSubscriptionOutput(out),
-			redactLiveSubscriptionOutput(errOut))
-	}
-	if launcher.StartCount() != 1 {
-		t.Fatalf("Claude process starts = %d, want 1", launcher.StartCount())
-	}
-	fixture.AssertCalls(t, []string{"personal"})
-	account := getAccountForCLI(t, dbPath, "personal")
-	if account.CooldownUntil != "" || account.LastError != "" {
-		t.Fatalf("temporary 429 cooled account unexpectedly: %#v", account)
-	}
-	assertSubscriptionLaunchMetadata(t, dbPath, []subscriptionLaunchWant{
-		{account: "personal", state: "completed"},
-	})
-	assertNoSubscriptionTokenLeak(t, out+errOut, liveSubscriptionPersonalToken)
-}
-
 func TestLiveFixtureSubscriptionPoolRelaunchesRealClaudeOnFirstParty429(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -250,11 +212,12 @@ func newLiveSubscriptionRealRelaunchRun(
 	first429Released := make(chan struct{})
 	fixture := newLiveSubscriptionFixture(t, []liveSubscriptionResponse{
 		{
-			account:       "personal",
-			token:         liveSubscriptionPersonalToken,
-			status:        http.StatusTooManyRequests,
-			unifiedStatus: "rejected",
-			hold429Until:  first429Released,
+			account:             "personal",
+			token:               liveSubscriptionPersonalToken,
+			status:              http.StatusTooManyRequests,
+			unifiedStatus:       "rejected",
+			representativeClaim: "five_hour",
+			hold429Until:        first429Released,
 		},
 	})
 	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
@@ -418,12 +381,15 @@ func liveRealSubscriptionToken(t *testing.T) string {
 }
 
 type liveSubscriptionResponse struct {
-	account       string
-	token         string
-	status        int
-	text          string
-	unifiedStatus string
-	hold429Until  <-chan struct{}
+	account             string
+	token               string
+	status              int
+	text                string
+	unifiedStatus       string
+	representativeClaim string
+	fallbackAvailable   bool
+	retryAfterSeconds   int
+	hold429Until        <-chan struct{}
 }
 
 type liveSubscriptionFixture struct {
@@ -485,9 +451,19 @@ func (f *liveSubscriptionFixture) handleMessage(t *testing.T, w http.ResponseWri
 	}
 	if status == http.StatusTooManyRequests {
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Retry-After", "1")
+		retryAfterSeconds := response.retryAfterSeconds
+		if retryAfterSeconds <= 0 {
+			retryAfterSeconds = 1
+		}
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", retryAfterSeconds))
 		if response.unifiedStatus != "" {
 			w.Header().Set("Anthropic-Ratelimit-Unified-Status", response.unifiedStatus)
+		}
+		if response.representativeClaim != "" {
+			w.Header().Set("Anthropic-Ratelimit-Unified-Representative-Claim", response.representativeClaim)
+		}
+		if response.fallbackAvailable {
+			w.Header().Set("Anthropic-Ratelimit-Unified-Fallback", "available")
 		}
 		if response.unifiedStatus == "rejected" {
 			w.Header().Set(

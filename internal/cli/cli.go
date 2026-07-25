@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hishamkaram/claude-code-router/internal/buildinfo"
+	"github.com/hishamkaram/claude-code-router/internal/claudeaccount"
 	"github.com/hishamkaram/claude-code-router/internal/config"
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
@@ -25,6 +26,7 @@ type Dependencies struct {
 	StartGateway           func(context.Context, gateway.Config) (*gateway.Server, error)
 	StartManagedCUA        func(context.Context, managedCUAStart) (*managedCUALaunch, error)
 	ValidateExternalCUAURL func(context.Context, string) error
+	ProbeClaudeAccount     func(context.Context, string) (claudeaccount.AccountDiagnostics, error)
 }
 
 type options struct {
@@ -76,6 +78,10 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	}
 	if deps.ValidateExternalCUAURL == nil {
 		deps.ValidateExternalCUAURL = validateExternalCUAURL
+	}
+	if deps.ProbeClaudeAccount == nil {
+		client := claudeaccount.NewDiagnosticsClient(nil)
+		deps.ProbeClaudeAccount = client.Probe
 	}
 	opts := &options{}
 	cmd := &cobra.Command{
