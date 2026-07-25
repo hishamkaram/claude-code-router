@@ -166,6 +166,22 @@ WHERE name = ?
 	return requireAffected("store.ClearClaudeAccountFailure", "Claude account", name, result)
 }
 
+func (s *Store) ClearAllClaudeAccountFailures(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE claude_accounts
+SET cooldown_until = '', last_error = '', updated_at = ?
+WHERE cooldown_until != '' OR last_error != ''
+`, runtimeTimestamp())
+	if err != nil {
+		return 0, fmt.Errorf("store.ClearAllClaudeAccountFailures: updating accounts: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("store.ClearAllClaudeAccountFailures: reading affected account count: %w", err)
+	}
+	return affected, nil
+}
+
 func (s *Store) ClaimClaudeAccount(ctx context.Context, now time.Time, excluded []string) (ClaudeAccount, bool, error) {
 	query, args, err := buildClaimClaudeAccountQuery(now, excluded)
 	if err != nil {

@@ -244,6 +244,8 @@ Enable or replace credentials explicitly:
 
 ```bash
 ccr claude-account enable <name>
+ccr claude-account clear-cooldown <name>
+ccr claude-account clear-cooldown --all
 ccr claude-account refresh <name> --from current
 claude setup-token
 ccr claude-account refresh <name> --oauth-token-stdin
@@ -259,10 +261,19 @@ keychain credential, `ccr launch --auth-mode subscription-pool` fails visibly.
 CCR does not silently fall back to your default Claude login or an Anthropic API
 key.
 
+If several accounts entered cooldown after a temporary service throttle, update
+CCR to a version that distinguishes Anthropic's unified rate-limit status,
+verify the accounts independently, then clear the stale state with
+`clear-cooldown`. This command does not contact Anthropic or change keychain
+credentials, expiry, or enablement.
+
 ## Subscription Pool Relaunch Did Not Happen
 
-Automatic relaunch after a first-party Anthropic HTTP 429 only applies to a
-plain interactive launch:
+Automatic relaunch requires a first-party Anthropic `/v1/messages` HTTP 429
+whose `anthropic-ratelimit-unified-status` response header is `rejected`.
+Temporary or ambiguous 429 responses are left to Claude Code's retry handling
+and intentionally do not trigger account rotation. Confirmed exhaustion only
+relaunches a plain interactive launch:
 
 ```bash
 ccr launch --auth-mode subscription-pool

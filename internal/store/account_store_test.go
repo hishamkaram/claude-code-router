@@ -107,6 +107,39 @@ func TestClaudeAccountFailureState(t *testing.T) {
 	}
 }
 
+func TestClearAllClaudeAccountFailures(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	for _, name := range []string{"main", "personal", "ready"} {
+		if _, err := s.AddClaudeAccount(ctx, testClaudeAccount(name, testAccountTime(24*time.Hour))); err != nil {
+			t.Fatalf("AddClaudeAccount(%s) error = %v", name, err)
+		}
+	}
+	for _, name := range []string{"main", "personal"} {
+		if err := s.MarkClaudeAccountFailure(ctx, name, testAccountTime(10*time.Minute), "rate_limited"); err != nil {
+			t.Fatalf("MarkClaudeAccountFailure(%s) error = %v", name, err)
+		}
+	}
+
+	affected, err := s.ClearAllClaudeAccountFailures(ctx)
+	if err != nil {
+		t.Fatalf("ClearAllClaudeAccountFailures() error = %v", err)
+	}
+	if affected != 2 {
+		t.Fatalf("ClearAllClaudeAccountFailures() affected = %d, want 2", affected)
+	}
+	for _, name := range []string{"main", "personal", "ready"} {
+		account, getErr := s.GetClaudeAccount(ctx, name)
+		if getErr != nil {
+			t.Fatalf("GetClaudeAccount(%s) error = %v", name, getErr)
+		}
+		if account.CooldownUntil != "" || account.LastError != "" {
+			t.Fatalf("account %s retained failure state: %#v", name, account)
+		}
+	}
+}
+
 func TestClaudeAccountNormalizesNullScopesToArray(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

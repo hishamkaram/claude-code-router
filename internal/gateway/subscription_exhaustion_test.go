@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -31,6 +32,7 @@ func TestGatewayFirstPartyAnthropic429ReportsSubscriptionExhaustion(t *testing.T
 			t.Fatalf("anthropic auth = %q, want incoming subscription auth", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(anthropicUnifiedRateLimitStatusHeader, anthropicUnifiedRateLimitRejected)
 		w.Header().Set("Retry-After", "7")
 		w.Header().Set("X-Upstream-Secret", headerSecret)
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -86,6 +88,7 @@ func TestGatewayFirstPartyAnthropic429DropsUnreadSubscriptionSink(t *testing.T) 
 	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set(anthropicUnifiedRateLimitStatusHeader, anthropicUnifiedRateLimitRejected)
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = fmt.Fprint(w, upstreamBody)
 	}))
@@ -120,6 +123,7 @@ func TestGatewaySubscriptionExhaustionEventOnlyFiresForFirstPartyAnthropic429(t 
 		var upstreamCalls atomic.Int32
 		anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			upstreamCalls.Add(1)
+			w.Header().Set(anthropicUnifiedRateLimitStatusHeader, anthropicUnifiedRateLimitRejected)
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = fmt.Fprint(w, `{"error":"registered provider 429"}`)
 		}))
@@ -156,6 +160,7 @@ func TestGatewayOpenAI429DoesNotReportSubscriptionExhaustion(t *testing.T) {
 		provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			upstreamCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set(anthropicUnifiedRateLimitStatusHeader, anthropicUnifiedRateLimitRejected)
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = fmt.Fprint(w, `{"error":{"message":"OpenAI-compatible provider exhausted"}}`)
 		}))
@@ -184,6 +189,65 @@ func TestGatewayOpenAI429DoesNotReportSubscriptionExhaustion(t *testing.T) {
 	})
 }
 
+func TestGatewayFirstPartyAmbiguous429DoesNotReportSubscriptionExhaustion(t *testing.T) {
+	for _, status := range []string{"", "allowed", "unexpected"} {
+		name := status
+		if name == "" {
+			name = "missing unified status"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			events := make(chan AnthropicSubscriptionExhaustionEvent, 1)
+			const upstreamBody = `{"type":"error","error":{"type":"rate_limit_error","message":"temporary throttle"}}`
+			anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if status != "" {
+					w.Header().Set(anthropicUnifiedRateLimitStatusHeader, status)
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = fmt.Fprint(w, upstreamBody)
+			}))
+			defer anthropic.Close()
+			server := startFirstPartySubscriptionGateway(t, ctx, anthropic.URL, events)
+			defer shutdownGateway(t, ctx, server)
+
+			resp := postSubscriptionGatewayMessage(t, ctx, server, "claude-opus-4-7")
+			defer resp.Body.Close()
+			raw, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("reading gateway response: %v", err)
+			}
+			if resp.StatusCode != http.StatusTooManyRequests || string(raw) != upstreamBody {
+				t.Fatalf("gateway response status=%d body=%q, want preserved 429 body", resp.StatusCode, raw)
+			}
+			assertNoSubscriptionEvent(t, events)
+		})
+	}
+}
+
+func TestGatewayFirstPartyCountTokens429DoesNotReportSubscriptionExhaustion(t *testing.T) {
+	ctx := context.Background()
+	events := make(chan AnthropicSubscriptionExhaustionEvent, 1)
+	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages/count_tokens" {
+			t.Fatalf("anthropic path = %q, want /v1/messages/count_tokens", r.URL.Path)
+		}
+		w.Header().Set(anthropicUnifiedRateLimitStatusHeader, anthropicUnifiedRateLimitRejected)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = fmt.Fprint(w, `{"type":"error","error":{"type":"rate_limit_error","message":"count throttle"}}`)
+	}))
+	defer anthropic.Close()
+	server := startFirstPartySubscriptionGateway(t, ctx, anthropic.URL, events)
+	defer shutdownGateway(t, ctx, server)
+
+	resp := postSubscriptionGatewayCountTokens(t, ctx, server, "claude-opus-4-7")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("gateway status = %d, want 429", resp.StatusCode)
+	}
+	assertNoSubscriptionEvent(t, events)
+}
+
 func TestGatewayFirstPartyNon429DoesNotReportSubscriptionExhaustion(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -208,6 +272,7 @@ func TestGatewayFirstPartyNon429DoesNotReportSubscriptionExhaustion(t *testing.T
 			anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				upstreamCalls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set(anthropicUnifiedRateLimitStatusHeader, anthropicUnifiedRateLimitRejected)
 				w.WriteHeader(tc.status)
 				_, _ = fmt.Fprint(w, tc.body)
 			}))
@@ -240,6 +305,21 @@ func TestAnthropicSubscriptionExhaustionEventParsesRetryAfterDate(t *testing.T) 
 	}
 }
 
+func TestAnthropicSubscriptionExhaustionEventPrefersUnifiedReset(t *testing.T) {
+	resetAt := time.Date(2026, 7, 25, 12, 30, 0, 0, time.UTC)
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header: http.Header{
+			anthropicUnifiedRateLimitResetHeader: []string{strconv.FormatInt(resetAt.Unix(), 10)},
+			"Retry-After":                        []string{"7"},
+		},
+	}
+	event := newAnthropicSubscriptionExhaustionEvent(resp)
+	if !event.RetryAfterTime.Equal(resetAt) || event.RetryAfterDuration != 7*time.Second {
+		t.Fatalf("event = %#v, want reset-at %s and retry duration 7s", event, resetAt)
+	}
+}
+
 func startFirstPartySubscriptionGateway(
 	t *testing.T,
 	ctx context.Context,
@@ -267,6 +347,29 @@ func postSubscriptionGatewayMessage(t *testing.T, ctx context.Context, server *S
 	t.Cleanup(cancel)
 	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, model)
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	req.Header.Set("Authorization", "Bearer anthropic-session")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	return resp
+}
+
+func postSubscriptionGatewayCountTokens(t *testing.T, ctx context.Context, server *Server, model string) *http.Response {
+	t.Helper()
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	t.Cleanup(cancel)
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, model)
+	req, err := http.NewRequestWithContext(
+		reqCtx,
+		http.MethodPost,
+		server.URL()+"/v1/messages/count_tokens",
+		strings.NewReader(body),
+	)
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}

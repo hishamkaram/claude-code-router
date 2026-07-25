@@ -110,6 +110,8 @@ ccr claude-account import work --oauth-token-stdin
 ccr claude-account list
 ccr claude-account show personal
 ccr claude-account test personal
+ccr claude-account clear-cooldown personal
+ccr claude-account clear-cooldown --all
 ccr claude-account refresh personal --from current
 ccr claude-account disable work
 ccr claude-account enable work
@@ -129,13 +131,17 @@ exclusive lifetime lease; overlapping launches can reuse an account after each
 eligible account has been selected. An explicit `--claude-account` selects only
 that account and never rotates to another one. Claude Code account identity is fixed
 for the launched process; CCR does not swap identity inside a running session.
-If a first-party Anthropic route returns HTTP 429 during a plain interactive
-pool launch, CCR marks that account cooling down, stops Claude Code, and
-relaunches with the next account using `--continue`. That automatic relaunch is
-only for `ccr launch --auth-mode subscription-pool` without `--print`, without
+CCR treats a first-party Anthropic HTTP 429 as subscription exhaustion only
+when Anthropic explicitly reports a rejected unified usage limit. Temporary or
+ambiguous 429 responses remain with Claude Code for its normal retry handling
+and do not cool the account. During a plain interactive pool launch, confirmed
+exhaustion marks the account cooling down, stops Claude Code, and relaunches
+with the next account using `--continue`. That automatic relaunch is only for
+`ccr launch --auth-mode subscription-pool` without `--print`, without
 `--claude-account`, without managed CUA options, and without extra Claude Code
-arguments. Other launches fail visibly and tell you to rerun after selecting
-another usable account.
+arguments. Other launches fail visibly and tell you to select another usable
+account. Use `clear-cooldown` after independently verifying a false or stale
+cooldown; it does not change credentials, expiry, or enablement.
 
 ### Scripted Setup
 

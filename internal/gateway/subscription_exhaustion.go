@@ -9,18 +9,34 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
+const (
+	anthropicUnifiedRateLimitStatusHeader = "Anthropic-Ratelimit-Unified-Status"
+	anthropicUnifiedRateLimitResetHeader  = "Anthropic-Ratelimit-Unified-Reset"
+	anthropicUnifiedRateLimitRejected     = "rejected"
+)
+
 // AnthropicSubscriptionExhaustionEvent reports safe metadata from a first-party
-// Anthropic HTTP 429 response.
+// Anthropic response that explicitly identifies subscription quota exhaustion.
 type AnthropicSubscriptionExhaustionEvent struct {
 	StatusCode         int
 	RetryAfterDuration time.Duration
 	RetryAfterTime     time.Time
 }
 
-func (h *handler) notifyAnthropicSubscriptionExhaustion(resp *http.Response, provider store.Provider, authMode anthropicAuthMode) {
+func (h *handler) notifyAnthropicSubscriptionExhaustion(
+	resp *http.Response,
+	provider store.Provider,
+	authMode anthropicAuthMode,
+	resource string,
+) {
 	if h.cfg.AnthropicSubscriptionExhaustion == nil ||
+		resource != "messages" ||
 		resp.StatusCode != http.StatusTooManyRequests ||
-		!h.isFirstPartyAnthropicPassThrough(provider, authMode) {
+		!h.isFirstPartyAnthropicPassThrough(provider, authMode) ||
+		!strings.EqualFold(
+			strings.TrimSpace(resp.Header.Get(anthropicUnifiedRateLimitStatusHeader)),
+			anthropicUnifiedRateLimitRejected,
+		) {
 		return
 	}
 	event := newAnthropicSubscriptionExhaustionEvent(resp)
@@ -42,6 +58,9 @@ func (h *handler) isFirstPartyAnthropicPassThrough(provider store.Provider, auth
 
 func newAnthropicSubscriptionExhaustionEvent(resp *http.Response) AnthropicSubscriptionExhaustionEvent {
 	event := AnthropicSubscriptionExhaustionEvent{StatusCode: resp.StatusCode}
+	if resetAt, ok := parseAnthropicUnifiedRateLimitReset(resp.Header); ok {
+		event.RetryAfterTime = resetAt
+	}
 	retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After"))
 	if retryAfter == "" {
 		return event
@@ -52,10 +71,19 @@ func newAnthropicSubscriptionExhaustionEvent(resp *http.Response) AnthropicSubsc
 		}
 		return event
 	}
-	if retryAfterTime, err := http.ParseTime(retryAfter); err == nil {
+	if retryAfterTime, err := http.ParseTime(retryAfter); err == nil && event.RetryAfterTime.IsZero() {
 		event.RetryAfterTime = retryAfterTime
 	}
 	return event
+}
+
+func parseAnthropicUnifiedRateLimitReset(header http.Header) (time.Time, bool) {
+	raw := strings.TrimSpace(header.Get(anthropicUnifiedRateLimitResetHeader))
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds < 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(seconds, 0).UTC(), true
 }
 
 func normalizedBaseURL(value string) string {

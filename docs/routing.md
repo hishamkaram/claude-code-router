@@ -138,6 +138,8 @@ ccr claude-account import <name> --oauth-token-stdin
 ccr claude-account list
 ccr claude-account show <name>
 ccr claude-account test <name>
+ccr claude-account clear-cooldown <name>
+ccr claude-account clear-cooldown --all
 ccr claude-account refresh <name> --from current
 ccr claude-account refresh <name> --oauth-token-stdin
 ccr claude-account enable <name>
@@ -164,11 +166,15 @@ cannot be resolved. With `--claude-account`, CCR selects only that account;
 disabled, expired, cooling, or credential-unavailable state fails visibly and
 does not rotate to another account.
 
-First-party Anthropic HTTP 429 responses are treated as subscription
-exhaustion only when the gateway is using the selected account on the
-first-party Anthropic pass-through route. Registered Anthropic-compatible
-providers and OpenAI-compatible providers do not trigger pool cooldown or
-relaunch behavior from their 429 responses.
+First-party Anthropic HTTP 429 responses are treated as subscription exhaustion
+only when the gateway is using the selected account on `/v1/messages` and the
+response explicitly reports `anthropic-ratelimit-unified-status: rejected`.
+The unified reset timestamp is preferred when setting the cooldown. A missing,
+`allowed`, or unrecognized unified status is treated as temporary or ambiguous:
+CCR forwards the response unchanged for Claude Code's normal retry handling and
+does not cool or rotate the account. Token-count 429 responses, registered
+Anthropic-compatible providers, and OpenAI-compatible providers do not trigger
+pool cooldown or relaunch behavior.
 
 Automatic relaunch is intentionally narrow. It runs only for a plain interactive
 pool launch: no `--print`, no explicit `--claude-account`, no managed CUA
@@ -180,6 +186,11 @@ If all accounts are disabled, expired, cooling down, excluded, or
 credential-unavailable, the launch fails with an all-exhausted message; CCR
 never silently falls back to the default Claude login, Anthropic API key, or
 another provider.
+
+`clear-cooldown <name>` and `clear-cooldown --all` clear only cooldown and
+last-error metadata. Use them after independently confirming that a cooldown is
+false or stale. They do not enable accounts, extend expiry, test service-side
+quota, or modify keychain credentials.
 
 Secrets remain local. SQLite stores only account metadata and keyring refs,
 which CLI output redacts as `keyring:***`; OAuth token values are stored only in
