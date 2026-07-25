@@ -248,7 +248,11 @@ func newLiveSubscriptionGitProject(t *testing.T, ctx context.Context) string {
 				strings.Join(args, " "), err, output)
 		}
 	}
-	return projectDir
+	canonicalDir, err := filepath.EvalSymlinks(projectDir)
+	if err != nil {
+		t.Fatalf("canonicalizing live subscription fixture project: %v", err)
+	}
+	return canonicalDir
 }
 
 func trustLiveSubscriptionProject(t *testing.T, configDir, projectDir string) {
