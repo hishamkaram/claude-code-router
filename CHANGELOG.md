@@ -5,6 +5,16 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.1
+
+- Distinguish confirmed Anthropic unified quota rejection from temporary or
+  ambiguous HTTP 429 responses before cooling and rotating subscription
+  accounts.
+- Prefer Anthropic's unified reset timestamp for confirmed quota cooldowns and
+  exclude token-count throttles from account exhaustion handling.
+- Add `ccr claude-account clear-cooldown <name>` and `--all` recovery commands
+  that preserve account credentials, expiry, and enablement.
+
 ## v0.4.0
 
 - Add local Claude subscription account pools with keychain-backed account

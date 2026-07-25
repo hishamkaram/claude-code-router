@@ -250,6 +250,14 @@ func TestSubscriptionCooldownUsesRetryAfterWithCap(t *testing.T) {
 		{name: "default", want: defaultSubscriptionCooldown},
 		{name: "duration", event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterDuration: time.Hour}, want: time.Hour},
 		{name: "date", event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterTime: now.Add(2 * time.Hour)}, want: 2 * time.Hour},
+		{
+			name: "unified reset before retry after",
+			event: gateway.AnthropicSubscriptionExhaustionEvent{
+				RetryAfterDuration: time.Hour,
+				RetryAfterTime:     now.Add(2 * time.Hour),
+			},
+			want: 2 * time.Hour,
+		},
 		{name: "cap", event: gateway.AnthropicSubscriptionExhaustionEvent{RetryAfterDuration: 72 * time.Hour}, want: maxSubscriptionCooldown},
 	}
 	for _, test := range tests {

@@ -198,6 +198,8 @@ ccr claude-account import work --oauth-token-stdin
 ccr claude-account list
 ccr claude-account show personal
 ccr claude-account test personal
+ccr claude-account clear-cooldown personal
+ccr claude-account clear-cooldown --all
 ccr claude-account refresh personal --from current
 ccr claude-account disable work
 ccr claude-account enable work
@@ -217,12 +219,14 @@ enabled, unexpired, non-cooling account. The timestamp provides load balancing,
 not an exclusive lifetime lease; overlapping launches may reuse accounts.
 `--claude-account <name>` selects only that account. Account identity is fixed
 for the Claude Code process; there is no in-process identity swap. If a plain
-interactive pool launch hits a first-party Anthropic HTTP 429, CCR marks the
-account cooling down, stops Claude Code, and relaunches with the next usable
-account using `--continue`. This automatic
-relaunch applies only when the launch has no `--print`, no `--claude-account`,
-no managed CUA options, and no extra Claude Code arguments. If every account is
-disabled, expired, cooling down, or has an unavailable credential, CCR fails
+interactive pool launch receives a first-party Anthropic HTTP 429 with an
+explicit rejected unified usage-limit status, CCR marks the account cooling
+down, stops Claude Code, and relaunches with the next usable account using
+`--continue`. Temporary or ambiguous 429 responses stay with Claude Code for
+normal retry handling and do not cool the account. Automatic relaunch applies
+only when the launch has no `--print`, no `--claude-account`, no managed CUA
+options, and no extra Claude Code arguments. If every account is disabled,
+expired, cooling down, or has an unavailable credential, CCR fails
 visibly instead of falling back to the default Claude login.
 
 Claude subscription account pools are for local individual use. Teams,

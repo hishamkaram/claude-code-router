@@ -49,7 +49,7 @@ test-live-fixture:
 	$(GO) test -tags=live -count=1 -p 1 -run '^(TestLiveFixture.*|TestLiveClaudeConformanceMatrix|TestLiveLaunchOpenAIProviderStreamsAgentToolInput|TestLiveLaunchOpenAIProviderRunsDynamicWorkflow|TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent)$$' ./internal/cli
 
 test-live-subscription-pool-fixture:
-	$(GO) test -tags=live -count=1 -p 1 -run '^TestLiveFixtureSubscriptionPool(FirstParty|RelaunchesOnFirstParty429|RelaunchesRealClaudeOnFirstParty429)$$' ./internal/cli
+	$(GO) test -tags=live -count=1 -p 1 -run '^TestLiveFixtureSubscriptionPool(FirstParty|RelaunchesOnFirstParty429|DoesNotRotateOnTemporary429|RelaunchesRealClaudeOnFirstParty429)$$' ./internal/cli
 
 test-live-real-routing:
 	@test "$$CCR_LIVE_REAL_MATRIX" = "1" || (echo "CCR_LIVE_REAL_MATRIX=1 is required" >&2; exit 1)

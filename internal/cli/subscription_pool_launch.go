@@ -104,8 +104,11 @@ func runSubscriptionPoolLaunch(
 		}
 		if !automaticRelaunch {
 			return fmt.Errorf(
-				"claude account %q is rate limited until %s; rerun the command to select another account: %w",
-				selected.Account.Name, cooldownUntil.Format(time.RFC3339), err,
+				"claude account %q is rate limited until %s; select another account or clear a false cooldown with ccr claude-account clear-cooldown %s: %w",
+				selected.Account.Name,
+				cooldownUntil.Format(time.RFC3339),
+				selected.Account.Name,
+				err,
 			)
 		}
 		fmt.Fprintf(
@@ -224,7 +227,7 @@ func noUsableClaudeAccountError(explicitName string) error {
 		)
 	}
 	return fmt.Errorf(
-		"claude subscription pool has no usable accounts; run ccr claude-account list and refresh, enable, or add an account",
+		"claude subscription pool has no usable accounts; run ccr claude-account list and refresh, enable, clear-cooldown, or add an account",
 	)
 }
 
@@ -250,10 +253,10 @@ func subscriptionCooldownUntil(
 	event gateway.AnthropicSubscriptionExhaustionEvent,
 ) time.Time {
 	cooldown := defaultSubscriptionCooldown
-	if event.RetryAfterDuration > 0 {
-		cooldown = event.RetryAfterDuration
-	} else if event.RetryAfterTime.After(now) {
+	if event.RetryAfterTime.After(now) {
 		cooldown = event.RetryAfterTime.Sub(now)
+	} else if event.RetryAfterDuration > 0 {
+		cooldown = event.RetryAfterDuration
 	}
 	if cooldown > maxSubscriptionCooldown {
 		cooldown = maxSubscriptionCooldown

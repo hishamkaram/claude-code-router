@@ -33,7 +33,8 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	provider := *providerOverride
-	endpoint, err := anthropicEndpoint(provider.BaseURL, anthropicResourceFromPath(r.URL.Path))
+	resource := anthropicResourceFromPath(r.URL.Path)
+	endpoint, err := anthropicEndpoint(provider.BaseURL, resource)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())
 		return observability.TokenUsage{}
@@ -71,7 +72,7 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	h.notifyAnthropicSubscriptionExhaustion(resp, provider, authMode)
+	h.notifyAnthropicSubscriptionExhaustion(resp, provider, authMode, resource)
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	return copyProviderResponseBody(w, resp, responseModel)

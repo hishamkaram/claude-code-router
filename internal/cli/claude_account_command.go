@@ -40,6 +40,7 @@ Examples:
   ccr claude-account import work --oauth-token-stdin
   ccr claude-account list
   ccr claude-account test personal
+  ccr claude-account clear-cooldown --all
   ccr claude-account refresh personal --from current
   ccr claude-account disable work
   ccr launch --auth-mode subscription-pool`,
@@ -49,6 +50,7 @@ Examples:
 		newClaudeAccountListCommand(ctx, opts),
 		newClaudeAccountShowCommand(ctx, opts),
 		newClaudeAccountTestCommand(ctx, opts, deps),
+		newClaudeAccountClearCooldownCommand(ctx, opts),
 		newClaudeAccountRefreshCommand(ctx, opts, deps),
 		newClaudeAccountEnableCommand(ctx, opts, true),
 		newClaudeAccountEnableCommand(ctx, opts, false),
