@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,11 +35,17 @@ func TestSubscriptionPoolLaunchSelectsAccountAndRecordsAuth(t *testing.T) {
 	if launcher.starts != 1 || !launcher.hasEnv("CLAUDE_CODE_OAUTH_TOKEN=personal-oauth-token") {
 		t.Fatalf("launcher starts=%d env=%s", launcher.starts, launcher.environmentSummary())
 	}
+	if !launcher.hasEnv(statuslineClaudeAccountEnv + "=personal") {
+		t.Fatalf("launcher did not expose selected status-line account: %s", launcher.environmentSummary())
+	}
 	if !launcher.unsetsEnv("ANTHROPIC_API_KEY") || !launcher.unsetsEnv("ANTHROPIC_AUTH_TOKEN") {
 		t.Fatalf("launcher did not remove higher-precedence auth: %s", launcher.environmentSummary())
 	}
-	if !strings.Contains(errOut, "Claude account selected: personal") {
+	if !strings.Contains(errOut, "Claude model-request account selected: personal") {
 		t.Fatalf("selection was not visible: stdout=%q stderr=%q", out, errOut)
+	}
+	if !strings.Contains(errOut, "account-aware status line is disabled") {
+		t.Fatalf("disabled status-line warning was not visible: %q", errOut)
 	}
 	if strings.Contains(out+errOut, "personal-oauth-token") {
 		t.Fatal("launch output leaked the selected OAuth token")
@@ -54,6 +62,56 @@ func TestSubscriptionPoolLaunchSelectsAccountAndRecordsAuth(t *testing.T) {
 	}
 	if !strings.Contains(statusOut, "Launch auth: mode=subscription-pool account=personal") {
 		t.Fatalf("status did not expose selected account metadata: %q", statusOut)
+	}
+}
+
+func TestSubscriptionPoolBypassesExistingStatuslineForAccountTruthfulness(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	existing := `{"statusLine":{"type":"command","command":"shared-profile-limits"}}`
+	if err := os.WriteFile(settingsPath, []byte(existing), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
+		{name: "personal", token: "personal-oauth-token"},
+	})
+	secrets := &accountTestSecrets{values: map[string]string{
+		secret.ClaudeAccountAccessTokenRef("personal"): "personal-oauth-token",
+	}}
+	launcher := &fakeLauncher{pid: 4321}
+	_, errOut, err := runCommandWithDeps(t, Dependencies{
+		Secrets: secrets, Launcher: launcher,
+	}, "--db", dbPath, "launch", "--auth-mode", "subscription-pool", "--no-lifecycle")
+	if err != nil {
+		t.Fatalf("subscription-pool launch error = %v, stderr=%q", err, errOut)
+	}
+
+	settingsJSON, ok := launcher.settingsArgValue()
+	if !ok || !strings.Contains(settingsJSON, `"statusLine"`) ||
+		!strings.Contains(settingsJSON, "__statusline") {
+		t.Fatalf("launch settings are not account-aware: %q", settingsJSON)
+	}
+	data, readErr := os.ReadFile(settingsPath)
+	if readErr != nil || string(data) != existing {
+		t.Fatalf("existing settings changed: %q, %v", data, readErr)
+	}
+	for _, want := range []string{
+		"Subscription limits for account personal: unknown",
+		"Existing Claude statusLine bypassed for this launch",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Fatalf("status-line notice missing %q: %s", want, errOut)
+		}
+	}
+	launches := loadSubscriptionLaunches(t, dbPath)
+	if len(launches) != 1 || launches[0].StatuslineState != "replaced" {
+		t.Fatalf("launch status-line state = %#v", launches)
 	}
 }
 
@@ -116,6 +174,72 @@ func TestSubscriptionPoolRotatesByRelaunchingAndContinues(t *testing.T) {
 	}
 }
 
+func TestSubscriptionPoolRotatesResumedWorktreeWithOriginalArguments(t *testing.T) {
+	t.Parallel()
+
+	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
+		{name: "personal", token: "personal-oauth-token"},
+		{name: "work", token: "work-oauth-token"},
+	})
+	secrets := &accountTestSecrets{values: map[string]string{
+		secret.ClaudeAccountAccessTokenRef("personal"): "personal-oauth-token",
+		secret.ClaudeAccountAccessTokenRef("work"):     "work-oauth-token",
+	}}
+	launcher := &recordingLauncher{}
+	var gatewayStarts int
+	startGateway := func(ctx context.Context, config gateway.Config) (*gateway.Server, error) {
+		server, err := gateway.Start(ctx, config)
+		if err != nil {
+			return nil, err
+		}
+		gatewayStarts++
+		if gatewayStarts == 1 {
+			config.AnthropicSubscriptionExhaustion <- gateway.AnthropicSubscriptionExhaustionEvent{
+				StatusCode: 429, RetryAfterDuration: time.Hour,
+			}
+		}
+		return server, nil
+	}
+	resumeArgs := []string{
+		"--worktree", "mcp-stateless-ha",
+		"--resume", "fa605631-8a49-4afa-9888-ea4f7f26f26b",
+	}
+	commandArgs := append([]string{
+		"--db", dbPath, "launch", "--auth-mode", "subscription-pool",
+	}, resumeArgs...)
+	commandArgs = append(commandArgs, "--no-lifecycle", "--no-statusline")
+
+	_, errOut, err := runCommandWithDeps(t, Dependencies{
+		Secrets: secrets, Launcher: launcher, StartGateway: startGateway,
+	}, commandArgs...)
+	if err != nil {
+		t.Fatalf("resumed worktree rotation error = %v, stderr=%q", err, errOut)
+	}
+	if launcher.StartCount() != 2 {
+		t.Fatalf("Claude starts = %d, want 2", launcher.StartCount())
+	}
+	for index := 0; index < 2; index++ {
+		start := launcher.StartAt(index)
+		for argIndex := 0; argIndex < len(resumeArgs); argIndex += 2 {
+			if !containsArgPair(start.args, resumeArgs[argIndex], resumeArgs[argIndex+1]) {
+				t.Fatalf("Claude start %d args = %v, missing %s %s",
+					index, start.args, resumeArgs[argIndex], resumeArgs[argIndex+1])
+			}
+		}
+		if containsString(start.args, "--continue") {
+			t.Fatalf("Claude start %d args = %v, resume must not be replaced by --continue", index, start.args)
+		}
+	}
+	for _, want := range []string{
+		"Automatic account rotation: enabled",
+		"relaunching with the next available account",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Fatalf("resumed worktree rotation output missing %q: %s", want, errOut)
+		}
+	}
+}
+
 func TestSubscriptionPoolExplicitAccountDoesNotRotate(t *testing.T) {
 	t.Parallel()
 
@@ -135,10 +259,64 @@ func TestSubscriptionPoolExplicitAccountDoesNotRotate(t *testing.T) {
 	if subscriptionPoolCanRelaunch(invocation) {
 		t.Fatal("launches with passthrough arguments must not rotate automatically")
 	}
+	invocation.claudeArgs = []string{
+		"--worktree", "mcp-stateless-ha",
+		"--resume", "fa605631-8a49-4afa-9888-ea4f7f26f26b",
+	}
+	plan := planSubscriptionPoolRelaunch(invocation)
+	if !plan.enabled || strings.Join(plan.args, " ") != strings.Join(invocation.claudeArgs, " ") {
+		t.Fatalf("resumable worktree relaunch plan = %#v", plan)
+	}
+	invocation.claudeArgs = []string{"--worktree=mcp-stateless-ha"}
+	plan = planSubscriptionPoolRelaunch(invocation)
+	if !plan.enabled || !containsString(plan.args, "--continue") {
+		t.Fatalf("worktree relaunch plan = %#v, want appended --continue", plan)
+	}
+	for _, args := range [][]string{
+		{"--resume"},
+		{"--resume", ""},
+		{"--resume", "  "},
+		{"--worktree"},
+		{"--worktree", ""},
+		{"--worktree", "  "},
+		{"--resume", "session-id", "--chrome"},
+		{"--resume", "session-id", "--continue"},
+		{"--worktree", "one", "--worktree", "two"},
+	} {
+		invocation.claudeArgs = args
+		if subscriptionPoolCanRelaunch(invocation) {
+			t.Fatalf("unsafe Claude args %v must not rotate automatically", args)
+		}
+	}
 	invocation.claudeArgs = nil
 	invocation.cuaModeSet = true
 	if subscriptionPoolCanRelaunch(invocation) {
 		t.Fatal("managed CUA launches must not rotate automatically")
+	}
+}
+
+func containsArgPair(args []string, option, value string) bool {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == option && args[index+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSubscriptionPoolRotationNoticeExplainsEligibility(t *testing.T) {
+	t.Parallel()
+
+	var output strings.Builder
+	writeSubscriptionRotationNotice(&output, planSubscriptionPoolRelaunch(launchInvocation{}))
+	if !strings.Contains(output.String(), "Automatic account rotation: enabled") {
+		t.Fatalf("enabled rotation notice = %q", output.String())
+	}
+
+	output.Reset()
+	writeSubscriptionRotationNotice(&output, planSubscriptionPoolRelaunch(launchInvocation{printMode: true}))
+	if !strings.Contains(output.String(), "disabled because --print is a one-shot") {
+		t.Fatalf("disabled rotation notice = %q", output.String())
 	}
 }
 

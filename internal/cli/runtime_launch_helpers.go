@@ -69,7 +69,8 @@ func writeLaunchAuthSummary(out io.Writer, authMode string) {
 		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in --auth-mode gateway-token.")
 	case launchAuthModeSubscriptionPool:
 		fmt.Fprintln(out, "Gateway accepts the generated local X-CCR-Session-Token for this process.")
-		fmt.Fprintln(out, "The selected Claude account OAuth identity is fixed for this process; inherited Claude login and Anthropic API-key auth are not active.")
+		fmt.Fprintln(out, "Model requests use the selected account's stored OAuth token; inherited Anthropic API-key auth is not active.")
+		fmt.Fprintln(out, "The account name is a local CCR label; Claude UI profile and cached usage may still show the shared local login.")
 	default:
 		fmt.Fprintln(out, "Gateway accepts the generated local X-CCR-Session-Token for this process.")
 		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are preserved for first-party Anthropic routes.")

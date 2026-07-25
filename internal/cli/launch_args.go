@@ -251,7 +251,8 @@ func reservedLaunchExternalTokenEnvName(value string) bool {
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
 		"CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_USE_GATEWAY",
-		"ENABLE_TOOL_SEARCH", "CCR_LAUNCH_ID", statuslineGatewayURLEnv, statuslineTokenEnv:
+		"ENABLE_TOOL_SEARCH", "CCR_LAUNCH_ID", statuslineGatewayURLEnv, statuslineTokenEnv,
+		statuslineClaudeAccountEnv:
 		return true
 	default:
 		return false

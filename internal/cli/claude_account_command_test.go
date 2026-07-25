@@ -75,6 +75,10 @@ func TestClaudeAccountImportStoresOnlyKeychainReferences(t *testing.T) {
 	if strings.Contains(out+errOut, token) {
 		t.Fatal("claude-account import output leaked the OAuth token")
 	}
+	if !strings.Contains(out, "Account names are local labels") ||
+		!strings.Contains(out, "setup-token flow") {
+		t.Fatalf("claude-account import output missing identity guidance: %q", out)
+	}
 	ref := secret.ClaudeAccountAccessTokenRef("personal")
 	if secrets.values[ref] != token {
 		t.Fatal("OAuth token was not stored under the account keychain reference")
@@ -102,6 +106,18 @@ func TestClaudeAccountImportStoresOnlyKeychainReferences(t *testing.T) {
 	}
 	if strings.Contains(string(raw), token) {
 		t.Fatal("SQLite database contains the OAuth token")
+	}
+}
+
+func TestClaudeAccountImportGuidanceMatchesCurrentLoginSource(t *testing.T) {
+	t.Parallel()
+
+	guidance := claudeAccountImportGuidance(claudeAccountCredentialOptions{from: " current "})
+	if !strings.Contains(guidance, "subscription from the imported current login") {
+		t.Fatalf("current-login import guidance missing source: %q", guidance)
+	}
+	if strings.Contains(guidance, "setup-token flow") {
+		t.Fatalf("current-login import guidance claimed setup-token source: %q", guidance)
 	}
 }
 

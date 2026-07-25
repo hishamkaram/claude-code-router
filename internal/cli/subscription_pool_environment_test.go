@@ -9,12 +9,13 @@ func TestSubscriptionPoolEnvironmentUsesOnlySelectedOAuthToken(t *testing.T) {
 	const selectedToken = "selected-oauth-token"
 	t.Setenv("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other-account\nX-Api-Key: stale-key")
 	env := launchClaudeEnv(launchEnvironmentOptions{
-		GatewayURL:       "http://127.0.0.1:43123",
-		Token:            "gateway-session-token",
-		ObserverToken:    "observer-token",
-		LaunchID:         42,
-		AuthMode:         launchAuthModeSubscriptionPool,
-		ClaudeOAuthToken: selectedToken,
+		GatewayURL:        "http://127.0.0.1:43123",
+		Token:             "gateway-session-token",
+		ObserverToken:     "observer-token",
+		LaunchID:          42,
+		AuthMode:          launchAuthModeSubscriptionPool,
+		ClaudeOAuthToken:  selectedToken,
+		ClaudeAccountName: "personal",
 		ProviderSecretEnvNames: []string{
 			"ANTHROPIC_API_KEY",
 			"OPENROUTER_API_KEY",
@@ -24,6 +25,9 @@ func TestSubscriptionPoolEnvironmentUsesOnlySelectedOAuthToken(t *testing.T) {
 	set := environmentEntries(env.Set)
 	if set["CLAUDE_CODE_OAUTH_TOKEN"] != selectedToken {
 		t.Fatal("selected OAuth token was not set for Claude Code")
+	}
+	if set[statuslineClaudeAccountEnv] != "personal" {
+		t.Fatalf("status-line account = %q, want personal", set[statuslineClaudeAccountEnv])
 	}
 	if !strings.Contains(set["ANTHROPIC_CUSTOM_HEADERS"], "X-CCR-Session-Token: gateway-session-token") {
 		t.Fatal("gateway session header was not configured")
@@ -63,6 +67,7 @@ func TestGatewayTokenEnvironmentRemovesInheritedClaudeAuth(t *testing.T) {
 		"CLAUDE_CODE_OAUTH_TOKEN=stale-oauth",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN=stale-refresh",
 		"CLAUDE_CODE_OAUTH_SCOPES=user:inference",
+		statuslineClaudeAccountEnv + "=stale-account",
 	}
 	applied := environmentEntries(applyClaudeEnvironment(base, env))
 	for _, name := range []string{
@@ -70,6 +75,7 @@ func TestGatewayTokenEnvironmentRemovesInheritedClaudeAuth(t *testing.T) {
 		"CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
 		"CLAUDE_CODE_OAUTH_SCOPES",
+		statuslineClaudeAccountEnv,
 	} {
 		if _, exists := applied[name]; exists {
 			t.Fatalf("gateway-token preserved inherited %s", name)
@@ -99,14 +105,15 @@ func TestSubscriptionPoolLaunchSummaryDescribesProcessBoundAuth(t *testing.T) {
 	writeLaunchAuthSummary(&output, launchAuthModeSubscriptionPool)
 	summary := output.String()
 	for _, want := range []string{
-		"selected Claude account OAuth identity is fixed for this process",
-		"inherited Claude login and Anthropic API-key auth are not active",
+		"Model requests use the selected account's stored OAuth token",
+		"account name is a local CCR label",
+		"Claude UI profile and cached usage may still show the shared local login",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("subscription-pool launch summary missing %q: %s", want, summary)
 		}
 	}
-	if strings.Contains(summary, "are preserved") {
+	if strings.Contains(summary, "are preserved") || strings.Contains(summary, "UI profile is selected") {
 		t.Fatalf("subscription-pool launch summary claims inherited auth is preserved: %s", summary)
 	}
 }

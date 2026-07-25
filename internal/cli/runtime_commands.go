@@ -40,9 +40,17 @@ authentication. Pass --model <alias> when you want that CCR alias to be the
 startup model.
 
 Use --auth-mode subscription-pool to select a registered local Claude account
-for this process. CCR rotates only by ending and relaunching Claude Code; it
-never changes account identity inside a running session. Use --claude-account
-to select one account explicitly.
+for this process. On confirmed subscription exhaustion, eligible interactive
+launches rotate only by ending Claude Code and relaunching with the next account.
+Plain launches use --continue; an explicit --resume, optionally combined with a
+named --worktree, is replayed unchanged. Launch output says whether rotation is
+enabled. --print, --claude-account, managed CUA, prompts, and other passthrough
+arguments disable rotation. CCR never changes identity inside a running process.
+
+Pool launches use a launch-only account-aware status line by default, including
+account=<name> and limits=unknown. CCR cannot query account-scoped subscription
+quota from a Claude Code OAuth token and does not reuse shared-profile values.
+Use --no-statusline only when you intentionally want to opt out.
 
 Use ccr launch --help for router-specific help. To ask Claude Code for its own
 help, use ccr launch -- --help.`,
@@ -175,7 +183,8 @@ func runLaunchAttempt(
 
 	claudeSettings, err := launchClaudeSettingsArg(ctx, s, launchSettingsOptions{
 		IncludeToolDisabled: resolved.disableTools, LifecycleEnabled: !invocation.noLifecycle,
-		StatuslineEnabled: !invocation.noStatusline, GatewayURL: execution.server.URL(),
+		StatuslineEnabled: !invocation.noStatusline, AccountAwareStatusline: selectedAccount != nil,
+		GatewayURL: execution.server.URL(),
 	})
 	if err != nil {
 		return err
@@ -183,6 +192,9 @@ func runLaunchAttempt(
 	if statusErr := s.SetLaunchStatuslineState(ctx, execution.launchID, claudeSettings.StatuslineState); statusErr != nil {
 		return statusErr
 	}
+	writeSubscriptionStatuslineNotice(
+		cmd.ErrOrStderr(), selectedAccount, invocation.noStatusline, claudeSettings.ReplacedExistingStatusline,
+	)
 	if passthroughErr := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, claudeSettings.JSON != ""); passthroughErr != nil {
 		return passthroughErr
 	}
@@ -294,6 +306,9 @@ func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation la
 		return true, nil
 	}
 	if !invocation.noStatusline {
+		if invocation.authMode == launchAuthModeSubscriptionPool {
+			return true, nil
+		}
 		configured, err := claudeStatuslineConfigured()
 		if err != nil {
 			return false, err
@@ -405,6 +420,7 @@ func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Depend
 		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
 		DisableTools: resolved.disableTools, AuthMode: invocation.authMode,
 		ClaudeOAuthToken:       selectedClaudeAccountToken(execution.claudeAccount),
+		ClaudeAccountName:      selectedClaudeAccountName(execution.claudeAccount),
 		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
 	})
 	outputLock := &sync.Mutex{}

@@ -33,7 +33,10 @@ func newClaudeAccountCommand(ctx context.Context, opts *options, deps Dependenci
 CCR stores account metadata and secret references in SQLite. OAuth access and
 refresh tokens are stored only in the OS keychain. Account rotation always
 starts a new Claude Code process and is never performed inside a running
-session.
+session. Account names are local CCR labels: model requests use the stored OAuth
+token, while Claude's UI profile may still show the shared local login. Generate
+each setup token by authorizing the subscription that the label represents in
+the setup-token browser flow.
 
 Examples:
   ccr claude-account import personal --from current
@@ -177,7 +180,15 @@ func runClaudeAccountImport(
 		action = "refreshed"
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Claude account %s: %s (credentials stored in OS keychain)\n", options.name, action)
+	fmt.Fprintln(cmd.OutOrStdout(), claudeAccountImportGuidance(options))
 	return nil
+}
+
+func claudeAccountImportGuidance(options claudeAccountCredentialOptions) string {
+	if strings.TrimSpace(options.from) == "current" {
+		return "Account names are local labels; this account represents the Claude subscription from the imported current login."
+	}
+	return "Account names are local labels; this token represents the Claude subscription authorized in the setup-token flow."
 }
 
 func newClaudeAccountImport(

@@ -21,9 +21,9 @@ type liveSubscriptionPTYLauncher struct {
 	allStarts []*liveSubscriptionPTYStart
 }
 
-func newLiveSubscriptionPTYLauncher() *liveSubscriptionPTYLauncher {
+func newLiveSubscriptionPTYLauncher(projectDir string) *liveSubscriptionPTYLauncher {
 	return &liveSubscriptionPTYLauncher{
-		inner:  livePickerLauncher{started: make(chan livePickerSession, 4)},
+		inner:  livePickerLauncher{started: make(chan livePickerSession, 4), cwd: projectDir},
 		starts: make(chan *liveSubscriptionPTYStart, 4),
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,6 +30,18 @@ type selectedClaudeAccount struct {
 type subscriptionExhaustedError struct {
 	Event      gateway.AnthropicSubscriptionExhaustionEvent
 	CleanupErr error
+}
+
+type subscriptionPoolRelaunchPlan struct {
+	enabled bool
+	args    []string
+	reason  string
+}
+
+type subscriptionPoolContinuityState struct {
+	resume         bool
+	continuitySeen bool
+	worktreeSeen   bool
 }
 
 func (e *subscriptionExhaustedError) Error() string {
@@ -75,7 +89,7 @@ func runSubscriptionPoolLaunch(
 	deps Dependencies,
 	invocation launchInvocation,
 ) error {
-	automaticRelaunch := subscriptionPoolCanRelaunch(invocation)
+	relaunch := planSubscriptionPoolRelaunch(invocation)
 	excluded := []string{}
 	attempt := invocation
 	for {
@@ -85,9 +99,10 @@ func runSubscriptionPoolLaunch(
 		}
 		fmt.Fprintf(
 			cmd.ErrOrStderr(),
-			"Claude account selected: %s (identity is fixed for this Claude Code process).\n",
+			"Claude model-request account selected: %s (local label; OAuth token is fixed for this process).\n",
 			selected.Account.Name,
 		)
+		writeSubscriptionRotationNotice(cmd.ErrOrStderr(), relaunch)
 		exhaustion := make(chan gateway.AnthropicSubscriptionExhaustionEvent, 1)
 		err = runLaunchAttempt(ctx, cmd, opts, deps, attempt, &selected, exhaustion)
 		var rateLimited *subscriptionExhaustedError
@@ -102,7 +117,7 @@ func runSubscriptionPoolLaunch(
 		if rateLimited.CleanupErr != nil {
 			return err
 		}
-		if !automaticRelaunch {
+		if !relaunch.enabled {
 			return fmt.Errorf(
 				"claude account %q is rate limited until %s; select another account or clear a false cooldown with ccr claude-account clear-cooldown %s: %w",
 				selected.Account.Name,
@@ -117,15 +132,95 @@ func runSubscriptionPoolLaunch(
 			selected.Account.Name,
 			cooldownUntil.Format(time.RFC3339),
 		)
-		attempt.claudeArgs = []string{"--continue"}
+		attempt.claudeArgs = append([]string(nil), relaunch.args...)
 	}
 }
 
 func subscriptionPoolCanRelaunch(invocation launchInvocation) bool {
-	return !invocation.printMode &&
-		invocation.claudeAccount == "" &&
-		len(invocation.claudeArgs) == 0 &&
-		!invocation.cuaOptionsConfigured()
+	return planSubscriptionPoolRelaunch(invocation).enabled
+}
+
+func planSubscriptionPoolRelaunch(invocation launchInvocation) subscriptionPoolRelaunchPlan {
+	switch {
+	case invocation.printMode:
+		return subscriptionPoolRelaunchPlan{reason: "--print is a one-shot Claude Code process"}
+	case invocation.claudeAccount != "":
+		return subscriptionPoolRelaunchPlan{reason: "--claude-account pins one account"}
+	case invocation.cuaOptionsConfigured():
+		return subscriptionPoolRelaunchPlan{reason: "managed CUA launch state cannot be resumed safely"}
+	}
+	args, resumable := subscriptionPoolResumeArgs(invocation.claudeArgs)
+	if !resumable {
+		return subscriptionPoolRelaunchPlan{
+			reason: "the Claude Code arguments are not a replay-safe --resume/--continue worktree launch",
+		}
+	}
+	return subscriptionPoolRelaunchPlan{enabled: true, args: args}
+}
+
+func subscriptionPoolResumeArgs(args []string) ([]string, bool) {
+	if len(args) == 0 {
+		return []string{"--continue"}, true
+	}
+	state := subscriptionPoolContinuityState{}
+	for index := 0; index < len(args); index++ {
+		option, inlineValue, inline := strings.Cut(args[index], "=")
+		if !state.accept(option, inline) {
+			return nil, false
+		}
+		if option == "--continue" || option == "-c" {
+			continue
+		}
+		if inline && strings.TrimSpace(inlineValue) == "" {
+			return nil, false
+		}
+		if !inline {
+			index++
+			if index >= len(args) ||
+				strings.TrimSpace(args[index]) == "" ||
+				strings.HasPrefix(args[index], "-") {
+				return nil, false
+			}
+		}
+	}
+	relaunchArgs := append([]string(nil), args...)
+	if !state.resume {
+		relaunchArgs = append(relaunchArgs, "--continue")
+	}
+	return relaunchArgs, true
+}
+
+func (s *subscriptionPoolContinuityState) accept(option string, inline bool) bool {
+	switch option {
+	case "--continue", "-c":
+		if inline || s.continuitySeen {
+			return false
+		}
+		s.continuitySeen = true
+		s.resume = true
+	case "--resume", "-r":
+		if s.continuitySeen {
+			return false
+		}
+		s.continuitySeen = true
+		s.resume = true
+	case "--worktree", "-w":
+		if s.worktreeSeen {
+			return false
+		}
+		s.worktreeSeen = true
+	default:
+		return false
+	}
+	return true
+}
+
+func writeSubscriptionRotationNotice(out io.Writer, plan subscriptionPoolRelaunchPlan) {
+	if plan.enabled {
+		fmt.Fprintln(out, "Automatic account rotation: enabled for confirmed subscription exhaustion.")
+		return
+	}
+	fmt.Fprintf(out, "Automatic account rotation: disabled because %s.\n", plan.reason)
 }
 
 func claimLaunchClaudeAccount(
@@ -272,6 +367,43 @@ func selectedClaudeAccountToken(account *selectedClaudeAccount) string {
 		return ""
 	}
 	return account.OAuthToken
+}
+
+func selectedClaudeAccountName(account *selectedClaudeAccount) string {
+	if account == nil {
+		return ""
+	}
+	return account.Account.Name
+}
+
+func writeSubscriptionStatuslineNotice(
+	out io.Writer,
+	account *selectedClaudeAccount,
+	disabled bool,
+	replacedExisting bool,
+) {
+	if account == nil {
+		return
+	}
+	if disabled {
+		fmt.Fprintf(
+			out,
+			"Warning: CCR account-aware status line is disabled; subscription limits shown by Claude or an existing status line may belong to another local profile. Active account: %s.\n",
+			account.Account.Name,
+		)
+		return
+	}
+	fmt.Fprintf(
+		out,
+		"Subscription limits for account %s: unknown (CCR has no account-scoped quota source and will not reuse shared-profile data).\n",
+		account.Account.Name,
+	)
+	if replacedExisting {
+		fmt.Fprintln(
+			out,
+			"Existing Claude statusLine bypassed for this launch so another profile's subscription limits are not presented as current; use --no-statusline to opt out.",
+		)
+	}
 }
 
 func waitForClaudeProcess(

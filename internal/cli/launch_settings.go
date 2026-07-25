@@ -16,15 +16,17 @@ import (
 const observerTokenHeader = "X-CCR-Observer-Token"
 
 type launchSettingsOptions struct {
-	IncludeToolDisabled bool
-	LifecycleEnabled    bool
-	StatuslineEnabled   bool
-	GatewayURL          string
+	IncludeToolDisabled    bool
+	LifecycleEnabled       bool
+	StatuslineEnabled      bool
+	AccountAwareStatusline bool
+	GatewayURL             string
 }
 
 type launchSettingsResult struct {
-	JSON            string
-	StatuslineState string
+	JSON                       string
+	StatuslineState            string
+	ReplacedExistingStatusline bool
 }
 
 type claudeHookHandler struct {
@@ -41,6 +43,7 @@ type claudeHookMatcher struct {
 
 func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launchSettingsOptions) (launchSettingsResult, error) {
 	settings := make(map[string]any, 3)
+	result := launchSettingsResult{}
 	if err := addLaunchAvailableModels(ctx, s, options.IncludeToolDisabled, settings); err != nil {
 		return launchSettingsResult{}, err
 	}
@@ -56,7 +59,7 @@ func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launch
 		if err != nil {
 			return launchSettingsResult{}, err
 		}
-		if configured {
+		if configured && !options.AccountAwareStatusline {
 			statuslineState = "preserved"
 		} else {
 			command, err := launchStatuslineCommand()
@@ -67,16 +70,22 @@ func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launch
 				"type": "command", "command": command, "padding": 0,
 			}
 			statuslineState = "injected"
+			result.ReplacedExistingStatusline = configured
+			if configured {
+				statuslineState = "replaced"
+			}
 		}
 	}
+	result.StatuslineState = statuslineState
 	if len(settings) == 0 {
-		return launchSettingsResult{StatuslineState: statuslineState}, nil
+		return result, nil
 	}
 	encoded, err := json.Marshal(settings)
 	if err != nil {
 		return launchSettingsResult{}, fmt.Errorf("building Claude Code settings override: %w", err)
 	}
-	return launchSettingsResult{JSON: string(encoded), StatuslineState: statuslineState}, nil
+	result.JSON = string(encoded)
+	return result, nil
 }
 
 func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDisabled bool, settings map[string]any) error {

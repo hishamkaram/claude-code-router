@@ -90,9 +90,12 @@ ccr launch --no-lifecycle
 ccr launch --no-statusline
 ```
 
-CCR preserves existing Claude hooks and an existing status line. If managed
-policy prevents lifecycle hooks, runtime commands report the launch as
-unobserved rather than pretending that no agents or tasks ran.
+CCR preserves existing Claude hooks and normally preserves an existing status
+line. Subscription-pool launches instead use a launch-only account-aware line
+showing `account=<name> | limits=unknown`; this prevents shared-profile limits
+from being presented as selected-account truth without changing user settings.
+If managed policy prevents lifecycle hooks, runtime commands report the launch
+as unobserved rather than pretending that no agents or tasks ran.
 
 Start directly on one CCR alias only when you want that alias to be the startup
 model:
@@ -210,24 +213,29 @@ Import and refresh require exactly one source: `--from current` or
 `--oauth-token-stdin`. `--from current` reads the current Claude login on Linux
 and Windows. On macOS, current-login import is unsupported because Claude keeps
 that login in Keychain; use `claude setup-token` with `--oauth-token-stdin`
-instead. `ccr claude-account test <name>` verifies that the keychain credential
-resolves locally and does not make a network request. Terminal input for
-`--oauth-token-stdin` is read without echo.
+instead. Account names are local labels. The setup-token command runs a separate
+browser OAuth flow and does not replace the CLI login, so authorize the intended
+browser account for each label. `ccr claude-account test <name>` verifies that
+the keychain credential resolves locally and does not make a network request.
+Terminal input for `--oauth-token-stdin` is read without echo.
 
 Automatic pool selection atomically selects and stamps the least recently used
 enabled, unexpired, non-cooling account. The timestamp provides load balancing,
 not an exclusive lifetime lease; overlapping launches may reuse accounts.
-`--claude-account <name>` selects only that account. Account identity is fixed
-for the Claude Code process; there is no in-process identity swap. If a plain
-interactive pool launch receives a first-party Anthropic HTTP 429 with an
+`--claude-account <name>` selects only that local label. Model requests use its
+stored OAuth token, while Claude's visible profile may remain the shared local
+login; there is no in-process credential swap. If a plain interactive pool
+launch receives a first-party Anthropic HTTP 429 with an
 explicit rejected unified usage-limit status, CCR marks the account cooling
 down, stops Claude Code, and relaunches with the next usable account using
 `--continue`. Temporary or ambiguous 429 responses stay with Claude Code for
 normal retry handling and do not cool the account. Automatic relaunch applies
-only when the launch has no `--print`, no `--claude-account`, no managed CUA
-options, and no extra Claude Code arguments. If every account is disabled,
-expired, cooling down, or has an unavailable credential, CCR fails
-visibly instead of falling back to the default Claude login.
+to plain interactive launches and to an explicit `--resume <session-id>`,
+optionally with a named `--worktree`. It remains disabled for `--print`,
+`--claude-account`, managed CUA, prompts, and other passthrough arguments.
+Launch stderr reports the decision. If every account is disabled, expired,
+cooling down, or has an unavailable credential, CCR fails visibly instead of
+falling back to the default Claude login.
 
 Claude subscription account pools are for local individual use. Teams,
 automation, hosted tools, and third-party products should use Anthropic's

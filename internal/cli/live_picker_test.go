@@ -270,6 +270,7 @@ func addLivePickerModels(t *testing.T, ctx context.Context, dbPath, baseURL stri
 
 type livePickerLauncher struct {
 	started chan livePickerSession
+	cwd     string
 }
 
 type livePickerSession struct {
@@ -287,6 +288,7 @@ func (l *livePickerLauncher) Start(ctx context.Context, args []string, env Claud
 		return nil, fmt.Errorf("creating Claude Code PTY: %w", err)
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Dir = l.cwd
 	cmd.Env = applyClaudeEnvironment(os.Environ(), env)
 	if err := pty.Start(cmd); err != nil {
 		_ = pty.Close()

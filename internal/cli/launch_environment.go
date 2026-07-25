@@ -25,12 +25,13 @@ type launchEnvironmentOptions struct {
 	DisableTools           bool
 	AuthMode               string
 	ClaudeOAuthToken       string
+	ClaudeAccountName      string
 	ProviderSecretEnvNames []string
 	ExternalTokenEnv       string
 }
 
 func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
-	unset := []string{"CLAUDE_CODE_USE_GATEWAY"}
+	unset := []string{"CLAUDE_CODE_USE_GATEWAY", statuslineClaudeAccountEnv}
 	for _, name := range options.ProviderSecretEnvNames {
 		if options.AuthMode == launchAuthModePreserve && name == "ANTHROPIC_API_KEY" {
 			continue
@@ -77,6 +78,7 @@ func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
 		env.Set = append(env.Set,
 			"CLAUDE_CODE_OAUTH_TOKEN="+options.ClaudeOAuthToken,
 			"ANTHROPIC_CUSTOM_HEADERS="+gatewaySessionHeaderValue(options.Token),
+			statuslineClaudeAccountEnv+"="+options.ClaudeAccountName,
 		)
 	default:
 		env.Unset = append(env.Unset, "ANTHROPIC_AUTH_TOKEN")

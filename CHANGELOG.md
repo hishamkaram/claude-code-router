@@ -5,6 +5,17 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.2
+
+- Make subscription-pool status lines account-aware and report
+  `limits=unknown` instead of presenting shared-profile quota as selected-account
+  data; existing user settings remain unchanged.
+- Support automatic confirmed-quota rotation for interactive
+  `--resume <session-id>` launches, optionally with a named `--worktree`, while
+  preserving the original continuity arguments.
+- Print whether automatic account rotation is enabled for each pool launch and
+  why unsupported launch shapes do not rotate.
+
 ## v0.4.1
 
 - Distinguish confirmed Anthropic unified quota rejection from temporary or
