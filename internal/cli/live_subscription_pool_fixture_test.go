@@ -473,15 +473,12 @@ func (f *liveSubscriptionFixture) handleMessage(t *testing.T, w http.ResponseWri
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	response, account, ok := f.nextResponse(r.Header.Get("Authorization"))
+	response, _, ok := f.nextResponse(r.Header.Get("Authorization"))
 	if !ok {
 		t.Error("subscription-pool fixture received unexpected account auth")
 		http.Error(w, "unexpected auth", http.StatusUnauthorized)
 		return
 	}
-	f.mu.Lock()
-	f.calls = append(f.calls, account)
-	f.mu.Unlock()
 	status := response.status
 	if status == 0 {
 		status = http.StatusOK
@@ -527,8 +524,8 @@ func (f *liveSubscriptionFixture) handleMessage(t *testing.T, w http.ResponseWri
 
 func (f *liveSubscriptionFixture) nextResponse(auth string) (liveSubscriptionResponse, string, bool) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	index := len(f.calls)
-	f.mu.Unlock()
 	if index >= len(f.responses) {
 		return liveSubscriptionResponse{}, "", false
 	}
@@ -536,6 +533,7 @@ func (f *liveSubscriptionFixture) nextResponse(auth string) (liveSubscriptionRes
 	if strings.TrimSpace(auth) != "Bearer "+response.token {
 		return liveSubscriptionResponse{}, "", false
 	}
+	f.calls = append(f.calls, response.account)
 	return response, response.account, true
 }
 
