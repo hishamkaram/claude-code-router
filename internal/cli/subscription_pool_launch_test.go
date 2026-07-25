@@ -403,8 +403,6 @@ func TestSubscriptionPoolDoesNotRotateAfterCleanupFailure(t *testing.T) {
 }
 
 func TestStopClaudeProcessAndWaitIsBounded(t *testing.T) {
-	t.Parallel()
-
 	process := &blockingClaudeProcess{done: make(chan error)}
 	started := time.Now()
 	err := stopClaudeProcessAndWait(process, process.Done(), 10*time.Millisecond)
