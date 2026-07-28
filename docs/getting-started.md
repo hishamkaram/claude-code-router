@@ -80,9 +80,10 @@ Pass ordinary Claude Code options after `launch`:
 ccr launch --chrome
 ```
 
-The launch adds redacted route history, lifecycle observation, and a compact CCR
-status line without changing your settings files. Disable any one independently
-for a sensitive or policy-constrained session:
+The launch adds redacted route history, lifecycle observation, and, when you
+have not configured one, a compact CCR status line without changing your
+settings files. Disable any one independently for a sensitive or
+policy-constrained session:
 
 ```bash
 ccr launch --no-history
@@ -90,10 +91,19 @@ ccr launch --no-lifecycle
 ccr launch --no-statusline
 ```
 
-CCR preserves existing Claude hooks and normally preserves an existing status
-line. Subscription-pool launches instead use a launch-only account-aware line
-showing `account=<name> | limits=unknown`; this prevents shared-profile limits
-from being presented as selected-account truth without changing user settings.
+CCR preserves existing Claude hooks and status-line behavior. In
+subscription-pool mode, a launch-only wrapper removes OAuth, API-key, gateway,
+refresh, scope, and observer credentials before running the existing command;
+`CCR_CLAUDE_ACCOUNT` remains available. When no line is configured, CCR injects
+one showing `account=<name> | limits=unknown`. Windows uses that CCR line as a
+visible safe fallback because the POSIX credential-isolation wrapper is
+unavailable. An explicit `statusLine: null` in a higher-precedence settings file
+stays disabled. On POSIX, generated launch settings use a mode-`0600` file
+inside a mode-`0700` temporary directory; Windows uses the user-scoped
+temporary-directory ACL. The file is removed after Claude exits, so an existing
+command is not copied into process arguments. Independently loaded quota may
+still belong to another shared local profile, so CCR never presents it as
+selected-account truth.
 If managed policy prevents lifecycle hooks, runtime commands report the launch
 as unobserved rather than pretending that no agents or tasks ran.
 
@@ -227,15 +237,17 @@ stored OAuth token, while Claude's visible profile may remain the shared local
 login; there is no in-process credential swap. If a plain interactive pool
 launch receives a first-party Anthropic HTTP 429 with an
 explicit rejected unified usage-limit status, CCR marks the account cooling
-down, stops Claude Code, and relaunches with the next usable account using
-`--continue`. Temporary or ambiguous 429 responses stay with Claude Code for
-normal retry handling and do not cool the account. Automatic relaunch applies
-to plain interactive launches and to an explicit `--resume <session-id>`,
-optionally with a named `--worktree`. It remains disabled for `--print`,
+down and resolves the next usable account before stopping Claude Code and
+relaunching with `--continue`. If no replacement is usable, CCR keeps the
+current Claude process and gateway open so Claude Code retains its native limit
+state and session; a later rejected quota response retries pool selection.
+Temporary or ambiguous 429 responses stay with Claude Code for normal retry
+handling and do not cool the account. Automatic relaunch applies to plain
+interactive launches and to an explicit `--resume <session-id>`, optionally
+with a named `--worktree`. It remains disabled for `--print`,
 `--claude-account`, managed CUA, prompts, and other passthrough arguments.
-Launch stderr reports the decision. If every account is disabled, expired,
-cooling down, or has an unavailable credential, CCR fails visibly instead of
-falling back to the default Claude login.
+Launch stderr reports the decision. An initial launch with no usable account
+fails visibly instead of falling back to the default Claude login.
 
 Claude subscription account pools are for local individual use. Teams,
 automation, hosted tools, and third-party products should use Anthropic's

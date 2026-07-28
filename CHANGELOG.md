@@ -5,6 +5,23 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.3
+
+- Preserve existing Claude Code status-line behavior in subscription-pool
+  launches through a launch-only credential-isolation wrapper, exposing only
+  the selected local label through `CCR_CLAUDE_ACCOUNT`; Windows uses a visible
+  CCR status-line fallback.
+- Keep generated settings and existing status-line commands out of process
+  arguments through a private temporary settings file, and honor explicit
+  higher-precedence `statusLine: null` overrides.
+- Resolve and claim a usable replacement account before stopping the current
+  Claude Code process after confirmed subscription exhaustion.
+- Keep Claude Code and its local gateway open with native limit behavior when
+  no replacement account is usable, retrying pool selection on a later
+  confirmed quota response.
+- Add deterministic fixture and real Claude PTY coverage for replacement
+  rotation and all-accounts-limited process continuity.
+
 ## v0.4.2
 
 - Make subscription-pool status lines account-aware and report

@@ -85,10 +85,20 @@ ccr agents --active
 
 The hook and status endpoints listen only on the launch gateway's loopback
 address and require a separate ephemeral token. Existing user hooks are kept.
-An existing status line wins outside subscription-pool mode. Pool launches
-replace it only in the generated launch settings with an account-aware line;
-the user settings file remains unchanged. The `--no-history`, `--no-lifecycle`,
-and `--no-statusline` flags disable their respective feature for one launch.
+An existing status line keeps its command and output. In subscription-pool
+mode, CCR places that command in launch-only settings with a
+credential-isolation wrapper. `CCR_CLAUDE_ACCOUNT` remains available, while
+OAuth, API-key, gateway, refresh, scope, and observer credentials are removed
+before execution. CCR injects its account-aware line only when no line is
+configured. A higher-precedence explicit `statusLine: null` disables an earlier
+command and remains disabled. On POSIX, generated settings use a mode-`0600`
+file inside a mode-`0700` temporary directory; Windows uses the user-scoped
+temporary-directory ACL. Settings are not placed in inline process arguments
+and are removed after Claude exits. On Windows, CCR visibly bypasses the
+existing command and injects that safe line because the POSIX
+credential-isolation wrapper is unavailable.
+The `--no-history`, `--no-lifecycle`, and `--no-statusline` flags disable their
+respective feature for one launch.
 
 ## Authentication Modes
 
@@ -196,28 +206,34 @@ combined with a named `--worktree`. Plain launches resume with `--continue`;
 explicit resume/worktree continuity arguments are replayed unchanged. `--print`,
 an explicit `--claude-account`, managed CUA, prompts, and other passthrough
 arguments disable rotation. CCR prints the eligibility decision before Claude
-Code starts. In eligible cases CCR records the safe failure class, stops Claude
-Code, and starts a new process with the next usable account. `claude-account
-list` shows the active cooldown's deadline and reason. Other pool launches
-return a visible rate-limit error and tell you to rerun after selecting another
-account.
-If all accounts are disabled, expired, cooling down, excluded, or
-credential-unavailable, the launch fails with an all-exhausted message; CCR
-never silently falls back to the default Claude login, Anthropic API key, or
-another provider.
+Code starts. In eligible cases CCR records the safe failure class and resolves
+the next account's keychain credential before stopping Claude Code. Only then
+does it start the replacement process. `claude-account list` shows the active
+cooldown's deadline and reason. If rotation is disabled or no replacement is
+currently usable, CCR leaves the current process and gateway open so Claude
+Code can retain its native limit state and session. A later rejected quota
+response retries selection, allowing newly added or newly available accounts
+to participate.
+
+An initial launch with every account disabled, expired, cooling down, excluded,
+or credential-unavailable still fails with an all-exhausted message. CCR never
+silently falls back to the default Claude login, Anthropic API key, or another
+provider.
 
 Account names are local CCR labels. Model requests use the selected label's
 stored OAuth token, while Claude's visible profile and cached usage can still
 show the shared local login. Authorize the subscription represented by each
 label in that setup-token browser flow.
 
-The pool status line identifies the selected model-request label as
-`account=<name>` and reports `limits=unknown`. Claude Code OAuth tokens provide
-no stable supported account-scoped subscription-quota endpoint suitable for
-per-request routing. The explicit `claude-account test --live` diagnostic is
-best-effort and never substitutes shared-profile data. An existing status line
-is bypassed only in launch-generated settings;
-`--no-statusline` is an explicit opt-out and prints a warning.
+When CCR injects a pool status line, it identifies the selected model-request
+label as `account=<name>` and reports `limits=unknown`. Claude Code OAuth tokens
+provide no stable supported account-scoped subscription-quota endpoint suitable
+for per-request routing. The explicit `claude-account test --live` diagnostic
+is best-effort and never substitutes shared-profile data. An existing status
+line keeps its behavior through the credential-isolation wrapper and can read
+`CCR_CLAUDE_ACCOUNT`; `--no-statusline` is an explicit opt-out from CCR
+injection and prints a warning. A higher-precedence `statusLine: null` is also
+honored as an explicit disable.
 
 `clear-cooldown <name>` and `clear-cooldown --all` clear only cooldown and
 last-error metadata. Use them after independently confirming that a cooldown is

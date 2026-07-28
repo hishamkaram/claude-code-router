@@ -167,17 +167,24 @@ agent, or task is marked abandoned when Claude Code exits abruptly.
 
 ## The CCR Status Line Is Missing
 
-Outside subscription-pool mode, CCR does not replace an existing Claude Code
-status line. Pool launches replace it only for the launched process so the line
-can show the selected `account=<name>` and truthful `limits=unknown`; the user
-settings file is unchanged. Run `ccr status` to inspect the same route and
-selected launch account outside Claude Code. Also check that the launch was not
-started with `--no-statusline`.
+CCR keeps an existing Claude Code status line's command and output. In
+subscription-pool mode, a launch-only credential-isolation wrapper removes
+OAuth, API-key, gateway, refresh, scope, and observer credentials before
+execution; `CCR_CLAUDE_ACCOUNT` remains available for the selected local label.
+On Windows, CCR visibly bypasses the existing command for that launch and uses
+its account-aware line because the POSIX credential-isolation wrapper is
+unavailable. CCR also injects that line when no status line is configured; it
+shows the selected `account=<name>` and truthful `limits=unknown`. An explicit
+`statusLine: null` in a higher-precedence Claude settings file remains disabled.
+Generated launch settings use a private temporary file and are removed after
+Claude exits; the existing command is never copied into process arguments. Run
+`ccr status` to inspect the same route and selected launch account outside
+Claude Code. Also check that the launch was not started with `--no-statusline`.
 
-Claude Code's built-in usage display or a status line exposed with
-`--no-statusline` may use another local profile or cached usage data. CCR cannot
-query fresh per-account subscription quota with a Claude Code OAuth token. It
-therefore never labels those numbers as belonging to the selected pool account.
+Claude Code's built-in usage display or an existing status line may use another
+local profile or cached usage data. CCR cannot query fresh per-account
+subscription quota with a Claude Code OAuth token. It therefore never labels
+those numbers as belonging to the selected pool account.
 
 ## Remove Runtime History
 
@@ -360,20 +367,23 @@ automatically relaunch when you use `--print`, pass `--claude-account`,
 configure managed CUA, provide a prompt, or pass other Claude Code arguments.
 Launch stderr says whether rotation is enabled and why. In non-rotating cases
 the selected account is marked cooling down only after confirmed exhaustion,
-and the command returns a visible rate-limit error. Rerun after choosing
-another account or waiting for the cooldown:
+but CCR keeps the current process and gateway open with Claude Code's native
+limit behavior. In rotating launches, CCR does the same when no replacement
+account is currently usable and retries selection after the next rejected quota
+response. You can also start another process after choosing a different
+account:
 
 ```bash
 ccr launch --auth-mode subscription-pool --claude-account other
 ```
 
-When automatic relaunch does run, CCR stops the current Claude Code process and
-starts a new one with `--continue` or the original explicit resume/worktree
-arguments. It cannot swap identities inside an existing Claude Code process.
-Claude Code restores the conversation, but CCR does not synthesize or replay
-the interrupted user input because doing so could repeat tool side effects. If
-the turn did not complete before rotation, continue it in the relaunched
-session.
+When automatic relaunch does run, CCR first resolves the replacement account's
+credential, then stops the current Claude Code process and starts a new one with
+`--continue` or the original explicit resume/worktree arguments. It cannot swap
+identities inside an existing Claude Code process. Claude Code restores the
+conversation, but CCR does not synthesize or replay the interrupted user input
+because doing so could repeat tool side effects. If the turn did not complete
+before rotation, continue it in the relaunched session.
 
 An exit such as `No deferred tool marker found` is a Claude Code resume error,
 not subscription exhaustion. Provide a prompt for `--print --resume` or use an

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -65,7 +66,7 @@ func TestSubscriptionPoolLaunchSelectsAccountAndRecordsAuth(t *testing.T) {
 	}
 }
 
-func TestSubscriptionPoolBypassesExistingStatuslineForAccountTruthfulness(t *testing.T) {
+func TestSubscriptionPoolPreservesExistingStatusline(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	claudeDir := filepath.Join(home, ".claude")
@@ -93,9 +94,27 @@ func TestSubscriptionPoolBypassesExistingStatuslineForAccountTruthfulness(t *tes
 	}
 
 	settingsJSON, ok := launcher.settingsArgValue()
-	if !ok || !strings.Contains(settingsJSON, `"statusLine"`) ||
-		!strings.Contains(settingsJSON, "__statusline") {
-		t.Fatalf("launch settings are not account-aware: %q", settingsJSON)
+	if !ok {
+		t.Fatalf("launch settings missing credential-isolated status line: %#v", launcher.args)
+	}
+	var generated struct {
+		StatusLine map[string]any `json:"statusLine"`
+	}
+	if decodeErr := json.Unmarshal([]byte(settingsJSON), &generated); decodeErr != nil {
+		t.Fatalf("launch settings decode error = %v", decodeErr)
+	}
+	command, _ := generated.StatusLine["command"].(string)
+	if !strings.Contains(command, "shared-profile-limits") ||
+		!strings.Contains(command, "env -u CLAUDE_CODE_OAUTH_TOKEN") ||
+		strings.Contains(command, "__statusline") {
+		t.Fatalf("launch status line was not safely preserved: %q", command)
+	}
+	launchSettingsPath, ok := launcher.rawSettingsArgValue()
+	if !ok || strings.Contains(launchSettingsPath, "shared-profile-limits") {
+		t.Fatalf("launch argv exposed the existing status-line command: %#v", launcher.args)
+	}
+	if _, statErr := os.Stat(launchSettingsPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("private launch settings were not removed: %v", statErr)
 	}
 	data, readErr := os.ReadFile(settingsPath)
 	if readErr != nil || string(data) != existing {
@@ -103,14 +122,16 @@ func TestSubscriptionPoolBypassesExistingStatuslineForAccountTruthfulness(t *tes
 	}
 	for _, want := range []string{
 		"Subscription limits for account personal: unknown",
-		"Existing Claude statusLine bypassed for this launch",
+		"Existing Claude statusLine preserved through a launch-only credential-isolation wrapper",
+		"CCR_CLAUDE_ACCOUNT=personal",
+		"OAuth and gateway tokens are removed",
 	} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("status-line notice missing %q: %s", want, errOut)
 		}
 	}
 	launches := loadSubscriptionLaunches(t, dbPath)
-	if len(launches) != 1 || launches[0].StatuslineState != "replaced" {
+	if len(launches) != 1 || launches[0].StatuslineState != "isolated" {
 		t.Fatalf("launch status-line state = %#v", launches)
 	}
 }

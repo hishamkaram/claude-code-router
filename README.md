@@ -248,13 +248,22 @@ ccr profile export team.json      # export routing config without credentials
 
 `ccr status`, `ccr trace`, `ccr sessions`, and `ccr agents` also support stable
 `schema_version: 1` JSON output. Launches inject a compact CCR status line and
-Claude lifecycle hooks for that process only. Existing hooks and, outside
-subscription-pool mode, an existing status line are preserved. Pool launches
-use a launch-only account-aware status line even when a shared status line is
-configured; it shows `account=<name> | limits=unknown` because Claude Code OAuth
-tokens provide no supported account-scoped quota API. User settings files are
-not changed. Use `--no-statusline`, `--no-lifecycle`, or `--no-history` to
-disable those features independently for one launch.
+Claude lifecycle hooks for that process only. Existing hooks and status lines
+keep their behavior. In subscription-pool mode, CCR preserves the existing
+command through a launch-only credential-isolation wrapper: it can read
+`CCR_CLAUDE_ACCOUNT`, while OAuth and gateway credentials are removed from its
+environment. Windows visibly falls back to CCR's account-aware line because the
+POSIX isolation wrapper is unavailable. If no status line is configured, the
+injected line shows `account=<name> | limits=unknown`; a higher-precedence
+explicit `statusLine: null` remains disabled. Launch-generated settings use
+POSIX mode `0600` inside a mode-`0700` temporary directory, or the user-scoped
+temporary-directory ACL on Windows; they never use raw process arguments and
+are removed after Claude exits. User settings files are not changed. On
+confirmed pool exhaustion CCR resolves the next account before
+stopping Claude. If none is usable, the current Claude process and gateway stay
+open with Claude Code's native limit behavior. Use `--no-statusline`,
+`--no-lifecycle`, or `--no-history` to disable those features independently for
+one launch.
 
 ## Team Profiles
 

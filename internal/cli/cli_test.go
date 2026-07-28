@@ -247,14 +247,16 @@ func (r *promptReader) Read(p []byte) (int, error) {
 }
 
 type fakeLauncher struct {
-	pid     int
-	args    []string
-	env     ClaudeEnvironment
-	out     io.Writer
-	errOut  io.Writer
-	waitErr error
-	starts  int
-	process *fakeProcess
+	pid             int
+	args            []string
+	env             ClaudeEnvironment
+	out             io.Writer
+	errOut          io.Writer
+	waitErr         error
+	starts          int
+	process         *fakeProcess
+	settingsJSON    string
+	settingsReadErr error
 }
 
 func (f *fakeLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, in io.Reader, out, errOut io.Writer) (ClaudeProcess, error) {
@@ -269,6 +271,11 @@ func (f *fakeLauncher) Start(ctx context.Context, args []string, env ClaudeEnvir
 	}
 	f.out = out
 	f.errOut = errOut
+	if settingsPath, ok := f.rawSettingsArgValue(); ok {
+		settings, readErr := os.ReadFile(settingsPath)
+		f.settingsJSON = string(settings)
+		f.settingsReadErr = readErr
+	}
 	f.process = &fakeProcess{pid: f.pid, waitErr: f.waitErr}
 	return f.process, nil
 }
@@ -338,6 +345,16 @@ func (f *fakeLauncher) hasArg(value string) bool {
 }
 
 func (f *fakeLauncher) settingsArgValue() (string, bool) {
+	if f.settingsReadErr != nil {
+		return "", false
+	}
+	if _, ok := f.rawSettingsArgValue(); !ok {
+		return "", false
+	}
+	return f.settingsJSON, true
+}
+
+func (f *fakeLauncher) rawSettingsArgValue() (string, bool) {
 	for index, item := range f.args {
 		if item == "--settings" && index+1 < len(f.args) {
 			return f.args[index+1], true

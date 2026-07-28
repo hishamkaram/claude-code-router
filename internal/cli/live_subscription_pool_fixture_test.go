@@ -82,8 +82,8 @@ func TestLiveFixtureSubscriptionPoolFirstParty(t *testing.T) {
 		{account: "work", state: "completed"},
 	})
 	launches := loadSubscriptionLaunches(t, dbPath)
-	if len(launches) != 1 || launches[0].StatuslineState != "replaced" {
-		t.Fatalf("subscription-pool live status-line state = %#v, want replaced", launches)
+	if len(launches) != 1 || launches[0].StatuslineState != "isolated" {
+		t.Fatalf("subscription-pool live status-line state = %#v, want isolated", launches)
 	}
 	statusOut, _, err := runLiveCommand(ctx, Dependencies{Secrets: secrets}, "--db", dbPath, "status")
 	if err != nil {
@@ -108,7 +108,9 @@ func assertLiveSubscriptionFirstPartyOutput(t *testing.T, out, errOut, staleStat
 	}
 	for _, want := range []string{
 		"Subscription limits for account work: unknown",
-		"Existing Claude statusLine bypassed for this launch",
+		"Existing Claude statusLine preserved through a launch-only credential-isolation wrapper",
+		"CCR_CLAUDE_ACCOUNT=work",
+		"OAuth and gateway tokens are removed",
 		"Automatic account rotation: disabled because --print is a one-shot",
 	} {
 		if !strings.Contains(errOut, want) {
@@ -122,7 +124,7 @@ func assertLiveSubscriptionFirstPartyOutput(t *testing.T, out, errOut, staleStat
 	}
 }
 
-func TestLiveFixtureSubscriptionPoolRelaunchesOnFirstParty429(t *testing.T) {
+func TestLiveFixtureSubscriptionPoolKeepsFinalLimitedProcessOpen(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	fixture := newLiveSubscriptionFixture(t, []liveSubscriptionResponse{
@@ -150,9 +152,9 @@ func TestLiveFixtureSubscriptionPoolRelaunchesOnFirstParty429(t *testing.T) {
 	out, errOut, err := runLiveCommand(ctx, Dependencies{
 		Secrets: secrets, Launcher: launcher, StartGateway: fixture.StartGateway,
 	}, "--db", dbPath, "launch", "--auth-mode", "subscription-pool", "--no-lifecycle", "--no-statusline")
-	if err == nil {
-		t.Fatalf("subscription-pool exhaustion succeeded unexpectedly\nstdout:\n%s\nstderr:\n%s",
-			redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
+	if err != nil {
+		t.Fatalf("subscription-pool continuity error = %v\nstdout:\n%s\nstderr:\n%s",
+			err, redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
 	}
 	if launcher.StartCount() != 2 {
 		t.Fatalf("Claude process starts = %d, want 2", launcher.StartCount())
@@ -162,20 +164,20 @@ func TestLiveFixtureSubscriptionPoolRelaunchesOnFirstParty429(t *testing.T) {
 		!containsString(launcher.StartAt(1).args, "--continue") {
 		t.Fatal("subscription-pool did not rotate by relaunching with the next process-bound account")
 	}
-	combined := out + errOut + err.Error()
+	combined := out + errOut
 	for _, want := range []string{
 		"relaunching with the next available account",
-		"claude subscription pool has no usable accounts",
+		"No replacement account is currently usable",
+		"keeping the current Claude Code process open",
 	} {
 		if !strings.Contains(combined, want) {
-			t.Fatalf("subscription-pool exhaustion output missing %q\nstdout:\n%s\nstderr:\n%s\nerror:\n%s",
-				want, redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut),
-				redactLiveSubscriptionOutput(err.Error()))
+			t.Fatalf("subscription-pool continuity output missing %q\nstdout:\n%s\nstderr:\n%s",
+				want, redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
 		}
 	}
 	fixture.AssertCalls(t, []string{"personal", "work"})
 	assertSubscriptionLaunchMetadata(t, dbPath, []subscriptionLaunchWant{
-		{account: "work", state: "failed", endReason: "subscription_exhausted"},
+		{account: "work", state: "completed"},
 		{account: "personal", state: "failed", endReason: "subscription_exhausted"},
 	})
 	assertSubscriptionDatabaseRedaction(t, dbPath, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
@@ -393,8 +395,9 @@ type liveSubscriptionResponse struct {
 }
 
 type liveSubscriptionFixture struct {
-	server    *httptest.Server
-	responses []liveSubscriptionResponse
+	server     *httptest.Server
+	responses  []liveSubscriptionResponse
+	repeatLast bool
 
 	mu    sync.Mutex
 	calls []string
@@ -503,7 +506,10 @@ func (f *liveSubscriptionFixture) nextResponse(auth string) (liveSubscriptionRes
 	defer f.mu.Unlock()
 	index := len(f.calls)
 	if index >= len(f.responses) {
-		return liveSubscriptionResponse{}, "", false
+		if !f.repeatLast || len(f.responses) == 0 {
+			return liveSubscriptionResponse{}, "", false
+		}
+		index = len(f.responses) - 1
 	}
 	response := f.responses[index]
 	if strings.TrimSpace(auth) != "Bearer "+response.token {
