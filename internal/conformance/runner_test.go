@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
+	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -133,6 +134,20 @@ func TestRunProviderDisablesParallelCallsForForcedToolProbe(t *testing.T) {
 	forcedTool := findCheck(t, result.Checks, "forced_tool")
 	if forcedTool.Status != StatusPassed {
 		t.Fatalf("forced_tool check = %#v", forcedTool)
+	}
+}
+
+func TestProviderSecretRejectsClaudeAccountCredentialRef(t *testing.T) {
+	t.Parallel()
+
+	ref := secret.ClaudeAccountAccessTokenRef("personal")
+	runner := checkRunner{
+		config: Config{Secrets: conformanceSecrets{ref: "claude-oauth-token"}},
+		target: target{provider: store.Provider{SecretRef: ref}},
+	}
+	value, err := runner.providerSecret(context.Background())
+	if err == nil || value != "" {
+		t.Fatalf("providerSecret() = %q, %v; want rejected Claude account ref", value, err)
 	}
 }
 
@@ -281,4 +296,21 @@ func conformanceStore(t *testing.T, provider store.Provider, model store.Model) 
 		t.Fatalf("AddModel() error = %v", err)
 	}
 	return s
+}
+
+type conformanceSecrets map[string]string
+
+func (conformanceSecrets) Available(ctx context.Context) error {
+	return ctx.Err()
+}
+
+func (conformanceSecrets) Store(ctx context.Context, _, _ string) error {
+	return ctx.Err()
+}
+
+func (s conformanceSecrets) Resolve(ctx context.Context, ref string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return s[ref], nil
 }

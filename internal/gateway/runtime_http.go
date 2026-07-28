@@ -19,6 +19,16 @@ const (
 	maxHookBodyBytes    = 64 << 10
 )
 
+type runtimeAuthStatus struct {
+	Mode                string `json:"mode"`
+	ActiveClaudeAccount string `json:"active_claude_account,omitempty"`
+}
+
+type runtimeStatus struct {
+	session.Snapshot
+	Auth *runtimeAuthStatus `json:"auth,omitempty"`
+}
+
 func (h *handler) handleRuntimeRequest(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Tracker == nil {
 		writeRuntimeError(w, http.StatusNotFound, "runtime observation is unavailable")
@@ -39,7 +49,14 @@ func (h *handler) handleRuntimeRequest(w http.ResponseWriter, r *http.Request) {
 			writeRuntimeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		writeJSON(w, http.StatusOK, h.cfg.Tracker.Snapshot())
+		status := runtimeStatus{Snapshot: h.cfg.Tracker.Snapshot()}
+		if h.cfg.AnthropicSubscriptionPool != nil {
+			status.Auth = &runtimeAuthStatus{
+				Mode:                "subscription-pool",
+				ActiveClaudeAccount: h.cfg.AnthropicSubscriptionPool.ActiveAccount(),
+			}
+		}
+		writeJSON(w, http.StatusOK, status)
 	case "/internal/v1/hooks":
 		h.handleHookRequest(w, r)
 	default:

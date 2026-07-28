@@ -33,6 +33,10 @@ type Config struct {
 	Tracker           *session.Tracker
 	ManagedCUA        *cua.ManagedRuntime
 	ManagedCUAProject string
+	// AnthropicSubscriptionPool owns the active first-party OAuth credential
+	// for subscription-pool launches. The gateway may replace incoming Claude
+	// auth and transparently retry confirmed account-wide quota rejections.
+	AnthropicSubscriptionPool AnthropicSubscriptionPool
 
 	// AnthropicSubscriptionExhaustion receives safe metadata when a first-party
 	// Anthropic pass-through request receives HTTP 429. The gateway sends with a
@@ -66,7 +70,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if strings.TrimSpace(cfg.Token) == "" {
 		return nil, fmt.Errorf("gateway.Start: token is required")
 	}
-	if (cfg.Recorder != nil || cfg.Tracker != nil) && strings.TrimSpace(cfg.ObserverToken) == "" {
+	if cfg.Tracker != nil && strings.TrimSpace(cfg.ObserverToken) == "" {
 		return nil, fmt.Errorf("gateway.Start: observer token is required when runtime observation is enabled")
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

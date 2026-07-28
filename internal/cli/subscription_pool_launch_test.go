@@ -2,12 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -32,13 +31,15 @@ func TestSubscriptionPoolLaunchSelectsAccountAndRecordsAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("subscription-pool launch error = %v, stderr=%q", err, errOut)
 	}
-	if launcher.starts != 1 || !launcher.hasEnv("CLAUDE_CODE_OAUTH_TOKEN=personal-oauth-token") {
+	if launcher.starts != 1 ||
+		!launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") ||
+		!launcher.unsetsEnv("CLAUDE_CODE_OAUTH_TOKEN") {
 		t.Fatalf("launcher starts=%d env=%s", launcher.starts, launcher.environmentSummary())
 	}
 	if !launcher.hasEnv(statuslineClaudeAccountEnv + "=personal") {
 		t.Fatalf("launcher did not expose selected status-line account: %s", launcher.environmentSummary())
 	}
-	if !launcher.unsetsEnv("ANTHROPIC_API_KEY") || !launcher.unsetsEnv("ANTHROPIC_AUTH_TOKEN") {
+	if !launcher.unsetsEnv("ANTHROPIC_API_KEY") {
 		t.Fatalf("launcher did not remove higher-precedence auth: %s", launcher.environmentSummary())
 	}
 	if !strings.Contains(errOut, "Claude model-request account selected: personal") {
@@ -65,7 +66,7 @@ func TestSubscriptionPoolLaunchSelectsAccountAndRecordsAuth(t *testing.T) {
 	}
 }
 
-func TestSubscriptionPoolBypassesExistingStatuslineForAccountTruthfulness(t *testing.T) {
+func TestSubscriptionPoolPreservesExistingStatusline(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	claudeDir := filepath.Join(home, ".claude")
@@ -93,9 +94,27 @@ func TestSubscriptionPoolBypassesExistingStatuslineForAccountTruthfulness(t *tes
 	}
 
 	settingsJSON, ok := launcher.settingsArgValue()
-	if !ok || !strings.Contains(settingsJSON, `"statusLine"`) ||
-		!strings.Contains(settingsJSON, "__statusline") {
-		t.Fatalf("launch settings are not account-aware: %q", settingsJSON)
+	if !ok {
+		t.Fatalf("launch settings missing credential-isolated status line: %#v", launcher.args)
+	}
+	var generated struct {
+		StatusLine map[string]any `json:"statusLine"`
+	}
+	if decodeErr := json.Unmarshal([]byte(settingsJSON), &generated); decodeErr != nil {
+		t.Fatalf("launch settings decode error = %v", decodeErr)
+	}
+	command, _ := generated.StatusLine["command"].(string)
+	if !strings.Contains(command, "shared-profile-limits") ||
+		!strings.Contains(command, "env -u CLAUDE_CODE_OAUTH_TOKEN") ||
+		!strings.Contains(command, "__statusline-account") {
+		t.Fatalf("launch status line was not safely preserved: %q", command)
+	}
+	launchSettingsPath, ok := launcher.rawSettingsArgValue()
+	if !ok || strings.Contains(launchSettingsPath, "shared-profile-limits") {
+		t.Fatalf("launch argv exposed the existing status-line command: %#v", launcher.args)
+	}
+	if _, statErr := os.Stat(launchSettingsPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("private launch settings were not removed: %v", statErr)
 	}
 	data, readErr := os.ReadFile(settingsPath)
 	if readErr != nil || string(data) != existing {
@@ -103,220 +122,17 @@ func TestSubscriptionPoolBypassesExistingStatuslineForAccountTruthfulness(t *tes
 	}
 	for _, want := range []string{
 		"Subscription limits for account personal: unknown",
-		"Existing Claude statusLine bypassed for this launch",
+		"Existing Claude statusLine preserved through a launch-only credential-isolation wrapper",
+		"CCR_CLAUDE_ACCOUNT=personal",
+		"OAuth and gateway tokens are removed",
 	} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("status-line notice missing %q: %s", want, errOut)
 		}
 	}
 	launches := loadSubscriptionLaunches(t, dbPath)
-	if len(launches) != 1 || launches[0].StatuslineState != "replaced" {
+	if len(launches) != 1 || launches[0].StatuslineState != "isolated" {
 		t.Fatalf("launch status-line state = %#v", launches)
-	}
-}
-
-func TestSubscriptionPoolRotatesByRelaunchingAndContinues(t *testing.T) {
-	t.Parallel()
-
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
-		{name: "personal", token: "personal-oauth-token"},
-		{name: "work", token: "work-oauth-token"},
-	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): "personal-oauth-token",
-		secret.ClaudeAccountAccessTokenRef("work"):     "work-oauth-token",
-	}}
-	launcher := &recordingLauncher{}
-	var gatewayStarts int
-	startGateway := func(ctx context.Context, config gateway.Config) (*gateway.Server, error) {
-		server, err := gateway.Start(ctx, config)
-		if err != nil {
-			return nil, err
-		}
-		gatewayStarts++
-		if gatewayStarts == 1 {
-			config.AnthropicSubscriptionExhaustion <- gateway.AnthropicSubscriptionExhaustionEvent{
-				StatusCode: 429, RetryAfterDuration: time.Hour,
-			}
-		}
-		return server, nil
-	}
-
-	out, errOut, err := runCommandWithDeps(t, Dependencies{
-		Secrets: secrets, Launcher: launcher, StartGateway: startGateway,
-	}, "--db", dbPath, "launch", "--auth-mode", "subscription-pool", "--no-lifecycle", "--no-statusline")
-	if err != nil {
-		t.Fatalf("subscription-pool rotation error = %v, stderr=%q", err, errOut)
-	}
-	if launcher.StartCount() != 2 {
-		t.Fatalf("Claude starts = %d, want 2", launcher.StartCount())
-	}
-	first, second := launcher.StartAt(0), launcher.StartAt(1)
-	if first.oauthToken != "personal-oauth-token" || second.oauthToken != "work-oauth-token" {
-		t.Fatalf("selected token sequence was incorrect")
-	}
-	if !containsString(second.args, "--continue") {
-		t.Fatalf("second Claude args = %v, want --continue", second.args)
-	}
-	if !strings.Contains(errOut, "relaunching with the next available account") {
-		t.Fatalf("rotation was not visible: %q", errOut)
-	}
-	if strings.Contains(out+errOut, "personal-oauth-token") ||
-		strings.Contains(out+errOut, "work-oauth-token") {
-		t.Fatal("rotation output leaked an OAuth token")
-	}
-	launches := loadSubscriptionLaunches(t, dbPath)
-	if len(launches) != 2 ||
-		launches[0].ClaudeAccountName != "work" ||
-		launches[1].ClaudeAccountName != "personal" ||
-		launches[1].EndReason != "subscription_exhausted" {
-		t.Fatalf("rotation launch metadata = %#v", launches)
-	}
-}
-
-func TestSubscriptionPoolRotatesResumedWorktreeWithOriginalArguments(t *testing.T) {
-	t.Parallel()
-
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
-		{name: "personal", token: "personal-oauth-token"},
-		{name: "work", token: "work-oauth-token"},
-	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): "personal-oauth-token",
-		secret.ClaudeAccountAccessTokenRef("work"):     "work-oauth-token",
-	}}
-	launcher := &recordingLauncher{}
-	var gatewayStarts int
-	startGateway := func(ctx context.Context, config gateway.Config) (*gateway.Server, error) {
-		server, err := gateway.Start(ctx, config)
-		if err != nil {
-			return nil, err
-		}
-		gatewayStarts++
-		if gatewayStarts == 1 {
-			config.AnthropicSubscriptionExhaustion <- gateway.AnthropicSubscriptionExhaustionEvent{
-				StatusCode: 429, RetryAfterDuration: time.Hour,
-			}
-		}
-		return server, nil
-	}
-	resumeArgs := []string{
-		"--worktree", "mcp-stateless-ha",
-		"--resume", "fa605631-8a49-4afa-9888-ea4f7f26f26b",
-	}
-	commandArgs := append([]string{
-		"--db", dbPath, "launch", "--auth-mode", "subscription-pool",
-	}, resumeArgs...)
-	commandArgs = append(commandArgs, "--no-lifecycle", "--no-statusline")
-
-	_, errOut, err := runCommandWithDeps(t, Dependencies{
-		Secrets: secrets, Launcher: launcher, StartGateway: startGateway,
-	}, commandArgs...)
-	if err != nil {
-		t.Fatalf("resumed worktree rotation error = %v, stderr=%q", err, errOut)
-	}
-	if launcher.StartCount() != 2 {
-		t.Fatalf("Claude starts = %d, want 2", launcher.StartCount())
-	}
-	for index := 0; index < 2; index++ {
-		start := launcher.StartAt(index)
-		for argIndex := 0; argIndex < len(resumeArgs); argIndex += 2 {
-			if !containsArgPair(start.args, resumeArgs[argIndex], resumeArgs[argIndex+1]) {
-				t.Fatalf("Claude start %d args = %v, missing %s %s",
-					index, start.args, resumeArgs[argIndex], resumeArgs[argIndex+1])
-			}
-		}
-		if containsString(start.args, "--continue") {
-			t.Fatalf("Claude start %d args = %v, resume must not be replaced by --continue", index, start.args)
-		}
-	}
-	for _, want := range []string{
-		"Automatic account rotation: enabled",
-		"relaunching with the next available account",
-	} {
-		if !strings.Contains(errOut, want) {
-			t.Fatalf("resumed worktree rotation output missing %q: %s", want, errOut)
-		}
-	}
-}
-
-func TestSubscriptionPoolExplicitAccountDoesNotRotate(t *testing.T) {
-	t.Parallel()
-
-	invocation := launchInvocation{
-		authMode: launchAuthModeSubscriptionPool, claudeAccount: "personal",
-	}
-	if subscriptionPoolCanRelaunch(invocation) {
-		t.Fatal("an explicitly selected account must not rotate automatically")
-	}
-	invocation.claudeAccount = ""
-	invocation.printMode = true
-	if subscriptionPoolCanRelaunch(invocation) {
-		t.Fatal("print mode must not rotate automatically")
-	}
-	invocation.printMode = false
-	invocation.claudeArgs = []string{"prompt"}
-	if subscriptionPoolCanRelaunch(invocation) {
-		t.Fatal("launches with passthrough arguments must not rotate automatically")
-	}
-	invocation.claudeArgs = []string{
-		"--worktree", "mcp-stateless-ha",
-		"--resume", "fa605631-8a49-4afa-9888-ea4f7f26f26b",
-	}
-	plan := planSubscriptionPoolRelaunch(invocation)
-	if !plan.enabled || strings.Join(plan.args, " ") != strings.Join(invocation.claudeArgs, " ") {
-		t.Fatalf("resumable worktree relaunch plan = %#v", plan)
-	}
-	invocation.claudeArgs = []string{"--worktree=mcp-stateless-ha"}
-	plan = planSubscriptionPoolRelaunch(invocation)
-	if !plan.enabled || !containsString(plan.args, "--continue") {
-		t.Fatalf("worktree relaunch plan = %#v, want appended --continue", plan)
-	}
-	for _, args := range [][]string{
-		{"--resume"},
-		{"--resume", ""},
-		{"--resume", "  "},
-		{"--worktree"},
-		{"--worktree", ""},
-		{"--worktree", "  "},
-		{"--resume", "session-id", "--chrome"},
-		{"--resume", "session-id", "--continue"},
-		{"--worktree", "one", "--worktree", "two"},
-	} {
-		invocation.claudeArgs = args
-		if subscriptionPoolCanRelaunch(invocation) {
-			t.Fatalf("unsafe Claude args %v must not rotate automatically", args)
-		}
-	}
-	invocation.claudeArgs = nil
-	invocation.cuaModeSet = true
-	if subscriptionPoolCanRelaunch(invocation) {
-		t.Fatal("managed CUA launches must not rotate automatically")
-	}
-}
-
-func containsArgPair(args []string, option, value string) bool {
-	for index := 0; index+1 < len(args); index++ {
-		if args[index] == option && args[index+1] == value {
-			return true
-		}
-	}
-	return false
-}
-
-func TestSubscriptionPoolRotationNoticeExplainsEligibility(t *testing.T) {
-	t.Parallel()
-
-	var output strings.Builder
-	writeSubscriptionRotationNotice(&output, planSubscriptionPoolRelaunch(launchInvocation{}))
-	if !strings.Contains(output.String(), "Automatic account rotation: enabled") {
-		t.Fatalf("enabled rotation notice = %q", output.String())
-	}
-
-	output.Reset()
-	writeSubscriptionRotationNotice(&output, planSubscriptionPoolRelaunch(launchInvocation{printMode: true}))
-	if !strings.Contains(output.String(), "disabled because --print is a one-shot") {
-		t.Fatalf("disabled rotation notice = %q", output.String())
 	}
 }
 
@@ -369,36 +185,6 @@ func TestSubscriptionPoolPreflightDoesNotClaimAccount(t *testing.T) {
 				t.Fatalf("rejected launch persisted launch records: %#v", launches)
 			}
 		})
-	}
-}
-
-func TestSubscriptionPoolDoesNotRotateAfterCleanupFailure(t *testing.T) {
-	t.Parallel()
-
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
-		{name: "personal", token: "personal-oauth-token"},
-		{name: "work", token: "work-oauth-token"},
-	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): "personal-oauth-token",
-		secret.ClaudeAccountAccessTokenRef("work"):     "work-oauth-token",
-	}}
-	launcher := &failingStopLauncher{}
-	startGateway := func(ctx context.Context, config gateway.Config) (*gateway.Server, error) {
-		server, err := gateway.Start(ctx, config)
-		if err == nil {
-			config.AnthropicSubscriptionExhaustion <- gateway.AnthropicSubscriptionExhaustionEvent{StatusCode: 429}
-		}
-		return server, err
-	}
-	_, _, err := runCommandWithDeps(t, Dependencies{
-		Secrets: secrets, Launcher: launcher, StartGateway: startGateway,
-	}, "--db", dbPath, "launch", "--auth-mode", "subscription-pool", "--no-lifecycle", "--no-statusline")
-	if err == nil || !strings.Contains(err.Error(), "stopping test process") {
-		t.Fatalf("subscription-pool cleanup error = %v", err)
-	}
-	if launcher.starts != 1 {
-		t.Fatalf("Claude starts = %d, want 1 after cleanup failure", launcher.starts)
 	}
 }
 
@@ -578,69 +364,6 @@ func loadSubscriptionLaunches(t *testing.T, dbPath string) []store.Launch {
 		t.Fatalf("ListLaunches error = %v", err)
 	}
 	return launches
-}
-
-type recordedLaunch struct {
-	args       []string
-	oauthToken string
-}
-
-type recordingLauncher struct {
-	mu     sync.Mutex
-	starts []recordedLaunch
-}
-
-func (l *recordingLauncher) Start(
-	ctx context.Context,
-	args []string,
-	env ClaudeEnvironment,
-	_ io.Reader,
-	_, _ io.Writer,
-) (ClaudeProcess, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	token := environmentEntries(env.Set)["CLAUDE_CODE_OAUTH_TOKEN"]
-	l.mu.Lock()
-	l.starts = append(l.starts, recordedLaunch{args: append([]string(nil), args...), oauthToken: token})
-	index := len(l.starts)
-	l.mu.Unlock()
-	return &fakeProcess{pid: 5000 + index}, nil
-}
-
-func (l *recordingLauncher) StartCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return len(l.starts)
-}
-
-func (l *recordingLauncher) StartAt(index int) recordedLaunch {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.starts[index]
-}
-
-type failingStopLauncher struct {
-	starts int
-}
-
-func (l *failingStopLauncher) Start(
-	_ context.Context,
-	_ []string,
-	_ ClaudeEnvironment,
-	_ io.Reader,
-	_, _ io.Writer,
-) (ClaudeProcess, error) {
-	l.starts++
-	done := make(chan error, 1)
-	return &blockingClaudeProcess{
-		done: done,
-		stop: func() error {
-			done <- nil
-			close(done)
-			return errors.New("stopping test process")
-		},
-	}, nil
 }
 
 type blockingClaudeProcess struct {

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,25 +50,20 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		endpoint = parsed.String()
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, endpoint, bytes.NewReader(body))
-	if err != nil {
-		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("creating Anthropic pass-through request: %v", err))
-		return observability.TokenUsage{}
-	}
-	copyAnthropicPassThroughHeaders(req.Header, r.Header, h.cfg.Token, authMode == anthropicAuthIncoming)
+	var providerSecret string
 	if authMode == anthropicAuthProviderSecret {
-		apiKey, secretErr := resolveProviderSecret(r.Context(), h.cfg.Secrets, provider.SecretRef)
-		if secretErr != nil {
+		providerSecret, err = resolveProviderSecret(r.Context(), h.cfg.Secrets, provider.SecretRef)
+		if err != nil {
 			writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(provider.SecretRef)))
 			return observability.TokenUsage{}
 		}
-		if apiKey != "" {
-			req.Header.Set("x-api-key", apiKey)
-		}
 	}
-
-	resp, err := h.httpClient().Do(req)
+	resp, err := h.executeAnthropicPassThrough(r, body, endpoint, provider, authMode, resource, providerSecret)
 	if err != nil {
+		if errors.Is(err, errAnthropicSubscriptionCredentialUnavailable) {
+			writeAnthropicError(w, http.StatusBadGateway, "Claude subscription credential is unavailable")
+			return observability.TokenUsage{}
+		}
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("requesting Anthropic provider %q: %v", provider.Name, err))
 		return observability.TokenUsage{}
 	}
@@ -76,6 +72,29 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	return copyProviderResponseBody(w, resp, responseModel)
+}
+
+func (h *handler) newAnthropicPassThroughRequest(
+	r *http.Request,
+	body []byte,
+	endpoint string,
+	authMode anthropicAuthMode,
+	providerSecret string,
+	credential AnthropicSubscriptionCredential,
+) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating Anthropic pass-through request: %w", err)
+	}
+	copyAnthropicPassThroughHeaders(req.Header, r.Header, h.cfg.Token, authMode == anthropicAuthIncoming)
+	if authMode == anthropicAuthProviderSecret && providerSecret != "" {
+		req.Header.Set("x-api-key", providerSecret)
+	}
+	if credential.OAuthToken != "" {
+		req.Header.Del("x-api-key")
+		req.Header.Set("Authorization", "Bearer "+credential.OAuthToken)
+	}
+	return req, nil
 }
 
 func rewriteAnthropicRequestModel(body []byte, model string) ([]byte, error) {

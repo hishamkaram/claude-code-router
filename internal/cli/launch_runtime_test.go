@@ -285,6 +285,13 @@ func TestLaunchHelpDescribesPreserveAuthModelSelection(t *testing.T) {
 	for _, want := range []string{
 		"registered, compatible aliases to the visual /model picker",
 		"permitted Anthropic models while preserving subscription or API-key",
+		"retries the same buffered request",
+		"connection stay open",
+		"forwards Anthropic's original limit response",
+		"An existing statusLine keeps its command",
+		"credential-isolation",
+		"CCR_CLAUDE_ACCOUNT",
+		"On Windows",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("launch help = %q, missing %q", out, want)

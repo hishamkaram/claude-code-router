@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -121,7 +122,15 @@ func TestLaunchVisibilityOptOutsAreIndependent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	launcher := &fakeLauncher{pid: os.Getpid()}
-	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath,
+	var gatewayConfig gateway.Config
+	deps := Dependencies{
+		Launcher: launcher,
+		StartGateway: func(ctx context.Context, config gateway.Config) (*gateway.Server, error) {
+			gatewayConfig = config
+			return gateway.Start(ctx, config)
+		},
+	}
+	if _, _, err := runCommandWithDeps(t, deps, "--db", dbPath,
 		"launch", "--no-history", "--no-lifecycle", "--no-statusline"); err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
@@ -132,6 +141,15 @@ func TestLaunchVisibilityOptOutsAreIndependent(t *testing.T) {
 	if len(launches) != 1 || launches[0].LifecycleState != "disabled" ||
 		launches[0].StatuslineState != "disabled" {
 		t.Fatalf("launches = %#v", launches)
+	}
+	if gatewayConfig.ObserverToken != "" || gatewayConfig.Tracker != nil {
+		t.Fatalf("opted-out gateway exposed observer capability: token=%t tracker=%T",
+			gatewayConfig.ObserverToken != "", gatewayConfig.Tracker)
+	}
+	for _, name := range []string{statuslineGatewayURLEnv, statuslineTokenEnv} {
+		if launcher.hasEnvPrefix(name+"=") || !launcher.unsetsEnv(name) {
+			t.Fatalf("opted-out launch retained %s: %s", name, launcher.environmentSummary())
+		}
 	}
 	ctx := context.Background()
 	s, err := store.Open(ctx, dbPath)
@@ -212,11 +230,16 @@ func TestFetchStatuslineUsesObserverEndpoint(t *testing.T) {
 		if r.Header.Get(observerTokenHeader) != "observer-token" {
 			t.Fatalf("observer token header = %q", r.Header.Get(observerTokenHeader))
 		}
-		_ = json.NewEncoder(w).Encode(session.Snapshot{
-			SchemaVersion: 1,
-			Route:         session.Route{ModelAlias: "coder", ProviderName: "fixture", ProviderModel: "model-v1"},
-			ActiveAgents:  2, ActiveTasks: 1,
-			Observability: observability.Snapshot{Healthy: true},
+		_ = json.NewEncoder(w).Encode(statuslineRuntimeStatus{
+			Snapshot: session.Snapshot{
+				SchemaVersion: 1,
+				Route:         session.Route{ModelAlias: "coder", ProviderName: "fixture", ProviderModel: "model-v1"},
+				ActiveAgents:  2, ActiveTasks: 1,
+				Observability: observability.Snapshot{Healthy: true},
+			},
+			Auth: statuslineAuthStatus{
+				Mode: "subscription-pool", ActiveClaudeAccount: "work",
+			},
 		})
 	}))
 	defer server.Close()
@@ -224,11 +247,60 @@ func TestFetchStatuslineUsesObserverEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchStatusline() error = %v", err)
 	}
-	if line != "CCR | account=personal | limits=unknown | coder | fixture/model-v1 | agents 2 | tasks 1" {
+	if line != "CCR | account=work | limits=unknown | coder | fixture/model-v1 | agents 2 | tasks 1" {
 		t.Fatalf("fetchStatusline() = %q", line)
 	}
 	if _, err := statuslineEndpoint("https://example.com"); err == nil {
 		t.Fatal("statuslineEndpoint(non-loopback) error = nil")
+	}
+}
+
+func TestStatuslineAccountCommandUsesDynamicGatewayAccount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(observerTokenHeader) != "observer-token" {
+			t.Fatalf("observer token header = %q", r.Header.Get(observerTokenHeader))
+		}
+		_ = json.NewEncoder(w).Encode(statuslineRuntimeStatus{
+			Auth: statuslineAuthStatus{
+				Mode: "subscription-pool", ActiveClaudeAccount: "work",
+			},
+		})
+	}))
+	defer server.Close()
+	t.Setenv(statuslineGatewayURLEnv, server.URL)
+	t.Setenv(statuslineTokenEnv, "observer-token")
+	t.Setenv(statuslineClaudeAccountEnv, "personal")
+
+	var out strings.Builder
+	cmd := newStatuslineAccountCommand()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("__statusline-account error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "work" {
+		t.Fatalf("__statusline-account output = %q, want work", got)
+	}
+}
+
+func TestStatuslineAccountCommandDoesNotUseStaleAccountWhenGatewayFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	t.Setenv(statuslineGatewayURLEnv, server.URL)
+	t.Setenv(statuslineTokenEnv, "observer-token")
+	t.Setenv(statuslineClaudeAccountEnv, "personal")
+
+	var out strings.Builder
+	cmd := newStatuslineAccountCommand()
+	cmd.SetOut(&out)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("__statusline-account error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "unknown" {
+		t.Fatalf("__statusline-account output = %q, want unknown", got)
 	}
 }
 

@@ -18,11 +18,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "launch [Claude Code options and prompt]",
-		Short: "Launch Claude Code through the local router",
-		Long: `Launch Claude Code through the local router.
+const launchCommandLongHelp = `Launch Claude Code through the local router.
 
 CCR owns --model, --auth-mode, --claude-account, --permission-mode, --print/-p,
 and --db. All other options and positional arguments are passed to Claude Code
@@ -39,23 +35,41 @@ permitted Anthropic models while preserving subscription or API-key
 authentication. Pass --model <alias> when you want that CCR alias to be the
 startup model.
 
-Use --auth-mode subscription-pool to select a registered local Claude account
-for this process. On an explicit rejected first-party quota response, eligible
-interactive launches rotate only by ending Claude Code and relaunching with the
-next account. Plain launches use --continue; an explicit --resume, optionally
-combined with a named --worktree, is replayed unchanged. Launch output says
-whether rotation is enabled. --print, --claude-account, managed CUA, prompts,
-and other passthrough arguments disable rotation. CCR never changes identity
-inside a running process.
+Use --auth-mode subscription-pool to route first-party model requests through a
+registered local Claude account. Claude authenticates only to the loopback
+gateway; account OAuth tokens remain in CCR memory. On a confirmed account-wide
+first-party quota response, the gateway cools the exhausted account, selects the
+next usable account, and retries the same buffered request before returning any
+response to Claude. The Claude process, gateway, session, tools, and browser
+connection stay open. An explicit --claude-account pins one account. If no
+replacement is usable, CCR forwards Anthropic's original limit response and
+keeps Claude Code running.
 
-Pool launches use a launch-only account-aware status line by default, including
-account=<name> and limits=unknown. CCR does not use Claude Code's private
-advisory quota service for routing or reuse shared-profile values. Run
-ccr claude-account test <name> --live for an explicit best-effort quota check.
-Use --no-statusline only when you intentionally want to opt out.
+When no status line is configured, CCR adds a launch-only account-aware line
+with account=<name> and limits=unknown. An existing statusLine keeps its command
+and output. Subscription-pool launches use a launch-only credential-isolation
+wrapper: the command can read CCR_CLAUDE_ACCOUNT, but OAuth, API-key, gateway,
+refresh, scope, and observer credentials are removed from its environment.
+CCR_CLAUDE_ACCOUNT is resolved from the gateway on each status-line invocation,
+so it follows in-process account rotation.
+Generated launch settings are held in a private temporary file rather than
+process arguments and are removed after Claude exits. An explicit statusLine:
+null in a higher-precedence Claude settings file remains disabled.
+On Windows, CCR visibly falls back to its account-aware line because the POSIX
+credential-isolation wrapper is unavailable.
+CCR does not use Claude Code's private advisory quota service for routing or
+reuse shared-profile values. Run ccr claude-account test <name> --live for an
+explicit best-effort quota check. Use --no-statusline only when you
+intentionally want to opt out of CCR injection.
 
 Use ccr launch --help for router-specific help. To ask Claude Code for its own
-help, use ccr launch -- --help.`,
+help, use ccr launch -- --help.`
+
+func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:                "launch [Claude Code options and prompt]",
+		Short:              "Launch Claude Code through the local router",
+		Long:               launchCommandLongHelp,
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			invocation, err := parseLaunchInvocation(args)
@@ -113,19 +127,19 @@ type resolvedLaunch struct {
 }
 
 type launchExecution struct {
-	store         *store.Store
-	launchID      int64
-	server        *gateway.Server
-	finalizer     *launchFinalizer
-	token         string
-	observerToken string
-	resolved      resolvedLaunch
-	invocation    launchInvocation
-	recorder      *observability.Recorder
-	managedCUA    *managedCUALaunch
-	cuaProject    string
-	claudeAccount *selectedClaudeAccount
-	exhaustion    chan gateway.AnthropicSubscriptionExhaustionEvent
+	store            *store.Store
+	launchID         int64
+	server           *gateway.Server
+	finalizer        *launchFinalizer
+	token            string
+	observerToken    string
+	resolved         resolvedLaunch
+	invocation       launchInvocation
+	recorder         *observability.Recorder
+	managedCUA       *managedCUALaunch
+	cuaProject       string
+	claudeAccount    *selectedClaudeAccount
+	subscriptionPool *subscriptionPoolController
 }
 
 func runLaunchAttempt(
@@ -135,7 +149,7 @@ func runLaunchAttempt(
 	deps Dependencies,
 	invocation launchInvocation,
 	selectedAccount *selectedClaudeAccount,
-	exhaustion chan gateway.AnthropicSubscriptionExhaustionEvent,
+	subscriptionPool *subscriptionPoolController,
 ) (resultErr error) {
 	if err := validateLaunchInputs(
 		invocation.modelAlias,
@@ -160,7 +174,7 @@ func runLaunchAttempt(
 		return err
 	}
 	execution, err := createLaunchExecution(
-		ctx, s, invocation, resolved, selectedAccount, exhaustion,
+		ctx, s, invocation, resolved, selectedAccount, subscriptionPool,
 	)
 	if err != nil {
 		return err
@@ -185,8 +199,10 @@ func runLaunchAttempt(
 
 	claudeSettings, err := launchClaudeSettingsArg(ctx, s, launchSettingsOptions{
 		IncludeToolDisabled: resolved.disableTools, LifecycleEnabled: !invocation.noLifecycle,
-		StatuslineEnabled: !invocation.noStatusline, AccountAwareStatusline: selectedAccount != nil,
-		GatewayURL: execution.server.URL(),
+		StatuslineEnabled:            !invocation.noStatusline,
+		IsolateStatuslineCredentials: selectedAccount != nil,
+		GatewayURL:                   execution.server.URL(),
+		StatuslineExecutable:         deps.ExecutablePath,
 	})
 	if err != nil {
 		return err
@@ -195,7 +211,8 @@ func runLaunchAttempt(
 		return statusErr
 	}
 	writeSubscriptionStatuslineNotice(
-		cmd.ErrOrStderr(), selectedAccount, invocation.noStatusline, claudeSettings.ReplacedExistingStatusline,
+		cmd.ErrOrStderr(), selectedAccount, invocation.noStatusline,
+		claudeSettings.StatuslineState,
 	)
 	if passthroughErr := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, claudeSettings.JSON != ""); passthroughErr != nil {
 		return passthroughErr
@@ -243,7 +260,7 @@ func createLaunchExecution(
 	invocation launchInvocation,
 	resolved resolvedLaunch,
 	selectedAccount *selectedClaudeAccount,
-	exhaustion chan gateway.AnthropicSubscriptionExhaustionEvent,
+	subscriptionPool *subscriptionPoolController,
 ) (*launchExecution, error) {
 	lifecycleState, statuslineState := launchObservationStates(invocation)
 	accountName := ""
@@ -259,7 +276,10 @@ func createLaunchExecution(
 	execution := &launchExecution{
 		store: s, launchID: launchID, finalizer: &launchFinalizer{store: s, launchID: launchID},
 		resolved: resolved, invocation: invocation,
-		claudeAccount: selectedAccount, exhaustion: exhaustion,
+		claudeAccount: selectedAccount, subscriptionPool: subscriptionPool,
+	}
+	if subscriptionPool != nil {
+		subscriptionPool.bindLaunch(s, launchID)
 	}
 	execution.recorder = observability.NewRecorder(ctx, observability.Config{
 		Store: execution.store, LaunchID: execution.launchID,
@@ -311,11 +331,11 @@ func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation la
 		if invocation.authMode == launchAuthModeSubscriptionPool {
 			return true, nil
 		}
-		configured, err := claudeStatuslineConfigured()
+		_, state, err := claudeStatuslineSetting()
 		if err != nil {
 			return false, err
 		}
-		if !configured {
+		if state == claudeStatuslineAbsent {
 			return true, nil
 		}
 	}
@@ -372,10 +392,6 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 	if err != nil {
 		return fmt.Errorf("creating gateway session token: %w", err)
 	}
-	execution.observerToken, err = gateway.NewToken()
-	if err != nil {
-		return fmt.Errorf("creating lifecycle observer token: %w", err)
-	}
 	recorder := execution.recorder
 	if recorder == nil {
 		recorder = observability.NewRecorder(ctx, observability.Config{
@@ -384,14 +400,11 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 		})
 		execution.recorder = recorder
 	}
-	tracker, err := session.NewTracker(session.Config{
-		Store: execution.store, Recorder: recorder, LaunchID: execution.launchID,
-		Enabled:           !execution.invocation.noLifecycle,
-		DefaultModelAlias: execution.resolved.modelAlias,
-	})
+	tracker, observerToken, err := newLaunchObserver(execution, recorder)
 	if err != nil {
-		return fmt.Errorf("creating lifecycle tracker: %w", err)
+		return err
 	}
+	execution.observerToken = observerToken
 	execution.finalizer.tracker = tracker
 	execution.server, err = deps.StartGateway(ctx, gateway.Config{
 		Store: execution.store, Secrets: deps.Secrets,
@@ -399,7 +412,7 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 		DefaultModelAlias: execution.resolved.modelAlias,
 		Recorder:          recorder, Tracker: tracker,
 		ManagedCUA: execution.managedCUA.Runtime(), ManagedCUAProject: execution.cuaProject,
-		AnthropicSubscriptionExhaustion: execution.exhaustion,
+		AnthropicSubscriptionPool: gatewaySubscriptionPool(execution.subscriptionPool),
 	})
 	if err != nil {
 		return fmt.Errorf("starting local gateway: %w", err)
@@ -407,11 +420,55 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 	return nil
 }
 
-func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Dependencies, execution *launchExecution, claudeSettings string) error {
+func newLaunchObserver(
+	execution *launchExecution,
+	recorder *observability.Recorder,
+) (*session.Tracker, string, error) {
+	if execution.invocation.noLifecycle && execution.invocation.noStatusline {
+		return nil, "", nil
+	}
+	token, err := gateway.NewToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("creating lifecycle observer token: %w", err)
+	}
+	tracker, err := session.NewTracker(session.Config{
+		Store: execution.store, Recorder: recorder, LaunchID: execution.launchID,
+		Enabled:           !execution.invocation.noLifecycle,
+		DefaultModelAlias: execution.resolved.modelAlias,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("creating lifecycle tracker: %w", err)
+	}
+	return tracker, token, nil
+}
+
+func gatewaySubscriptionPool(
+	controller *subscriptionPoolController,
+) gateway.AnthropicSubscriptionPool {
+	if controller == nil {
+		return nil
+	}
+	return controller
+}
+
+func runClaudeLaunchProcess(
+	ctx context.Context,
+	cmd *cobra.Command,
+	deps Dependencies,
+	execution *launchExecution,
+	claudeSettings string,
+) (resultErr error) {
 	invocation := execution.invocation
 	resolved := execution.resolved
+	claudeSettingsPath, cleanupSettings, err := writePrivateLaunchSettings(claudeSettings)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, cleanupSettings())
+	}()
 	claudeArgs := launchClaudeArgs(resolved.claudeModelID, invocation.printMode, resolved.disableTools,
-		claudeSettings, invocation.permissionMode, invocation.claudeArgs)
+		claudeSettingsPath, invocation.permissionMode, invocation.claudeArgs)
 	providerSecretEnvNames, err := configuredProviderSecretEnvNames(ctx, execution.store)
 	if err != nil {
 		return fmt.Errorf("reading configured provider secret environment names: %w", err)
@@ -421,7 +478,6 @@ func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Depend
 		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
 		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
 		DisableTools: resolved.disableTools, AuthMode: invocation.authMode,
-		ClaudeOAuthToken:       selectedClaudeAccountToken(execution.claudeAccount),
 		ClaudeAccountName:      selectedClaudeAccountName(execution.claudeAccount),
 		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
 	})
@@ -444,19 +500,18 @@ func runClaudeLaunchProcess(ctx context.Context, cmd *cobra.Command, deps Depend
 	}
 	writeLaunchSummary(ctx, summaryOut, execution.store, execution.server.URL(), execution.launchID,
 		process.PID(), resolved.modelAlias, resolved.disableTools, invocation.authMode, invocation.permissionMode)
-	waitErr, exhaustionEvent, stopErr := waitForClaudeProcess(ctx, process, execution.exhaustion)
+	var notices <-chan string
+	if execution.subscriptionPool != nil {
+		notices = execution.subscriptionPool.Notices()
+	}
+	waitErr, stopErr := waitForClaudeProcess(ctx, process, notices, errOut)
 	shutdownGateway(ctx, execution.server)
 	managedCUAErr := shutdownManagedCUA(ctx, &execution.managedCUA)
-	if exhaustionEvent != nil {
-		finishErr := execution.finalizer.Finish(ctx, "failed", "subscription_exhausted", nil)
-		return &subscriptionExhaustedError{
-			Event:      *exhaustionEvent,
-			CleanupErr: errors.Join(stopErr, managedCUAErr, finishErr),
-		}
-	}
+	settingsCleanupErr := cleanupSettings()
+	cleanupSettings = func() error { return nil }
 	state, reason := launchExitState(ctx, waitErr)
 	finishErr := execution.finalizer.Finish(ctx, state, reason, launchExitCode(waitErr))
-	return errors.Join(waitErr, stopErr, managedCUAErr, finishErr)
+	return errors.Join(waitErr, stopErr, managedCUAErr, settingsCleanupErr, finishErr)
 }
 
 func validateLaunchInputs(modelAlias, authMode, claudeAccount, permissionMode string) error {

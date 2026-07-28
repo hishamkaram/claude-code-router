@@ -167,17 +167,24 @@ agent, or task is marked abandoned when Claude Code exits abruptly.
 
 ## The CCR Status Line Is Missing
 
-Outside subscription-pool mode, CCR does not replace an existing Claude Code
-status line. Pool launches replace it only for the launched process so the line
-can show the selected `account=<name>` and truthful `limits=unknown`; the user
-settings file is unchanged. Run `ccr status` to inspect the same route and
-selected launch account outside Claude Code. Also check that the launch was not
-started with `--no-statusline`.
+CCR keeps an existing Claude Code status line's command and output. In
+subscription-pool mode, a launch-only credential-isolation wrapper removes
+OAuth, API-key, gateway, refresh, scope, and observer credentials before
+execution; `CCR_CLAUDE_ACCOUNT` remains available for the selected local label.
+On Windows, CCR visibly bypasses the existing command for that launch and uses
+its account-aware line because the POSIX credential-isolation wrapper is
+unavailable. CCR also injects that line when no status line is configured; it
+shows the selected `account=<name>` and truthful `limits=unknown`. An explicit
+`statusLine: null` in a higher-precedence Claude settings file remains disabled.
+Generated launch settings use a private temporary file and are removed after
+Claude exits; the existing command is never copied into process arguments. Run
+`ccr status` to inspect the same route and selected launch account outside
+Claude Code. Also check that the launch was not started with `--no-statusline`.
 
-Claude Code's built-in usage display or a status line exposed with
-`--no-statusline` may use another local profile or cached usage data. CCR cannot
-query fresh per-account subscription quota with a Claude Code OAuth token. It
-therefore never labels those numbers as belonging to the selected pool account.
+Claude Code's built-in usage display or an existing status line may use another
+local profile or cached usage data. CCR cannot query fresh per-account
+subscription quota with a Claude Code OAuth token. It therefore never labels
+those numbers as belonging to the selected pool account.
 
 ## Remove Runtime History
 
@@ -329,9 +336,10 @@ keychain credential, `ccr launch --auth-mode subscription-pool` fails visibly.
 CCR does not silently fall back to your default Claude login or an Anthropic API
 key.
 
-Current CCR versions also distinguish account-wide subscription claims from
-model limits with fallback available and unclassified rejections. The latter
-states are capped at five minutes instead of inheriting a long unified reset.
+Current CCR versions distinguish account-wide subscription claims from model
+limits with fallback available and unclassified rejections. Only confirmed
+account-wide claims create a quota cooldown; model-specific, unknown, and
+ambiguous limits remain with Claude Code.
 `claude-account list` shows `until=<timestamp>` and `reason=<class>` for every
 active cooldown. Schema v8 automatically clears only the legacy generic
 `rate_limited` marker so the next rejection can be classified accurately. For
@@ -339,46 +347,36 @@ any other state you have independently verified as stale, use `clear-cooldown`;
 it does not contact Anthropic or change keychain credentials, expiry, or
 enablement.
 
-## Subscription Pool Relaunch Did Not Happen
+## Subscription Pool Did Not Rotate
 
-Automatic relaunch requires a first-party Anthropic `/v1/messages` HTTP 429
+Automatic in-gateway rotation requires a first-party Anthropic `/v1/messages`
+HTTP 429
 whose `anthropic-ratelimit-unified-status` response header is `rejected`.
-Rejected model limits and unclassified rejections rotate with only a bounded
-transient cooldown; a representative account-wide claim with no fallback uses
-Anthropic's longer reset. Other temporary or ambiguous 429 responses are left
-to Claude Code's retry handling. Pool rotation only relaunches a plain
-interactive or explicitly resumable launch:
+A recognized representative account-wide claim must also be present, and
+Anthropic must report no model fallback. Model-specific, unknown, token-count,
+registered-provider, and temporary or ambiguous limits are left to Claude Code
+without cooling or rotating an account.
 
 ```bash
 ccr launch --auth-mode subscription-pool
-ccr launch --auth-mode subscription-pool \
-  --worktree mcp-stateless-ha --resume <session-id>
 ```
 
-The second form replays the named worktree and resume ID unchanged. CCR does not
-automatically relaunch when you use `--print`, pass `--claude-account`,
-configure managed CUA, provide a prompt, or pass other Claude Code arguments.
-Launch stderr says whether rotation is enabled and why. In non-rotating cases
-the selected account is marked cooling down only after confirmed exhaustion,
-and the command returns a visible rate-limit error. Rerun after choosing
-another account or waiting for the cooldown:
+Rotation happens inside the existing gateway and is independent of interactive,
+`--print`, resume, worktree, prompt, or managed CUA launch shape. An explicit
+`--claude-account` intentionally pins that account. Launch stderr reports the
+decision.
 
 ```bash
 ccr launch --auth-mode subscription-pool --claude-account other
 ```
 
-When automatic relaunch does run, CCR stops the current Claude Code process and
-starts a new one with `--continue` or the original explicit resume/worktree
-arguments. It cannot swap identities inside an existing Claude Code process.
-Claude Code restores the conversation, but CCR does not synthesize or replay
-the interrupted user input because doing so could repeat tool side effects. If
-the turn did not complete before rotation, continue it in the relaunched
-session.
-
-An exit such as `No deferred tool marker found` is a Claude Code resume error,
-not subscription exhaustion. Provide a prompt for `--print --resume` or use an
-interactive resume. CCR intentionally does not cycle every account for a CLI,
-session, settings, or worktree error.
+On rotation, only outbound first-party OAuth authorization changes. CCR closes
+the rejected response and retries the already-buffered request before Claude
+sees it. The Claude PID, session, pending turn, tools, browser extension
+connection, and gateway do not restart. If all replacements are unavailable,
+CCR forwards Anthropic's original limit response and leaves Claude running.
+Inspect `ccr claude-account list` for disabled, expired, cooling, duplicate, or
+credential-unavailable accounts.
 
 ## Remove a Claude Subscription Account
 

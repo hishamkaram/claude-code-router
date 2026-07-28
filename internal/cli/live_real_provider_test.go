@@ -189,8 +189,8 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 		}
 	case launchAuthModeSubscriptionPool:
 		return []string{
-			"Gateway accepts the generated local X-CCR-Session-Token",
-			"Model requests use the selected account's stored OAuth token",
+			"Claude authenticates only to this process's loopback gateway",
+			"confirmed account-wide limits rotate without restarting Claude Code",
 			"The account name is a local CCR label",
 		}
 	default:

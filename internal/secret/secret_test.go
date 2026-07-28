@@ -78,6 +78,28 @@ func TestValidateRef(t *testing.T) {
 	}
 }
 
+func TestResolveProviderRejectsClaudeAccountCredentialRef(t *testing.T) {
+	t.Parallel()
+
+	providerRef := KeyringRef("openrouter")
+	accountRef := ClaudeAccountAccessTokenRef("personal")
+	backend := testBackend{
+		providerRef: " provider-api-key ",
+		accountRef:  "claude-oauth-token",
+	}
+	value, err := ResolveProvider(context.Background(), backend, providerRef)
+	if err != nil || value != "provider-api-key" {
+		t.Fatalf("ResolveProvider(provider) = %q, %v", value, err)
+	}
+	value, err = ResolveProvider(context.Background(), backend, accountRef)
+	if err == nil || value != "" {
+		t.Fatalf("ResolveProvider(account) = %q, %v; want rejection", value, err)
+	}
+	if strings.Contains(err.Error(), "personal") || strings.Contains(err.Error(), "claude-oauth-token") {
+		t.Fatalf("ResolveProvider(account) exposed credential metadata: %v", err)
+	}
+}
+
 func TestKeyringStoreErrorUsesCredentialSpecificGuidance(t *testing.T) {
 	t.Parallel()
 
@@ -175,4 +197,21 @@ func writeSecretFile(t *testing.T, value string, perm os.FileMode) string {
 		t.Fatalf("Chmod error = %v", err)
 	}
 	return path
+}
+
+type testBackend map[string]string
+
+func (testBackend) Available(ctx context.Context) error {
+	return ctx.Err()
+}
+
+func (testBackend) Store(ctx context.Context, _, _ string) error {
+	return ctx.Err()
+}
+
+func (b testBackend) Resolve(ctx context.Context, ref string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return b[ref], nil
 }

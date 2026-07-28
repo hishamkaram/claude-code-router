@@ -29,17 +29,14 @@ func newLiveSubscriptionPTYLauncher(projectDir string) *liveSubscriptionPTYLaunc
 }
 
 type liveSubscriptionPTYStart struct {
-	Args       []string
-	OAuthToken string
-	PID        int
-	Process    *liveSubscriptionRecordingProcess
-	session    livePickerSession
-	Transcript *synchronizedBuffer
-	readDone   chan error
-}
-
-func (s *liveSubscriptionPTYStart) UsesToken(token string) bool {
-	return s.OAuthToken == token
+	Args              []string
+	PID               int
+	OAuthTokenExposed bool
+	LocalGatewayAuth  bool
+	Process           *liveSubscriptionRecordingProcess
+	session           livePickerSession
+	Transcript        *synchronizedBuffer
+	readDone          chan error
 }
 
 func (s *liveSubscriptionPTYStart) Submit(t *testing.T, input string) {
@@ -87,14 +84,16 @@ func (l *liveSubscriptionPTYLauncher) Start(
 		return nil, fmt.Errorf("real Claude PTY session was not recorded")
 	}
 	wrapped := newLiveSubscriptionRecordingProcess(process)
+	environment := environmentEntries(env.Set)
 	start := &liveSubscriptionPTYStart{
-		Args:       append([]string(nil), args...),
-		OAuthToken: environmentEntries(env.Set)["CLAUDE_CODE_OAUTH_TOKEN"],
-		PID:        process.PID(),
-		Process:    wrapped,
-		session:    session,
-		Transcript: &synchronizedBuffer{},
-		readDone:   make(chan error, 1),
+		Args: append([]string(nil), args...), PID: process.PID(),
+		OAuthTokenExposed: environment["CLAUDE_CODE_OAUTH_TOKEN"] != "" ||
+			!containsString(env.Unset, "CLAUDE_CODE_OAUTH_TOKEN"),
+		LocalGatewayAuth: environment["ANTHROPIC_AUTH_TOKEN"] != "",
+		Process:          wrapped,
+		session:          session,
+		Transcript:       &synchronizedBuffer{},
+		readDone:         make(chan error, 1),
 	}
 	go func() {
 		_, copyErr := io.Copy(start.Transcript, session.pty)

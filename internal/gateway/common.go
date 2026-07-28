@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"net/http"
-	"strings"
 
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
@@ -18,14 +17,7 @@ func (h *handler) httpClient() *http.Client {
 }
 
 func resolveProviderSecret(ctx context.Context, backend secret.Backend, ref string) (string, error) {
-	if strings.TrimSpace(ref) == "" {
-		return "", nil
-	}
-	value, err := backend.Resolve(ctx, ref)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(value), nil
+	return secret.ResolveProvider(ctx, backend, ref)
 }
 
 func firstNonEmpty(values ...string) string {

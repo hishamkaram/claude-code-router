@@ -20,11 +20,7 @@ type liveSubscriptionStart struct {
 	args       []string
 	gatewayURL string
 	headers    string
-	oauthToken string
-}
-
-func (s liveSubscriptionStart) UsesToken(token string) bool {
-	return s.oauthToken == token
+	authToken  string
 }
 
 func (l *liveSubscriptionHTTPLauncher) Start(
@@ -41,7 +37,7 @@ func (l *liveSubscriptionHTTPLauncher) Start(
 		args:       append([]string(nil), args...),
 		gatewayURL: environmentEntries(env.Set)["ANTHROPIC_BASE_URL"],
 		headers:    environmentEntries(env.Set)["ANTHROPIC_CUSTOM_HEADERS"],
-		oauthToken: environmentEntries(env.Set)["CLAUDE_CODE_OAUTH_TOKEN"],
+		authToken:  environmentEntries(env.Set)["ANTHROPIC_AUTH_TOKEN"],
 	}
 	l.mu.Lock()
 	l.starts = append(l.starts, start)
@@ -93,7 +89,7 @@ func postLiveSubscriptionGatewayRequest(ctx context.Context, start liveSubscript
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+start.oauthToken)
+	req.Header.Set("Authorization", "Bearer "+start.authToken)
 	for _, line := range strings.Split(start.headers, "\n") {
 		name, value, ok := strings.Cut(line, ":")
 		if ok {

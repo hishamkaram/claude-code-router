@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,40 +20,11 @@ const (
 	maxTransientRateLimitCooldown     = 5 * time.Minute
 	credentialFailureCooldown         = 5 * time.Minute
 	maxSubscriptionCooldown           = 24 * time.Hour
-	claudeProcessStopTimeout          = 5 * time.Second
 )
 
 type selectedClaudeAccount struct {
 	Account    store.ClaudeAccount
 	OAuthToken string
-}
-
-type subscriptionExhaustedError struct {
-	Event      gateway.AnthropicSubscriptionExhaustionEvent
-	CleanupErr error
-}
-
-type subscriptionPoolRelaunchPlan struct {
-	enabled bool
-	args    []string
-	reason  string
-}
-
-type subscriptionPoolContinuityState struct {
-	resume         bool
-	continuitySeen bool
-	worktreeSeen   bool
-}
-
-func (e *subscriptionExhaustedError) Error() string {
-	if e.CleanupErr != nil {
-		return fmt.Sprintf("Claude subscription account is rate limited and launch cleanup failed: %v", e.CleanupErr)
-	}
-	return "Claude subscription account is rate limited"
-}
-
-func (e *subscriptionExhaustedError) Unwrap() error {
-	return e.CleanupErr
 }
 
 func runLaunch(
@@ -91,180 +61,88 @@ func runSubscriptionPoolLaunch(
 	deps Dependencies,
 	invocation launchInvocation,
 ) error {
-	relaunch := planSubscriptionPoolRelaunch(invocation)
-	excluded := []string{}
-	attempt := invocation
-	for {
-		selected, err := claimLaunchClaudeAccount(ctx, cmd, opts, deps, invocation.claudeAccount, excluded)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(
+	selected, err := claimLaunchClaudeAccount(
+		ctx, cmd.ErrOrStderr(), opts, deps, invocation.claudeAccount, nil,
+	)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"Claude model-request account selected: %s (local label; gateway-held OAuth can rotate without restarting Claude Code).\n",
+		selected.Account.Name,
+	)
+	pinned := invocation.claudeAccount != ""
+	if pinned {
+		fmt.Fprintln(
 			cmd.ErrOrStderr(),
-			"Claude model-request account selected: %s (local label; OAuth token is fixed for this process).\n",
-			selected.Account.Name,
+			"Automatic account rotation: disabled because --claude-account pins one account; confirmed limits are forwarded without restarting Claude Code.",
 		)
-		writeSubscriptionRotationNotice(cmd.ErrOrStderr(), relaunch)
-		exhaustion := make(chan gateway.AnthropicSubscriptionExhaustionEvent, 1)
-		err = runLaunchAttempt(ctx, cmd, opts, deps, attempt, &selected, exhaustion)
-		var rateLimited *subscriptionExhaustedError
-		if !errors.As(err, &rateLimited) {
-			return err
-		}
-		excluded = append(excluded, selected.Account.Name)
-		cooldownUntil := subscriptionCooldownUntil(time.Now().UTC(), rateLimited.Event)
-		failureClass := subscriptionRateLimitFailureClass(rateLimited.Event)
-		if markErr := markClaudeAccountRateLimited(
-			ctx, opts, selected.Account.Name, cooldownUntil, failureClass,
-		); markErr != nil {
-			return errors.Join(err, markErr)
-		}
-		if rateLimited.CleanupErr != nil {
-			return err
-		}
-		if !relaunch.enabled {
-			return fmt.Errorf(
-				"claude account %q %s; unavailable until %s; select another account or clear a false cooldown with ccr claude-account clear-cooldown %s: %w",
-				selected.Account.Name,
-				subscriptionRateLimitDescription(rateLimited.Event),
-				cooldownUntil.Format(time.RFC3339),
-				selected.Account.Name,
-				err,
-			)
-		}
-		fmt.Fprintf(
+	} else {
+		fmt.Fprintln(
 			cmd.ErrOrStderr(),
-			"Claude account %s %s; unavailable until %s; relaunching with the next available account.\n",
-			selected.Account.Name,
-			subscriptionRateLimitDescription(rateLimited.Event),
-			cooldownUntil.Format(time.RFC3339),
+			"Automatic account rotation: enabled inside the local gateway for confirmed account-wide quota responses; the Claude Code process is not restarted.",
 		)
-		attempt.claudeArgs = append([]string(nil), relaunch.args...)
 	}
-}
-
-func subscriptionPoolCanRelaunch(invocation launchInvocation) bool {
-	return planSubscriptionPoolRelaunch(invocation).enabled
-}
-
-func planSubscriptionPoolRelaunch(invocation launchInvocation) subscriptionPoolRelaunchPlan {
-	switch {
-	case invocation.printMode:
-		return subscriptionPoolRelaunchPlan{reason: "--print is a one-shot Claude Code process"}
-	case invocation.claudeAccount != "":
-		return subscriptionPoolRelaunchPlan{reason: "--claude-account pins one account"}
-	case invocation.cuaOptionsConfigured():
-		return subscriptionPoolRelaunchPlan{reason: "managed CUA launch state cannot be resumed safely"}
-	}
-	args, resumable := subscriptionPoolResumeArgs(invocation.claudeArgs)
-	if !resumable {
-		return subscriptionPoolRelaunchPlan{
-			reason: "the Claude Code arguments are not a replay-safe --resume/--continue worktree launch",
-		}
-	}
-	return subscriptionPoolRelaunchPlan{enabled: true, args: args}
-}
-
-func subscriptionPoolResumeArgs(args []string) ([]string, bool) {
-	if len(args) == 0 {
-		return []string{"--continue"}, true
-	}
-	state := subscriptionPoolContinuityState{}
-	for index := 0; index < len(args); index++ {
-		option, inlineValue, inline := strings.Cut(args[index], "=")
-		if !state.accept(option, inline) {
-			return nil, false
-		}
-		if option == "--continue" || option == "-c" {
-			continue
-		}
-		if inline && strings.TrimSpace(inlineValue) == "" {
-			return nil, false
-		}
-		if !inline {
-			index++
-			if index >= len(args) ||
-				strings.TrimSpace(args[index]) == "" ||
-				strings.HasPrefix(args[index], "-") {
-				return nil, false
-			}
-		}
-	}
-	relaunchArgs := append([]string(nil), args...)
-	if !state.resume {
-		relaunchArgs = append(relaunchArgs, "--continue")
-	}
-	return relaunchArgs, true
-}
-
-func (s *subscriptionPoolContinuityState) accept(option string, inline bool) bool {
-	switch option {
-	case "--continue", "-c":
-		if inline || s.continuitySeen {
-			return false
-		}
-		s.continuitySeen = true
-		s.resume = true
-	case "--resume", "-r":
-		if s.continuitySeen {
-			return false
-		}
-		s.continuitySeen = true
-		s.resume = true
-	case "--worktree", "-w":
-		if s.worktreeSeen {
-			return false
-		}
-		s.worktreeSeen = true
-	default:
-		return false
-	}
-	return true
-}
-
-func writeSubscriptionRotationNotice(out io.Writer, plan subscriptionPoolRelaunchPlan) {
-	if plan.enabled {
-		fmt.Fprintln(out, "Automatic account rotation: enabled for rejected first-party quota responses.")
-		return
-	}
-	fmt.Fprintf(out, "Automatic account rotation: disabled because %s.\n", plan.reason)
+	pool := newSubscriptionPoolController(deps, selected, pinned)
+	return runLaunchAttempt(ctx, cmd, opts, deps, invocation, &selected, pool)
 }
 
 func claimLaunchClaudeAccount(
 	ctx context.Context,
-	cmd *cobra.Command,
+	out io.Writer,
 	opts *options,
 	deps Dependencies,
 	explicitName string,
 	excluded []string,
 ) (selectedClaudeAccount, error) {
-	s, _, err := openMigratedStore(ctx, opts)
+	selected, found, err := tryClaimLaunchClaudeAccount(
+		ctx, out, opts, deps, explicitName, excluded,
+	)
 	if err != nil {
 		return selectedClaudeAccount{}, err
+	}
+	if !found {
+		return selectedClaudeAccount{}, noUsableClaudeAccountError(explicitName)
+	}
+	return selected, nil
+}
+
+func tryClaimLaunchClaudeAccount(
+	ctx context.Context,
+	out io.Writer,
+	opts *options,
+	deps Dependencies,
+	explicitName string,
+	excluded []string,
+) (selectedClaudeAccount, bool, error) {
+	s, _, err := openMigratedStore(ctx, opts)
+	if err != nil {
+		return selectedClaudeAccount{}, false, err
 	}
 	defer closeStore(s)
 
 	for {
 		account, found, claimErr := claimEligibleClaudeAccount(ctx, s, explicitName, excluded)
 		if claimErr != nil {
-			return selectedClaudeAccount{}, claimErr
+			return selectedClaudeAccount{}, false, claimErr
 		}
 		if !found {
-			return selectedClaudeAccount{}, noUsableClaudeAccountError(explicitName)
+			return selectedClaudeAccount{}, false, nil
 		}
 		selected, resolveErr := resolveClaimedClaudeAccount(ctx, deps, account)
 		if resolveErr == nil {
-			return selected, nil
+			return selected, true, nil
 		}
 		cooldown := time.Now().UTC().Add(credentialFailureCooldown)
 		if markErr := s.MarkClaudeAccountFailure(ctx, account.Name, cooldown, "credential_unavailable"); markErr != nil {
-			return selectedClaudeAccount{}, errors.Join(
+			return selectedClaudeAccount{}, false, errors.Join(
 				fmt.Errorf("resolving Claude account %q credential: %w", account.Name, resolveErr),
 				markErr,
 			)
 		}
-		if reportErr := reportUnavailableClaudeCredential(cmd, account.Name, explicitName != "", cooldown, resolveErr); reportErr != nil {
-			return selectedClaudeAccount{}, reportErr
+		if reportErr := reportUnavailableClaudeCredential(out, account.Name, explicitName != "", cooldown, resolveErr); reportErr != nil {
+			return selectedClaudeAccount{}, false, reportErr
 		}
 		excluded = append(excluded, account.Name)
 	}
@@ -287,7 +165,7 @@ func resolveClaimedClaudeAccount(
 }
 
 func reportUnavailableClaudeCredential(
-	cmd *cobra.Command,
+	out io.Writer,
 	name string,
 	explicit bool,
 	cooldown time.Time,
@@ -300,7 +178,7 @@ func reportUnavailableClaudeCredential(
 		)
 	}
 	fmt.Fprintf(
-		cmd.ErrOrStderr(),
+		out,
 		"Claude account %s credential is unavailable; skipping it until %s.\n",
 		name,
 		cooldown.Format(time.RFC3339),
@@ -331,24 +209,6 @@ func noUsableClaudeAccountError(explicitName string) error {
 	return fmt.Errorf(
 		"claude subscription pool has no usable accounts; run ccr claude-account list and refresh, enable, clear-cooldown, or add an account",
 	)
-}
-
-func markClaudeAccountRateLimited(
-	ctx context.Context,
-	opts *options,
-	name string,
-	cooldownUntil time.Time,
-	failureClass string,
-) error {
-	s, _, err := openMigratedStore(ctx, opts)
-	if err != nil {
-		return err
-	}
-	defer closeStore(s)
-	if err := s.MarkClaudeAccountFailure(ctx, name, cooldownUntil, failureClass); err != nil {
-		return fmt.Errorf("marking Claude account %q rate limited: %w", name, err)
-	}
-	return nil
 }
 
 func subscriptionCooldownUntil(
@@ -424,13 +284,6 @@ func subscriptionRateLimitDescription(event gateway.AnthropicSubscriptionExhaust
 	}
 }
 
-func selectedClaudeAccountToken(account *selectedClaudeAccount) string {
-	if account == nil {
-		return ""
-	}
-	return account.OAuthToken
-}
-
 func selectedClaudeAccountName(account *selectedClaudeAccount) string {
 	if account == nil {
 		return ""
@@ -442,67 +295,49 @@ func writeSubscriptionStatuslineNotice(
 	out io.Writer,
 	account *selectedClaudeAccount,
 	disabled bool,
-	replacedExisting bool,
+	statuslineState string,
 ) {
 	if account == nil {
 		return
 	}
+	name := account.Account.Name
 	if disabled {
 		fmt.Fprintf(
 			out,
 			"Warning: CCR account-aware status line is disabled; subscription limits shown by Claude or an existing status line may belong to another local profile. Active account: %s.\n",
-			account.Account.Name,
+			name,
+		)
+		return
+	}
+	if statuslineState == "disabled" {
+		fmt.Fprintf(
+			out,
+			"Warning: Claude statusLine is explicitly disabled by effective settings; CCR preserved that choice. Active account: %s; subscription limits remain unknown.\n",
+			name,
 		)
 		return
 	}
 	fmt.Fprintf(
 		out,
 		"Subscription limits for account %s: unknown in the status line (use ccr claude-account test %s --live for advisory quota; routing does not reuse shared-profile data).\n",
-		account.Account.Name,
-		account.Account.Name,
+		name,
+		name,
 	)
-	if replacedExisting {
+	writeSubscriptionStatuslineIsolationNotice(out, name, statuslineState)
+}
+
+func writeSubscriptionStatuslineIsolationNotice(out io.Writer, accountName, statuslineState string) {
+	switch statuslineState {
+	case "isolated":
+		fmt.Fprintf(
+			out,
+			"Existing Claude statusLine preserved through a launch-only credential-isolation wrapper; CCR_CLAUDE_ACCOUNT=%s remains available while OAuth and gateway tokens are removed from that command's environment.\n",
+			accountName,
+		)
+	case "replaced":
 		fmt.Fprintln(
 			out,
-			"Existing Claude statusLine bypassed for this launch so another profile's subscription limits are not presented as current; use --no-statusline to opt out.",
+			"Existing Claude statusLine bypassed for this launch because credential isolation is unavailable on Windows; using CCR's account-aware status line instead.",
 		)
-	}
-}
-
-func waitForClaudeProcess(
-	ctx context.Context,
-	process ClaudeProcess,
-	exhaustion <-chan gateway.AnthropicSubscriptionExhaustionEvent,
-) (waitErr error, exhausted *gateway.AnthropicSubscriptionExhaustionEvent, stopErr error) {
-	done := process.Done()
-	if exhaustion == nil {
-		return <-done, nil, nil
-	}
-	select {
-	case event := <-exhaustion:
-		stopErr = stopClaudeProcessAndWait(process, done, claudeProcessStopTimeout)
-		return nil, &event, stopErr
-	case waitErr = <-done:
-		select {
-		case event := <-exhaustion:
-			return nil, &event, nil
-		default:
-			return waitErr, nil, nil
-		}
-	case <-ctx.Done():
-		stopErr = stopClaudeProcessAndWait(process, done, claudeProcessStopTimeout)
-		return ctx.Err(), nil, stopErr
-	}
-}
-
-func stopClaudeProcessAndWait(process ClaudeProcess, done <-chan error, timeout time.Duration) error {
-	stopErr := process.Stop()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-done:
-		return stopErr
-	case <-timer.C:
-		return errors.Join(stopErr, fmt.Errorf("timed out after %s waiting for Claude Code to stop", timeout))
 	}
 }
