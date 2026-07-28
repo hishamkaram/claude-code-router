@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,10 +16,11 @@ import (
 
 	"github.com/hishamkaram/claude-code-router/internal/liveclaude"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 func TestLiveFixtureSubscriptionPoolIsolatesExistingStatuslineCredentials(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	if _, err := liveclaude.Check(ctx); err != nil {
 		t.Skipf("live Claude Code unavailable: %v", err)
@@ -46,6 +48,7 @@ func TestLiveFixtureSubscriptionPoolIsolatesExistingStatuslineCredentials(t *tes
 	}}
 	fixture := newLiveSubscriptionFixture(t, nil)
 	launcher := newLiveSubscriptionPTYLauncher("")
+	ccrExecutable := buildLiveCCRExecutable(t, ctx)
 	commandOut, commandErr := &bytes.Buffer{}, &bytes.Buffer{}
 	commandDone := make(chan error, 1)
 	t.Cleanup(func() {
@@ -56,6 +59,7 @@ func TestLiveFixtureSubscriptionPoolIsolatesExistingStatuslineCredentials(t *tes
 		cmd := NewRootCommand(ctx, Dependencies{
 			In: strings.NewReader(""), Out: commandOut, Err: commandErr,
 			Secrets: secrets, Launcher: launcher, StartGateway: fixture.StartGateway,
+			ExecutablePath: ccrExecutable,
 		})
 		cmd.SetArgs([]string{
 			"--db", dbPath, "launch", "--auth-mode", "subscription-pool",
@@ -88,6 +92,36 @@ func TestLiveFixtureSubscriptionPoolIsolatesExistingStatuslineCredentials(t *tes
 	}
 	combined := commandOut.String() + commandErr.String() + launcher.Transcript() + probe
 	assertNoSubscriptionTokenLeak(t, combined, liveSubscriptionPersonalToken)
+}
+
+func buildLiveCCRExecutable(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("resolving repository root: %v", err)
+	}
+	tempFile, err := os.CreateTemp("", "ccr-live-statusline-*")
+	if err != nil {
+		t.Fatalf("creating live CCR executable path: %v", err)
+	}
+	executable := tempFile.Name()
+	if err := tempFile.Close(); err != nil {
+		t.Fatalf("closing live CCR executable placeholder: %v", err)
+	}
+	if err := os.Remove(executable); err != nil {
+		t.Fatalf("removing live CCR executable placeholder: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(executable); err != nil && !os.IsNotExist(err) {
+			t.Errorf("removing live CCR executable: %v", err)
+		}
+	})
+	command := exec.CommandContext(ctx, "go", "build", "-o", executable, "./cmd/ccr")
+	command.Dir = repoRoot
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("building live CCR status-line helper: %v\n%s", err, output)
+	}
+	return executable
 }
 
 func TestLiveFixtureSubscriptionPoolKeepsRealClaudeOpenWhenAllAccountsLimited(t *testing.T) {
@@ -143,8 +177,8 @@ func TestLiveFixtureSubscriptionPoolKeepsRealClaudeOpenWhenAllAccountsLimited(t 
 	}
 	combined := commandOut.String() + commandErr.String() + launcher.Transcript() + fmt.Sprint(launchErr)
 	for _, want := range []string{
-		"No replacement account is currently usable",
-		"keeping the current Claude Code process open",
+		"no replacement account is usable",
+		"kept Claude Code running",
 	} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("real Claude continuity output missing %q:\n%s",
@@ -239,5 +273,29 @@ func assertRealClaudeRemainsOpen(
 	case unexpected := <-launcher.starts:
 		t.Fatalf("CCR unexpectedly relaunched real Claude with pid %d", unexpected.PID)
 	default:
+	}
+}
+
+func waitForClaudeAccountFailure(t *testing.T, dbPath, name, failureClass string) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open error = %v", err)
+	}
+	defer closeStore(s)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		account, getErr := s.GetClaudeAccount(ctx, name)
+		if getErr == nil && account.LastError == failureClass {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf(
+				"Claude account %q failure = %q, error=%v, want %q",
+				name, account.LastError, getErr, failureClass,
+			)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

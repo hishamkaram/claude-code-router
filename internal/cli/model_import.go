@@ -199,11 +199,7 @@ func resolveDiscoveryAPIKey(ctx context.Context, deps Dependencies, plan secretP
 	if plan.ref == "" {
 		return "", nil
 	}
-	apiKey, err := deps.Secrets.Resolve(ctx, plan.ref)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(apiKey), nil
+	return secret.ResolveProvider(ctx, deps.Secrets, plan.ref)
 }
 
 func planModelImports(ctx context.Context, deps Dependencies, s *store.Store, providerName string, models []providers.DiscoveredModel, choice modelImportChoice) ([]plannedModelImport, modelImportSummary, error) {

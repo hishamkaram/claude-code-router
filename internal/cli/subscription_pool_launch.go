@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -28,39 +27,6 @@ type selectedClaudeAccount struct {
 	OAuthToken string
 }
 
-type subscriptionExhaustedError struct {
-	Event      gateway.AnthropicSubscriptionExhaustionEvent
-	CleanupErr error
-}
-
-type subscriptionExhaustionControl struct {
-	events chan gateway.AnthropicSubscriptionExhaustionEvent
-	handle func(io.Writer, gateway.AnthropicSubscriptionExhaustionEvent) bool
-}
-
-type subscriptionPoolRelaunchPlan struct {
-	enabled bool
-	args    []string
-	reason  string
-}
-
-type subscriptionPoolContinuityState struct {
-	resume         bool
-	continuitySeen bool
-	worktreeSeen   bool
-}
-
-func (e *subscriptionExhaustedError) Error() string {
-	if e.CleanupErr != nil {
-		return fmt.Sprintf("Claude subscription account is rate limited and launch cleanup failed: %v", e.CleanupErr)
-	}
-	return "Claude subscription account is rate limited"
-}
-
-func (e *subscriptionExhaustedError) Unwrap() error {
-	return e.CleanupErr
-}
-
 func runLaunch(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -69,9 +35,7 @@ func runLaunch(
 	invocation launchInvocation,
 ) error {
 	if invocation.authMode != launchAuthModeSubscriptionPool {
-		return runLaunchAttempt(
-			ctx, cmd, opts, deps, invocation, nil, subscriptionExhaustionControl{},
-		)
+		return runLaunchAttempt(ctx, cmd, opts, deps, invocation, nil, nil)
 	}
 	if err := validateLaunchInputs(
 		invocation.modelAlias,
@@ -97,216 +61,31 @@ func runSubscriptionPoolLaunch(
 	deps Dependencies,
 	invocation launchInvocation,
 ) error {
-	relaunch := planSubscriptionPoolRelaunch(invocation)
-	attempt := invocation
 	selected, err := claimLaunchClaudeAccount(
 		ctx, cmd.ErrOrStderr(), opts, deps, invocation.claudeAccount, nil,
 	)
 	if err != nil {
 		return err
 	}
-	for {
-		fmt.Fprintf(
+	fmt.Fprintf(
+		cmd.ErrOrStderr(),
+		"Claude model-request account selected: %s (local label; gateway-held OAuth can rotate without restarting Claude Code).\n",
+		selected.Account.Name,
+	)
+	pinned := invocation.claudeAccount != ""
+	if pinned {
+		fmt.Fprintln(
 			cmd.ErrOrStderr(),
-			"Claude model-request account selected: %s (local label; OAuth token is fixed for this process).\n",
-			selected.Account.Name,
+			"Automatic account rotation: disabled because --claude-account pins one account; confirmed limits are forwarded without restarting Claude Code.",
 		)
-		writeSubscriptionRotationNotice(cmd.ErrOrStderr(), relaunch)
-		var next selectedClaudeAccount
-		nextPrepared := false
-		exhaustion := subscriptionExhaustionControl{
-			events: make(chan gateway.AnthropicSubscriptionExhaustionEvent, 1),
-			handle: func(out io.Writer, event gateway.AnthropicSubscriptionExhaustionEvent) bool {
-				candidate, rotate, prepareErr := prepareSubscriptionPoolRotation(
-					ctx, out, opts, deps, selected, relaunch, event,
-				)
-				if prepareErr != nil {
-					fmt.Fprintf(
-						out,
-						"Warning: automatic account rotation could not be prepared; keeping the current Claude Code process open: %v\n",
-						prepareErr,
-					)
-					return false
-				}
-				next, nextPrepared = candidate, rotate
-				return rotate
-			},
-		}
-		err = runLaunchAttempt(ctx, cmd, opts, deps, attempt, &selected, exhaustion)
-		var rateLimited *subscriptionExhaustedError
-		if !errors.As(err, &rateLimited) {
-			return err
-		}
-		if rateLimited.CleanupErr != nil {
-			return err
-		}
-		if !nextPrepared {
-			return fmt.Errorf("subscription-pool rotation stopped Claude Code without a prepared replacement: %w", err)
-		}
-		selected = next
-		attempt.claudeArgs = append([]string(nil), relaunch.args...)
-	}
-}
-
-func prepareSubscriptionPoolRotation(
-	ctx context.Context,
-	out io.Writer,
-	opts *options,
-	deps Dependencies,
-	current selectedClaudeAccount,
-	relaunch subscriptionPoolRelaunchPlan,
-	event gateway.AnthropicSubscriptionExhaustionEvent,
-) (selectedClaudeAccount, bool, error) {
-	cooldownUntil, description, err := recordSubscriptionPoolFailure(
-		ctx, opts, current.Account.Name, event,
-	)
-	if err != nil {
-		return selectedClaudeAccount{}, false, err
-	}
-	if !relaunch.enabled {
-		writeSubscriptionPoolContinuityNotice(
-			out, current.Account.Name, description, cooldownUntil, relaunch.reason,
+	} else {
+		fmt.Fprintln(
+			cmd.ErrOrStderr(),
+			"Automatic account rotation: enabled inside the local gateway for confirmed account-wide quota responses; the Claude Code process is not restarted.",
 		)
-		return selectedClaudeAccount{}, false, nil
 	}
-	next, found, err := tryClaimLaunchClaudeAccount(
-		ctx, out, opts, deps, "", []string{current.Account.Name},
-	)
-	if err != nil {
-		return selectedClaudeAccount{}, false, err
-	}
-	if !found {
-		writeSubscriptionPoolContinuityNotice(
-			out, current.Account.Name, description, cooldownUntil, "",
-		)
-		return selectedClaudeAccount{}, false, nil
-	}
-	fmt.Fprintf(
-		out,
-		"Claude account %s %s; unavailable until %s; relaunching with the next available account (%s).\n",
-		current.Account.Name, description, cooldownUntil.Format(time.RFC3339), next.Account.Name,
-	)
-	return next, true, nil
-}
-
-func recordSubscriptionPoolFailure(
-	ctx context.Context,
-	opts *options,
-	account string,
-	event gateway.AnthropicSubscriptionExhaustionEvent,
-) (time.Time, string, error) {
-	cooldownUntil := subscriptionCooldownUntil(time.Now().UTC(), event)
-	failureClass := subscriptionRateLimitFailureClass(event)
-	err := markClaudeAccountRateLimited(ctx, opts, account, cooldownUntil, failureClass)
-	return cooldownUntil, subscriptionRateLimitDescription(event), err
-}
-
-func writeSubscriptionPoolContinuityNotice(
-	out io.Writer,
-	account, description string,
-	cooldownUntil time.Time,
-	relaunchDisabledReason string,
-) {
-	if relaunchDisabledReason != "" {
-		fmt.Fprintf(
-			out,
-			"Claude account %s %s; unavailable until %s. Automatic relaunch is disabled because %s; keeping the current Claude Code process open.\n",
-			account, description, cooldownUntil.Format(time.RFC3339), relaunchDisabledReason,
-		)
-		return
-	}
-	fmt.Fprintf(
-		out,
-		"Claude account %s %s; unavailable until %s. No replacement account is currently usable; keeping the current Claude Code process open and retrying pool selection after the next rejected quota response.\n",
-		account, description, cooldownUntil.Format(time.RFC3339),
-	)
-}
-
-func subscriptionPoolCanRelaunch(invocation launchInvocation) bool {
-	return planSubscriptionPoolRelaunch(invocation).enabled
-}
-
-func planSubscriptionPoolRelaunch(invocation launchInvocation) subscriptionPoolRelaunchPlan {
-	switch {
-	case invocation.printMode:
-		return subscriptionPoolRelaunchPlan{reason: "--print is a one-shot Claude Code process"}
-	case invocation.claudeAccount != "":
-		return subscriptionPoolRelaunchPlan{reason: "--claude-account pins one account"}
-	case invocation.cuaOptionsConfigured():
-		return subscriptionPoolRelaunchPlan{reason: "managed CUA launch state cannot be resumed safely"}
-	}
-	args, resumable := subscriptionPoolResumeArgs(invocation.claudeArgs)
-	if !resumable {
-		return subscriptionPoolRelaunchPlan{
-			reason: "the Claude Code arguments are not a replay-safe --resume/--continue worktree launch",
-		}
-	}
-	return subscriptionPoolRelaunchPlan{enabled: true, args: args}
-}
-
-func subscriptionPoolResumeArgs(args []string) ([]string, bool) {
-	if len(args) == 0 {
-		return []string{"--continue"}, true
-	}
-	state := subscriptionPoolContinuityState{}
-	for index := 0; index < len(args); index++ {
-		option, inlineValue, inline := strings.Cut(args[index], "=")
-		if !state.accept(option, inline) {
-			return nil, false
-		}
-		if option == "--continue" || option == "-c" {
-			continue
-		}
-		if inline && strings.TrimSpace(inlineValue) == "" {
-			return nil, false
-		}
-		if !inline {
-			index++
-			if index >= len(args) ||
-				strings.TrimSpace(args[index]) == "" ||
-				strings.HasPrefix(args[index], "-") {
-				return nil, false
-			}
-		}
-	}
-	relaunchArgs := append([]string(nil), args...)
-	if !state.resume {
-		relaunchArgs = append(relaunchArgs, "--continue")
-	}
-	return relaunchArgs, true
-}
-
-func (s *subscriptionPoolContinuityState) accept(option string, inline bool) bool {
-	switch option {
-	case "--continue", "-c":
-		if inline || s.continuitySeen {
-			return false
-		}
-		s.continuitySeen = true
-		s.resume = true
-	case "--resume", "-r":
-		if s.continuitySeen {
-			return false
-		}
-		s.continuitySeen = true
-		s.resume = true
-	case "--worktree", "-w":
-		if s.worktreeSeen {
-			return false
-		}
-		s.worktreeSeen = true
-	default:
-		return false
-	}
-	return true
-}
-
-func writeSubscriptionRotationNotice(out io.Writer, plan subscriptionPoolRelaunchPlan) {
-	if plan.enabled {
-		fmt.Fprintln(out, "Automatic account rotation: enabled for rejected first-party quota responses.")
-		return
-	}
-	fmt.Fprintf(out, "Automatic account rotation: disabled because %s.\n", plan.reason)
+	pool := newSubscriptionPoolController(deps, selected, pinned)
+	return runLaunchAttempt(ctx, cmd, opts, deps, invocation, &selected, pool)
 }
 
 func claimLaunchClaudeAccount(
@@ -432,24 +211,6 @@ func noUsableClaudeAccountError(explicitName string) error {
 	)
 }
 
-func markClaudeAccountRateLimited(
-	ctx context.Context,
-	opts *options,
-	name string,
-	cooldownUntil time.Time,
-	failureClass string,
-) error {
-	s, _, err := openMigratedStore(ctx, opts)
-	if err != nil {
-		return err
-	}
-	defer closeStore(s)
-	if err := s.MarkClaudeAccountFailure(ctx, name, cooldownUntil, failureClass); err != nil {
-		return fmt.Errorf("marking Claude account %q rate limited: %w", name, err)
-	}
-	return nil
-}
-
 func subscriptionCooldownUntil(
 	now time.Time,
 	event gateway.AnthropicSubscriptionExhaustionEvent,
@@ -521,13 +282,6 @@ func subscriptionRateLimitDescription(event gateway.AnthropicSubscriptionExhaust
 	default:
 		return "received an unclassified rate limit"
 	}
-}
-
-func selectedClaudeAccountToken(account *selectedClaudeAccount) string {
-	if account == nil {
-		return ""
-	}
-	return account.OAuthToken
 }
 
 func selectedClaudeAccountName(account *selectedClaudeAccount) string {

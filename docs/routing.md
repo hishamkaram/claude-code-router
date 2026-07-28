@@ -192,38 +192,42 @@ explicitly reports `anthropic-ratelimit-unified-status: rejected`. CCR uses the
 validated `anthropic-ratelimit-unified-representative-claim` and
 `anthropic-ratelimit-unified-fallback` headers to classify that rejection. A
 representative claim with no available fallback is an account-wide subscription
-limit, so the unified reset timestamp is preferred and capped at 24 hours. A
-model limit with fallback available, or a rejection without a representative
-claim, receives `Retry-After` or a one-minute default capped at five minutes.
-A missing, `allowed`, or unrecognized unified status remains with Claude Code's
-normal retry handling and does not cool or rotate the account. Token-count 429
-responses, registered Anthropic-compatible providers, and OpenAI-compatible
-providers do not trigger pool cooldown or relaunch behavior.
+limit, so the unified reset timestamp is preferred and capped at 24 hours.
+Model limits with fallback, missing or unknown representative claims, missing or
+unrecognized unified status, and other ambiguous 429 responses are forwarded
+without account cooldown or rotation. Token-count 429 responses, registered
+Anthropic-compatible providers, and OpenAI-compatible providers never enter
+subscription-pool rotation.
 
-Automatic relaunch is intentionally narrow. It runs for a plain interactive
-pool launch or an interactive launch with `--resume <session-id>`, optionally
-combined with a named `--worktree`. Plain launches resume with `--continue`;
-explicit resume/worktree continuity arguments are replayed unchanged. `--print`,
-an explicit `--claude-account`, managed CUA, prompts, and other passthrough
-arguments disable rotation. CCR prints the eligibility decision before Claude
-Code starts. In eligible cases CCR records the safe failure class and resolves
-the next account's keychain credential before stopping Claude Code. Only then
-does it start the replacement process. `claude-account list` shows the active
-cooldown's deadline and reason. If rotation is disabled or no replacement is
-currently usable, CCR leaves the current process and gateway open so Claude
-Code can retain its native limit state and session. A later rejected quota
-response retries selection, allowing newly added or newly available accounts
-to participate.
+Claude Code authenticates to the loopback gateway with a generated local token;
+account OAuth tokens are removed from its environment. For each first-party
+request, the gateway replaces incoming upstream auth with exactly the current
+pool account's OAuth token. On confirmed account-wide exhaustion, rotation is a
+synchronous gateway operation performed before response headers reach Claude:
+
+1. Record the exhausted account's safe failure class and bounded cooldown.
+2. Resolve the next eligible account credential from the OS keychain.
+3. Atomically publish a new account generation and update launch metadata.
+4. Close the rejected response and replay the same buffered request.
+
+The Claude process, PID, session, tools, browser connection, managed CUA state,
+and pending turn remain unchanged. Concurrent requests carry the account
+generation they used; a stale rejection retries the already-selected current
+generation instead of marking it exhausted or skipping another account. An
+explicit `--claude-account` pins one account and disables rotation. If no
+replacement is currently usable, the gateway forwards Anthropic's original 429
+and keeps Claude Code running. A later request can select an account that was
+added, refreshed, or became eligible in the meantime.
 
 An initial launch with every account disabled, expired, cooling down, excluded,
 or credential-unavailable still fails with an all-exhausted message. CCR never
 silently falls back to the default Claude login, Anthropic API key, or another
 provider.
 
-Account names are local CCR labels. Model requests use the selected label's
-stored OAuth token, while Claude's visible profile and cached usage can still
-show the shared local login. Authorize the subscription represented by each
-label in that setup-token browser flow.
+Account names are local CCR labels. Model requests use the active label's stored
+OAuth token only inside the gateway, while Claude's visible profile and cached
+usage can still show the shared local login. Authorize the subscription
+represented by each label in that setup-token browser flow.
 
 When CCR injects a pool status line, it identifies the selected model-request
 label as `account=<name>` and reports `limits=unknown`. Claude Code OAuth tokens
@@ -231,9 +235,11 @@ provide no stable supported account-scoped subscription-quota endpoint suitable
 for per-request routing. The explicit `claude-account test --live` diagnostic
 is best-effort and never substitutes shared-profile data. An existing status
 line keeps its behavior through the credential-isolation wrapper and can read
-`CCR_CLAUDE_ACCOUNT`; `--no-statusline` is an explicit opt-out from CCR
-injection and prints a warning. A higher-precedence `statusLine: null` is also
-honored as an explicit disable.
+`CCR_CLAUDE_ACCOUNT`. The wrapper resolves that label from the gateway on each
+invocation, so it follows rotation without exposing the observer or OAuth
+credential to the existing command. `--no-statusline` is an explicit opt-out
+from CCR injection and prints a warning. A higher-precedence `statusLine: null`
+is also honored as an explicit disable.
 
 `clear-cooldown <name>` and `clear-cooldown --all` clear only cooldown and
 last-error metadata. Use them after independently confirming that a cooldown is

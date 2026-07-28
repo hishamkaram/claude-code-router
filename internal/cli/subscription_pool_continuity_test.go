@@ -2,7 +2,7 @@ package cli
 
 import (
 	"context"
-	"io"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -13,220 +13,261 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-type continuityCommandResult struct {
-	out    string
-	errOut string
-	err    error
-}
-
-func TestSubscriptionPoolKeepsClaudeOpenWhenNoReplacementIsUsable(t *testing.T) {
+func TestSubscriptionPoolControllerRotatesWithoutRestartState(t *testing.T) {
 	t.Parallel()
 
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
-		{name: "personal", token: "personal-oauth-token"},
-	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): "personal-oauth-token",
-	}}
-	process := newContinuityTestProcess()
-	launcher := &continuityTestLauncher{
-		process: process, started: make(chan struct{}),
-	}
-	exhaustionSinks := make(chan (chan<- gateway.AnthropicSubscriptionExhaustionEvent), 1)
-	startGateway := func(ctx context.Context, config gateway.Config) (*gateway.Server, error) {
-		server, err := gateway.Start(ctx, config)
-		if err == nil {
-			exhaustionSinks <- config.AnthropicSubscriptionExhaustion
-		}
-		return server, err
-	}
-
-	result := make(chan continuityCommandResult, 1)
-	go func() {
-		out, errOut, err := runCommandWithDeps(t, Dependencies{
-			Secrets: secrets, Launcher: launcher, StartGateway: startGateway,
-		}, "--db", dbPath, "launch", "--auth-mode", "subscription-pool",
-			"--no-lifecycle", "--no-statusline")
-		result <- continuityCommandResult{out: out, errOut: errOut, err: err}
-	}()
-
-	var exhaustion chan<- gateway.AnthropicSubscriptionExhaustionEvent
-	select {
-	case exhaustion = <-exhaustionSinks:
-	case <-time.After(10 * time.Second):
-		t.Fatal("gateway did not expose the subscription exhaustion sink")
-	}
-	select {
-	case <-launcher.started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Claude process did not start")
-	}
-	exhaustion <- gateway.AnthropicSubscriptionExhaustionEvent{
-		StatusCode: 429, RetryAfterDuration: time.Hour,
-		RepresentativeClaim: gateway.AnthropicRateLimitClaimSevenDay,
-	}
-	waitForClaudeAccountFailure(t, dbPath, "personal", "subscription_limit_seven_day")
-	if process.StopCalls() != 0 {
-		t.Fatalf("Claude Stop calls = %d, want 0", process.StopCalls())
-	}
-	select {
-	case got := <-result:
-		t.Fatalf("CCR exited while Claude should remain open: err=%v stderr=%q", got.err, got.errOut)
-	default:
-	}
-
-	process.Complete(nil)
-	var got continuityCommandResult
-	select {
-	case got = <-result:
-	case <-time.After(10 * time.Second):
-		t.Fatal("CCR did not return after Claude exited naturally")
-	}
-	assertContinuityCommandResult(t, got, launcher)
-}
-
-func assertContinuityCommandResult(
-	t *testing.T,
-	got continuityCommandResult,
-	launcher *continuityTestLauncher,
-) {
-	t.Helper()
-	if got.err != nil {
-		t.Fatalf("subscription-pool continuity error = %v, stderr=%q", got.err, got.errOut)
-	}
-	if launcher.StartCount() != 1 {
-		t.Fatalf("Claude starts = %d, want 1", launcher.StartCount())
-	}
-	for _, want := range []string{
-		"No replacement account is currently usable",
-		"keeping the current Claude Code process open",
-		"retrying pool selection after the next rejected quota response",
-	} {
-		if !strings.Contains(got.errOut, want) {
-			t.Fatalf("continuity notice missing %q: %s", want, got.errOut)
-		}
-	}
-	if strings.Contains(got.out+got.errOut, "personal-oauth-token") {
-		t.Fatal("continuity output leaked an OAuth token")
-	}
-}
-
-func TestWaitForClaudeProcessRetriesExhaustionDecisionBeforeStopping(t *testing.T) {
-	t.Parallel()
-
-	process := newContinuityTestProcess()
-	events := make(chan gateway.AnthropicSubscriptionExhaustionEvent, 2)
-	events <- gateway.AnthropicSubscriptionExhaustionEvent{StatusCode: 429}
-	events <- gateway.AnthropicSubscriptionExhaustionEvent{StatusCode: 429}
-	decisions := 0
-	decisionsAtStop := 0
-	process.onStop = func() {
-		decisionsAtStop = decisions
-	}
-	control := subscriptionExhaustionControl{
-		events: events,
-		handle: func(io.Writer, gateway.AnthropicSubscriptionExhaustionEvent) bool {
-			decisions++
-			return decisions == 2
-		},
-	}
-
-	waitErr, event, stopErr := waitForClaudeProcess(context.Background(), process, control, io.Discard)
-	if waitErr != nil || event == nil || stopErr != nil {
-		t.Fatalf("waitForClaudeProcess() = wait=%v event=%v stop=%v", waitErr, event, stopErr)
-	}
-	if decisions != 2 {
-		t.Fatalf("exhaustion decisions = %d, want 2", decisions)
-	}
-	if decisionsAtStop != 2 {
-		t.Fatalf("Claude stopped after %d decisions, want replacement decision first", decisionsAtStop)
-	}
-	if process.StopCalls() != 1 {
-		t.Fatalf("Claude Stop calls = %d, want 1", process.StopCalls())
-	}
-}
-
-func TestWaitForClaudeProcessUsesProvidedNoticeWriter(t *testing.T) {
-	t.Parallel()
-
-	process := newContinuityTestProcess()
-	events := make(chan gateway.AnthropicSubscriptionExhaustionEvent, 1)
-	events <- gateway.AnthropicSubscriptionExhaustionEvent{StatusCode: 429}
-	noticeOut := &strings.Builder{}
-	var received io.Writer
-	control := subscriptionExhaustionControl{
-		events: events,
-		handle: func(out io.Writer, _ gateway.AnthropicSubscriptionExhaustionEvent) bool {
-			received = out
-			process.Complete(nil)
-			return false
-		},
-	}
-
-	waitErr, event, stopErr := waitForClaudeProcess(
-		context.Background(), process, control, noticeOut,
-	)
-	if waitErr != nil || event != nil || stopErr != nil {
-		t.Fatalf("waitForClaudeProcess() = wait=%v event=%v stop=%v", waitErr, event, stopErr)
-	}
-	if received != noticeOut {
-		t.Fatal("exhaustion handler did not receive the process-synchronized notice writer")
-	}
-}
-
-func waitForClaudeAccountFailure(t *testing.T, dbPath, name, failureClass string) {
-	t.Helper()
-	ctx := context.Background()
-	s, err := store.Open(ctx, dbPath)
+	controller, s, dbPath := newControllerTestPool(t, false, "personal", "work")
+	failed, err := controller.CurrentCredential(context.Background())
 	if err != nil {
-		t.Fatalf("store.Open error = %v", err)
+		t.Fatalf("CurrentCredential() error = %v", err)
 	}
-	defer closeStore(s)
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		account, getErr := s.GetClaudeAccount(ctx, name)
-		if getErr == nil && account.LastError == failureClass {
-			return
+	next, retry, err := controller.RotateCredential(
+		context.Background(),
+		failed,
+		confirmedSubscriptionLimit(),
+	)
+	if err != nil || !retry || next.AccountName != "work" || next.Generation != 2 {
+		t.Fatalf("RotateCredential() = %#v, %t, %v", next, retry, err)
+	}
+	if got := controller.ActiveAccount(); got != "work" {
+		t.Fatalf("ActiveAccount() = %q, want work", got)
+	}
+	personal := getAccountForCLI(t, dbPath, "personal")
+	if personal.LastError != "subscription_limit_five_hour" || personal.CooldownUntil == "" {
+		t.Fatalf("personal failure state = %#v", personal)
+	}
+	launch, err := s.GetLaunch(context.Background(), 1)
+	if err != nil || launch.ClaudeAccountName != "work" {
+		t.Fatalf("launch account = %#v, %v", launch, err)
+	}
+	notice := receiveControllerNotice(t, controller)
+	if !strings.Contains(notice, "existing gateway") || !strings.Contains(notice, "was not restarted") {
+		t.Fatalf("rotation notice = %q", notice)
+	}
+}
+
+func TestGatewaySubscriptionPoolKeepsNilControllerNil(t *testing.T) {
+	t.Parallel()
+
+	if pool := gatewaySubscriptionPool(nil); pool != nil {
+		t.Fatalf("gateway subscription pool = %#v, want nil", pool)
+	}
+}
+
+func TestSubscriptionPoolControllerCoalescesConcurrentStaleFailures(t *testing.T) {
+	t.Parallel()
+
+	controller, _, dbPath := newControllerTestPool(t, false, "personal", "work", "reserve")
+	failed, err := controller.CurrentCredential(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentCredential() error = %v", err)
+	}
+	type result struct {
+		credential gateway.AnthropicSubscriptionCredential
+		retry      bool
+		err        error
+	}
+	results := make(chan result, 2)
+	var start sync.WaitGroup
+	start.Add(2)
+	for range 2 {
+		go func() {
+			start.Done()
+			start.Wait()
+			credential, retry, rotateErr := controller.RotateCredential(
+				context.Background(), failed, confirmedSubscriptionLimit(),
+			)
+			results <- result{credential: credential, retry: retry, err: rotateErr}
+		}()
+	}
+	first, second := <-results, <-results
+	for _, got := range []result{first, second} {
+		if got.err != nil || !got.retry || got.credential.AccountName != "work" ||
+			got.credential.Generation != 2 {
+			t.Fatalf("concurrent rotation result = %#v", got)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("Claude account %q failure = %q, error=%v, want %q",
-				name, account.LastError, getErr, failureClass)
-		}
+	}
+	if work := getAccountForCLI(t, dbPath, "work"); work.LastError != "" {
+		t.Fatalf("stale failure incorrectly marked replacement account: %#v", work)
+	}
+	if reserve := getAccountForCLI(t, dbPath, "reserve"); reserve.LastUsedAt != "" {
+		t.Fatalf("stale failure skipped to reserve account: %#v", reserve)
+	}
+}
+
+func TestSubscriptionPoolControllerForwardsLimitWhenNoReplacementExists(t *testing.T) {
+	t.Parallel()
+
+	controller, _, _ := newControllerTestPool(t, false, "personal")
+	failed, err := controller.CurrentCredential(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentCredential() error = %v", err)
+	}
+	next, retry, err := controller.RotateCredential(
+		context.Background(), failed, confirmedSubscriptionLimit(),
+	)
+	if err != nil || retry || next != (gateway.AnthropicSubscriptionCredential{}) {
+		t.Fatalf("RotateCredential() = %#v, %t, %v; want preserved limit", next, retry, err)
+	}
+	if got := controller.ActiveAccount(); got != "personal" {
+		t.Fatalf("ActiveAccount() = %q, want personal", got)
+	}
+	notice := receiveControllerNotice(t, controller)
+	if !strings.Contains(notice, "no replacement account is usable") ||
+		!strings.Contains(notice, "kept Claude Code running") {
+		t.Fatalf("no-replacement notice = %q", notice)
+	}
+}
+
+func TestSubscriptionPoolControllerReadmitsAccountAfterCooldownClears(t *testing.T) {
+	t.Parallel()
+
+	controller, s, _ := newControllerTestPool(t, false, "personal", "work")
+	personal, _ := controller.CurrentCredential(context.Background())
+	work, retry, err := controller.RotateCredential(
+		context.Background(), personal, confirmedSubscriptionLimit(),
+	)
+	if err != nil || !retry || work.AccountName != "work" {
+		t.Fatalf("first RotateCredential() = %#v, %t, %v", work, retry, err)
+	}
+	if clearErr := s.ClearClaudeAccountFailure(context.Background(), "personal"); clearErr != nil {
+		t.Fatalf("ClearClaudeAccountFailure() error = %v", clearErr)
+	}
+	personal, retry, err = controller.RotateCredential(
+		context.Background(), work, confirmedSubscriptionLimit(),
+	)
+	if err != nil || !retry || personal.AccountName != "personal" || personal.Generation != 3 {
+		t.Fatalf("second RotateCredential() = %#v, %t, %v", personal, retry, err)
+	}
+}
+
+func TestSubscriptionPoolControllerHonorsPinnedAccount(t *testing.T) {
+	t.Parallel()
+
+	controller, _, dbPath := newControllerTestPool(t, true, "personal", "work")
+	failed, _ := controller.CurrentCredential(context.Background())
+	_, retry, err := controller.RotateCredential(
+		context.Background(), failed, confirmedSubscriptionLimit(),
+	)
+	if err != nil || retry || controller.ActiveAccount() != "personal" {
+		t.Fatalf("pinned rotation retry=%t account=%q error=%v", retry, controller.ActiveAccount(), err)
+	}
+	if work := getAccountForCLI(t, dbPath, "work"); work.LastUsedAt != "" {
+		t.Fatalf("pinned account selected a replacement: %#v", work)
+	}
+}
+
+func TestSubscriptionPoolControllerRotationWaitHonorsCancellation(t *testing.T) {
+	t.Parallel()
+
+	controller, _, _ := newControllerTestPool(t, false, "personal", "work")
+	<-controller.rotation
+	defer func() { controller.rotation <- struct{}{} }()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	failed, _ := controller.CurrentCredential(context.Background())
+	_, retry, err := controller.RotateCredential(ctx, failed, confirmedSubscriptionLimit())
+	if err == nil || retry {
+		t.Fatalf("canceled RotateCredential() retry=%t error=%v", retry, err)
+	}
+}
+
+func TestSubscriptionPoolControllerReportsNoticeSaturation(t *testing.T) {
+	t.Parallel()
+
+	controller, _, _ := newControllerTestPool(t, false, "personal")
+	for index := range subscriptionPoolNoticeBuffer {
+		controller.notice(fmt.Sprintf("notice-%d", index))
+	}
+	controller.notice("latest account transition")
+
+	notices := make([]string, 0, subscriptionPoolNoticeBuffer)
+	for range subscriptionPoolNoticeBuffer {
+		notices = append(notices, <-controller.Notices())
+	}
+	combined := strings.Join(notices, "\n")
+	if strings.Contains(combined, "notice-0") ||
+		!strings.Contains(combined, "output delivery was saturated") ||
+		!strings.Contains(combined, "latest account transition") {
+		t.Fatalf("saturated notices = %q", combined)
+	}
+}
+
+func TestWaitForClaudeProcessWritesNoticesWithoutStopping(t *testing.T) {
+	t.Parallel()
+
+	process := newContinuityTestProcess()
+	notices := make(chan string, 1)
+	notices <- "account rotated"
+	var out strings.Builder
+	go func() {
 		time.Sleep(10 * time.Millisecond)
+		process.Complete(nil)
+	}()
+	waitErr, stopErr := waitForClaudeProcess(context.Background(), process, notices, &out)
+	if waitErr != nil || stopErr != nil {
+		t.Fatalf("waitForClaudeProcess() = %v, %v", waitErr, stopErr)
+	}
+	if process.StopCalls() != 0 || !strings.Contains(out.String(), "account rotated") {
+		t.Fatalf("process stops=%d output=%q", process.StopCalls(), out.String())
 	}
 }
 
-type continuityTestLauncher struct {
-	mu      sync.Mutex
-	starts  int
-	process *continuityTestProcess
-	started chan struct{}
-	once    sync.Once
-}
-
-func (l *continuityTestLauncher) Start(
-	ctx context.Context,
-	_ []string,
-	_ ClaudeEnvironment,
-	_ io.Reader,
-	_, _ io.Writer,
-) (ClaudeProcess, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+func newControllerTestPool(
+	t *testing.T,
+	pinned bool,
+	names ...string,
+) (*subscriptionPoolController, *store.Store, string) {
+	t.Helper()
+	fixtures := make([]subscriptionAccountFixture, 0, len(names))
+	values := make(map[string]string, len(names))
+	for _, name := range names {
+		token := name + "-oauth-token"
+		fixtures = append(fixtures, subscriptionAccountFixture{name: name, token: token})
+		values[secret.ClaudeAccountAccessTokenRef(name)] = token
 	}
-	l.mu.Lock()
-	l.starts++
-	l.mu.Unlock()
-	l.once.Do(func() {
-		close(l.started)
-	})
-	return l.process, nil
+	dbPath := seedSubscriptionAccounts(t, fixtures)
+	s, err := store.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	launchID, err := s.CreateLaunchWithAuth(
+		context.Background(), "", "disabled", "disabled", launchAuthModeSubscriptionPool, names[0],
+	)
+	if err != nil {
+		t.Fatalf("CreateLaunchWithAuth() error = %v", err)
+	}
+	initial, err := s.GetClaudeAccount(context.Background(), names[0])
+	if err != nil {
+		t.Fatalf("GetClaudeAccount() error = %v", err)
+	}
+	controller := newSubscriptionPoolController(
+		Dependencies{Secrets: &accountTestSecrets{values: values}},
+		selectedClaudeAccount{Account: initial, OAuthToken: names[0] + "-oauth-token"},
+		pinned,
+	)
+	controller.bindLaunch(s, launchID)
+	return controller, s, dbPath
 }
 
-func (l *continuityTestLauncher) StartCount() int {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.starts
+func confirmedSubscriptionLimit() gateway.AnthropicSubscriptionExhaustionEvent {
+	return gateway.AnthropicSubscriptionExhaustionEvent{
+		StatusCode:          429,
+		RetryAfterDuration:  time.Hour,
+		RepresentativeClaim: gateway.AnthropicRateLimitClaimFiveHour,
+	}
+}
+
+func receiveControllerNotice(t *testing.T, controller *subscriptionPoolController) string {
+	t.Helper()
+	select {
+	case notice := <-controller.Notices():
+		return notice
+	case <-time.After(time.Second):
+		t.Fatal("controller notice was not delivered")
+		return ""
+	}
 }
 
 type continuityTestProcess struct {
@@ -234,7 +275,6 @@ type continuityTestProcess struct {
 	finish    sync.Once
 	mu        sync.Mutex
 	stopCalls int
-	onStop    func()
 }
 
 func newContinuityTestProcess() *continuityTestProcess {
@@ -252,11 +292,7 @@ func (p *continuityTestProcess) Done() <-chan error {
 func (p *continuityTestProcess) Stop() error {
 	p.mu.Lock()
 	p.stopCalls++
-	onStop := p.onStop
 	p.mu.Unlock()
-	if onStop != nil {
-		onStop()
-	}
 	p.Complete(nil)
 	return nil
 }

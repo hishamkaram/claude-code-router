@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-func TestSubscriptionPoolEnvironmentUsesOnlySelectedOAuthToken(t *testing.T) {
-	const selectedToken = "selected-oauth-token"
+func TestSubscriptionPoolEnvironmentKeepsOAuthOnlyInGatewayMemory(t *testing.T) {
 	t.Setenv("ANTHROPIC_CUSTOM_HEADERS", "Authorization: Bearer other-account\nX-Api-Key: stale-key")
 	env := launchClaudeEnv(launchEnvironmentOptions{
 		GatewayURL:        "http://127.0.0.1:43123",
@@ -14,7 +13,6 @@ func TestSubscriptionPoolEnvironmentUsesOnlySelectedOAuthToken(t *testing.T) {
 		ObserverToken:     "observer-token",
 		LaunchID:          42,
 		AuthMode:          launchAuthModeSubscriptionPool,
-		ClaudeOAuthToken:  selectedToken,
 		ClaudeAccountName: "personal",
 		ProviderSecretEnvNames: []string{
 			"ANTHROPIC_API_KEY",
@@ -23,8 +21,8 @@ func TestSubscriptionPoolEnvironmentUsesOnlySelectedOAuthToken(t *testing.T) {
 	})
 
 	set := environmentEntries(env.Set)
-	if set["CLAUDE_CODE_OAUTH_TOKEN"] != selectedToken {
-		t.Fatal("selected OAuth token was not set for Claude Code")
+	if set["ANTHROPIC_AUTH_TOKEN"] != "gateway-session-token" {
+		t.Fatal("Claude Code did not receive the generated local gateway token")
 	}
 	if set[statuslineClaudeAccountEnv] != "personal" {
 		t.Fatalf("status-line account = %q, want personal", set[statuslineClaudeAccountEnv])
@@ -38,7 +36,7 @@ func TestSubscriptionPoolEnvironmentUsesOnlySelectedOAuthToken(t *testing.T) {
 	}
 	for _, name := range []string{
 		"ANTHROPIC_API_KEY",
-		"ANTHROPIC_AUTH_TOKEN",
+		"CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
 		"CLAUDE_CODE_OAUTH_SCOPES",
 		"OPENROUTER_API_KEY",
@@ -48,8 +46,8 @@ func TestSubscriptionPoolEnvironmentUsesOnlySelectedOAuthToken(t *testing.T) {
 		}
 	}
 	for _, entry := range env.Set {
-		if strings.HasPrefix(entry, "ANTHROPIC_AUTH_TOKEN=") {
-			t.Fatal("subscription OAuth token was also exposed as gateway bearer auth")
+		if strings.Contains(entry, "selected-oauth-token") {
+			t.Fatal("subscription OAuth token was exposed to Claude Code")
 		}
 	}
 }
@@ -98,14 +96,15 @@ func TestExplicitClaudeAccountRequiresSubscriptionPool(t *testing.T) {
 	}
 }
 
-func TestSubscriptionPoolLaunchSummaryDescribesProcessBoundAuth(t *testing.T) {
+func TestSubscriptionPoolLaunchSummaryDescribesGatewayHeldAuth(t *testing.T) {
 	t.Parallel()
 
 	var output strings.Builder
 	writeLaunchAuthSummary(&output, launchAuthModeSubscriptionPool)
 	summary := output.String()
 	for _, want := range []string{
-		"Model requests use the selected account's stored OAuth token",
+		"active account OAuth token in gateway memory",
+		"rotate without restarting Claude Code",
 		"account name is a local CCR label",
 		"Claude UI profile and cached usage may still show the shared local login",
 	} {

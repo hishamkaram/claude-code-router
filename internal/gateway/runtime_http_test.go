@@ -67,6 +67,44 @@ func TestRuntimeEndpointsUseSeparateObserverAuthentication(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatusReportsDynamicSubscriptionAccount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newGatewayStore(
+		t,
+		store.Provider{Name: "fixture", Type: "openai-compatible", BaseURL: "http://127.0.0.1:1"},
+		store.Model{Alias: "coder", ProviderName: "fixture", ProviderModel: "model-v1", Status: "degraded"},
+	)
+	launchID, err := s.CreateLaunch(ctx, "coder", "pending", "pending")
+	if err != nil {
+		t.Fatalf("CreateLaunch() error = %v", err)
+	}
+	tracker, err := session.NewTracker(session.Config{Store: s, LaunchID: launchID, Enabled: true})
+	if err != nil {
+		t.Fatalf("NewTracker() error = %v", err)
+	}
+	pool := newGatewayTestSubscriptionPool("work", "work-oauth")
+	server := startGatewayWithConfig(t, ctx, Config{
+		Store: s, Token: "model-token", ObserverToken: "observer-token",
+		Tracker: tracker, AnthropicSubscriptionPool: pool,
+	})
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+
+	response := runtimeRequest(
+		t, ctx, server.URL(), http.MethodGet, "/internal/v1/status", "", "observer-token", "",
+	)
+	defer response.Body.Close()
+	var status runtimeStatus
+	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
+		t.Fatalf("status decode error = %v", err)
+	}
+	if status.Auth == nil ||
+		status.Auth.Mode != "subscription-pool" ||
+		status.Auth.ActiveClaudeAccount != "work" {
+		t.Fatalf("runtime auth status = %#v", status.Auth)
+	}
+}
+
 func TestRuntimeHookBoundaryValidation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

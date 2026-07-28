@@ -43,34 +43,89 @@ func newStatuslineCommand() *cobra.Command {
 	}
 }
 
+func newStatuslineAccountCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:    "__statusline-account",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			account := strings.TrimSpace(os.Getenv(statuslineClaudeAccountEnv))
+			gatewayURL := strings.TrimSpace(os.Getenv(statuslineGatewayURLEnv))
+			token := strings.TrimSpace(os.Getenv(statuslineTokenEnv))
+			if gatewayURL == "" || token == "" {
+				writeStatuslineAccount(cmd.OutOrStdout(), account)
+				return
+			}
+			status, err := fetchRuntimeStatus(
+				cmd.Context(),
+				gatewayURL,
+				token,
+			)
+			if err == nil && strings.TrimSpace(status.Auth.ActiveClaudeAccount) != "" {
+				account = status.Auth.ActiveClaudeAccount
+			} else {
+				account = "unknown"
+			}
+			writeStatuslineAccount(cmd.OutOrStdout(), account)
+		},
+	}
+}
+
+func writeStatuslineAccount(out io.Writer, account string) {
+	if account = strings.TrimSpace(account); account != "" {
+		fmt.Fprintln(out, account)
+	}
+}
+
+type statuslineAuthStatus struct {
+	Mode                string `json:"mode"`
+	ActiveClaudeAccount string `json:"active_claude_account"`
+}
+
+type statuslineRuntimeStatus struct {
+	session.Snapshot
+	Auth statuslineAuthStatus `json:"auth"`
+}
+
 func fetchStatusline(ctx context.Context, gatewayURL, token, claudeAccount string) (string, error) {
-	endpoint, err := statuslineEndpoint(gatewayURL)
+	status, err := fetchRuntimeStatus(ctx, gatewayURL, token)
 	if err != nil {
 		return "", err
 	}
+	if account := strings.TrimSpace(status.Auth.ActiveClaudeAccount); account != "" {
+		claudeAccount = account
+	}
+	return formatStatusline(status.Snapshot, claudeAccount), nil
+}
+
+func fetchRuntimeStatus(ctx context.Context, gatewayURL, token string) (statuslineRuntimeStatus, error) {
+	endpoint, err := statuslineEndpoint(gatewayURL)
+	if err != nil {
+		return statuslineRuntimeStatus{}, err
+	}
 	if strings.TrimSpace(token) == "" {
-		return "", fmt.Errorf("status line observer token is required")
+		return statuslineRuntimeStatus{}, fmt.Errorf("status line observer token is required")
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, statuslineRequestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
-		return "", fmt.Errorf("creating status line request: %w", err)
+		return statuslineRuntimeStatus{}, fmt.Errorf("creating status line request: %w", err)
 	}
 	req.Header.Set(observerTokenHeader, token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("requesting runtime status: %w", err)
+		return statuslineRuntimeStatus{}, fmt.Errorf("requesting runtime status: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("runtime status returned HTTP %d", resp.StatusCode)
+		return statuslineRuntimeStatus{}, fmt.Errorf("runtime status returned HTTP %d", resp.StatusCode)
 	}
-	var snapshot session.Snapshot
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&snapshot); err != nil {
-		return "", fmt.Errorf("decoding runtime status: %w", err)
+	var status statuslineRuntimeStatus
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&status); err != nil {
+		return statuslineRuntimeStatus{}, fmt.Errorf("decoding runtime status: %w", err)
 	}
-	return formatStatusline(snapshot, claudeAccount), nil
+	return status, nil
 }
 
 func statuslineEndpoint(gatewayURL string) (string, error) {

@@ -285,8 +285,9 @@ func TestLaunchHelpDescribesPreserveAuthModelSelection(t *testing.T) {
 	for _, want := range []string{
 		"registered, compatible aliases to the visual /model picker",
 		"permitted Anthropic models while preserving subscription or API-key",
-		"first resolve the next account",
-		"keeps the current process and",
+		"retries the same buffered request",
+		"connection stay open",
+		"forwards Anthropic's original limit response",
 		"An existing statusLine keeps its command",
 		"credential-isolation",
 		"CCR_CLAUDE_ACCOUNT",

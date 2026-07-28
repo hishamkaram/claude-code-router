@@ -13,6 +13,7 @@ import (
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
+	"github.com/hishamkaram/claude-code-router/internal/secret"
 )
 
 const conformanceAnthropicVersion = "2023-06-01"
@@ -333,7 +334,7 @@ func (r checkRunner) providerSecret(ctx context.Context) (string, error) {
 	if strings.TrimSpace(r.target.provider.SecretRef) == "" {
 		return "", nil
 	}
-	value, err := r.config.Secrets.Resolve(ctx, r.target.provider.SecretRef)
+	value, err := secret.ResolveProvider(ctx, r.config.Secrets, r.target.provider.SecretRef)
 	if err != nil {
 		return "", fmt.Errorf("provider credential is unavailable")
 	}

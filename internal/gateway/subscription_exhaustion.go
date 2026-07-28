@@ -48,7 +48,38 @@ func (h *handler) notifyAnthropicSubscriptionExhaustion(
 	authMode anthropicAuthMode,
 	resource string,
 ) {
-	if h.cfg.AnthropicSubscriptionExhaustion == nil ||
+	if h.cfg.AnthropicSubscriptionExhaustion == nil {
+		return
+	}
+	event, ok := h.anthropicSubscriptionExhaustion(resp, provider, authMode, resource)
+	if !ok {
+		return
+	}
+	select {
+	case h.cfg.AnthropicSubscriptionExhaustion <- event:
+	default:
+	}
+}
+
+func (h *handler) confirmedAccountSubscriptionExhaustion(
+	resp *http.Response,
+	provider store.Provider,
+	authMode anthropicAuthMode,
+	resource string,
+) (AnthropicSubscriptionExhaustionEvent, bool) {
+	event, ok := h.anthropicSubscriptionExhaustion(resp, provider, authMode, resource)
+	return event, ok &&
+		event.RepresentativeClaim != AnthropicRateLimitClaimUnknown &&
+		!event.FallbackAvailable
+}
+
+func (h *handler) anthropicSubscriptionExhaustion(
+	resp *http.Response,
+	provider store.Provider,
+	authMode anthropicAuthMode,
+	resource string,
+) (AnthropicSubscriptionExhaustionEvent, bool) {
+	if resp == nil ||
 		resource != "messages" ||
 		resp.StatusCode != http.StatusTooManyRequests ||
 		!h.isFirstPartyAnthropicPassThrough(provider, authMode) ||
@@ -56,13 +87,9 @@ func (h *handler) notifyAnthropicSubscriptionExhaustion(
 			strings.TrimSpace(resp.Header.Get(anthropicUnifiedRateLimitStatusHeader)),
 			anthropicUnifiedRateLimitRejected,
 		) {
-		return
+		return AnthropicSubscriptionExhaustionEvent{}, false
 	}
-	event := newAnthropicSubscriptionExhaustionEvent(resp)
-	select {
-	case h.cfg.AnthropicSubscriptionExhaustion <- event:
-	default:
-	}
+	return newAnthropicSubscriptionExhaustionEvent(resp), true
 }
 
 func (h *handler) isFirstPartyAnthropicPassThrough(provider store.Provider, authMode anthropicAuthMode) bool {

@@ -47,14 +47,10 @@ func TestLiveFixtureSubscriptionPoolFirstParty(t *testing.T) {
 		{account: "work", token: liveSubscriptionWorkToken, text: "CCR_LIVE_SUBSCRIPTION_POOL_OK"},
 	})
 	defer fixture.Close()
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
+	dbPath, secrets := seedLiveSubscriptionCredentials(t, []subscriptionAccountFixture{
 		{name: "personal", token: liveSubscriptionPersonalToken},
 		{name: "work", token: liveSubscriptionWorkToken},
 	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): liveSubscriptionPersonalToken,
-		secret.ClaudeAccountAccessTokenRef("work"):     liveSubscriptionWorkToken,
-	}}
 	deps := Dependencies{
 		In:           strings.NewReader("Reply exactly CCR_LIVE_SUBSCRIPTION_POOL_OK.\n"),
 		Secrets:      secrets,
@@ -111,7 +107,7 @@ func assertLiveSubscriptionFirstPartyOutput(t *testing.T, out, errOut, staleStat
 		"Existing Claude statusLine preserved through a launch-only credential-isolation wrapper",
 		"CCR_CLAUDE_ACCOUNT=work",
 		"OAuth and gateway tokens are removed",
-		"Automatic account rotation: disabled because --print is a one-shot",
+		"Automatic account rotation: disabled because --claude-account pins one account",
 	} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("subscription-pool status-line evidence missing %q\nstdout:\n%s\nstderr:\n%s",
@@ -124,7 +120,7 @@ func assertLiveSubscriptionFirstPartyOutput(t *testing.T, out, errOut, staleStat
 	}
 }
 
-func TestLiveFixtureSubscriptionPoolKeepsFinalLimitedProcessOpen(t *testing.T) {
+func TestLiveFixtureSubscriptionPoolRotatesOneProcessAndPreservesFinalLimit(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	fixture := newLiveSubscriptionFixture(t, []liveSubscriptionResponse{
@@ -140,14 +136,10 @@ func TestLiveFixtureSubscriptionPoolKeepsFinalLimitedProcessOpen(t *testing.T) {
 		},
 	})
 	defer fixture.Close()
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
+	dbPath, secrets := seedLiveSubscriptionCredentials(t, []subscriptionAccountFixture{
 		{name: "personal", token: liveSubscriptionPersonalToken},
 		{name: "work", token: liveSubscriptionWorkToken},
 	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): liveSubscriptionPersonalToken,
-		secret.ClaudeAccountAccessTokenRef("work"):     liveSubscriptionWorkToken,
-	}}
 	launcher := &liveSubscriptionHTTPLauncher{}
 	out, errOut, err := runLiveCommand(ctx, Dependencies{
 		Secrets: secrets, Launcher: launcher, StartGateway: fixture.StartGateway,
@@ -156,19 +148,20 @@ func TestLiveFixtureSubscriptionPoolKeepsFinalLimitedProcessOpen(t *testing.T) {
 		t.Fatalf("subscription-pool continuity error = %v\nstdout:\n%s\nstderr:\n%s",
 			err, redactLiveSubscriptionOutput(out), redactLiveSubscriptionOutput(errOut))
 	}
-	if launcher.StartCount() != 2 {
-		t.Fatalf("Claude process starts = %d, want 2", launcher.StartCount())
+	if launcher.StartCount() != 1 {
+		t.Fatalf("Claude process starts = %d, want 1", launcher.StartCount())
 	}
-	if !launcher.StartAt(0).UsesToken(liveSubscriptionPersonalToken) ||
-		!launcher.StartAt(1).UsesToken(liveSubscriptionWorkToken) ||
-		!containsString(launcher.StartAt(1).args, "--continue") {
-		t.Fatal("subscription-pool did not rotate by relaunching with the next process-bound account")
+	start := launcher.StartAt(0)
+	if start.authToken == "" ||
+		start.authToken == liveSubscriptionPersonalToken ||
+		start.authToken == liveSubscriptionWorkToken {
+		t.Fatal("Claude process did not use an isolated local gateway credential")
 	}
 	combined := out + errOut
 	for _, want := range []string{
-		"relaunching with the next available account",
-		"No replacement account is currently usable",
-		"keeping the current Claude Code process open",
+		"switched from account personal to work inside the existing gateway",
+		"no replacement account is usable",
+		"kept Claude Code running",
 	} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("subscription-pool continuity output missing %q\nstdout:\n%s\nstderr:\n%s",
@@ -178,40 +171,18 @@ func TestLiveFixtureSubscriptionPoolKeepsFinalLimitedProcessOpen(t *testing.T) {
 	fixture.AssertCalls(t, []string{"personal", "work"})
 	assertSubscriptionLaunchMetadata(t, dbPath, []subscriptionLaunchWant{
 		{account: "work", state: "completed"},
-		{account: "personal", state: "failed", endReason: "subscription_exhausted"},
 	})
 	assertSubscriptionDatabaseRedaction(t, dbPath, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
 	assertNoSubscriptionTokenLeak(t, combined, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
 }
 
-func TestLiveFixtureSubscriptionPoolRelaunchesRealClaudeOnFirstParty429(t *testing.T) {
+func TestLiveFixtureSubscriptionPoolRotatesRealClaudeWithoutRestart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if _, err := liveclaude.Check(ctx); err != nil {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
 	isolateLiveSubscriptionClaudeHome(t)
-	run := newLiveSubscriptionRealRelaunchRun(t, ctx)
-	first, second, launchErr := run.rotate(t, ctx)
-	run.assert(t, ctx, first, second, launchErr)
-}
-
-type liveSubscriptionRealRelaunchRun struct {
-	dbPath      string
-	secrets     *accountTestSecrets
-	fixture     *liveSubscriptionFixture
-	launcher    *liveSubscriptionPTYLauncher
-	commandOut  *bytes.Buffer
-	commandErr  *bytes.Buffer
-	commandDone chan error
-}
-
-func newLiveSubscriptionRealRelaunchRun(
-	t *testing.T,
-	ctx context.Context,
-) *liveSubscriptionRealRelaunchRun {
-	t.Helper()
-	first429Released := make(chan struct{})
 	fixture := newLiveSubscriptionFixture(t, []liveSubscriptionResponse{
 		{
 			account:             "personal",
@@ -219,110 +190,69 @@ func newLiveSubscriptionRealRelaunchRun(
 			status:              http.StatusTooManyRequests,
 			unifiedStatus:       "rejected",
 			representativeClaim: "five_hour",
-			hold429Until:        first429Released,
 		},
+		{account: "work", token: liveSubscriptionWorkToken, text: "CCR_LIVE_SAME_PROCESS_ROTATION_OK"},
 	})
-	dbPath := seedSubscriptionAccounts(t, []subscriptionAccountFixture{
+	fixture.repeatLast = true
+	dbPath, secrets := seedLiveSubscriptionCredentials(t, []subscriptionAccountFixture{
 		{name: "personal", token: liveSubscriptionPersonalToken},
 		{name: "work", token: liveSubscriptionWorkToken},
 	})
-	secrets := &accountTestSecrets{values: map[string]string{
-		secret.ClaudeAccountAccessTokenRef("personal"): liveSubscriptionPersonalToken,
-		secret.ClaudeAccountAccessTokenRef("work"):     liveSubscriptionWorkToken,
-	}}
 	launcher := newLiveSubscriptionPTYLauncher("")
-	run := &liveSubscriptionRealRelaunchRun{
-		dbPath: dbPath, secrets: secrets, fixture: fixture, launcher: launcher,
-		commandOut: &bytes.Buffer{}, commandErr: &bytes.Buffer{}, commandDone: make(chan error, 1),
-	}
+	commandOut, commandErr := &bytes.Buffer{}, &bytes.Buffer{}
+	commandDone := make(chan error, 1)
 	t.Cleanup(func() {
-		close(first429Released)
 		launcher.Close()
 		fixture.Close()
 	})
-	go func() {
-		cmd := NewRootCommand(ctx, Dependencies{
-			In:           strings.NewReader(""),
-			Out:          run.commandOut,
-			Err:          run.commandErr,
-			Secrets:      secrets,
-			Launcher:     launcher,
-			StartGateway: fixture.StartGateway,
-		})
-		cmd.SetArgs([]string{
-			"--db", dbPath, "launch",
-			"--auth-mode", "subscription-pool",
-			"--no-lifecycle", "--no-statusline",
-		})
-		run.commandDone <- cmd.Execute()
-	}()
-	return run
-}
+	go runLiveSubscriptionContinuityCommand(
+		ctx, dbPath, secrets, launcher, fixture, commandOut, commandErr, commandDone,
+	)
 
-func (r *liveSubscriptionRealRelaunchRun) rotate(
-	t *testing.T,
-	ctx context.Context,
-) (*liveSubscriptionPTYStart, *liveSubscriptionPTYStart, error) {
-	t.Helper()
-	first := r.launcher.WaitStart(t, ctx, r.commandDone, r.commandOut, r.commandErr)
-	waitForLivePickerText(t, ctx, first.Transcript, r.commandDone, "Welcome back!")
-	first.Submit(t, "Trigger the configured rate-limit response.")
-	if err := r.fixture.WaitCallCount(ctx, 1); err != nil {
+	start := launcher.WaitStart(t, ctx, commandDone, commandOut, commandErr)
+	waitForLivePickerText(t, ctx, start.Transcript, commandDone, "Welcome back!")
+	start.Submit(t, "Trigger the configured rate-limit response.")
+	if err := fixture.WaitCallCount(ctx, 2); err != nil {
 		t.Fatalf("waiting for real Claude rate-limit request: %v", err)
 	}
-	second := r.launcher.WaitStart(t, ctx, r.commandDone, r.commandOut, r.commandErr)
-	if !first.Process.Stopped() || !first.Process.DoneObserved() {
-		t.Fatalf("first real Claude process was not stopped before relaunch")
+	waitForLivePickerText(
+		t, ctx, start.Transcript, commandDone, "LIVE_SAME_PROCESS_ROTATION_OK",
+	)
+	if start.PID == 0 || start.Process.Stopped() || start.Process.DoneObserved() {
+		t.Fatalf("real Claude process did not survive rotation: pid=%d", start.PID)
 	}
-	second.WaitReady(t, ctx, r.commandDone)
-	if stopErr := second.Process.Stop(); stopErr != nil {
-		t.Fatalf("stopping relaunched real Claude process: %v", stopErr)
+	if start.OAuthTokenExposed || !start.LocalGatewayAuth {
+		t.Fatal("real Claude process received account OAuth instead of only local gateway auth")
+	}
+	select {
+	case unexpected := <-launcher.starts:
+		t.Fatalf("CCR started a second Claude process with pid %d", unexpected.PID)
+	default:
+	}
+	if stopErr := start.Process.Stop(); stopErr != nil {
+		t.Fatalf("stopping test-owned real Claude process: %v", stopErr)
 	}
 	var launchErr error
 	select {
-	case launchErr = <-r.commandDone:
+	case launchErr = <-commandDone:
 	case <-ctx.Done():
-		t.Fatalf("waiting for stopped real Claude relaunch: %v", ctx.Err())
+		t.Fatalf("waiting for test-owned Claude shutdown: %v", ctx.Err())
 	}
-	return first, second, launchErr
-}
-
-func (r *liveSubscriptionRealRelaunchRun) assert(
-	t *testing.T,
-	ctx context.Context,
-	first, second *liveSubscriptionPTYStart,
-	launchErr error,
-) {
-	t.Helper()
-	if !first.UsesToken(liveSubscriptionPersonalToken) || !second.UsesToken(liveSubscriptionWorkToken) {
-		t.Fatalf("real Claude subscription-pool relaunch did not use the next account token")
+	combined := commandOut.String() + commandErr.String() + launcher.Transcript() + fmt.Sprint(launchErr)
+	if !strings.Contains(combined, "switched from account personal to work inside the existing gateway") {
+		t.Fatalf("real Claude output missing same-process rotation metadata:\n%s",
+			redactLiveSubscriptionOutput(combined))
 	}
-	if !containsString(second.Args, "--continue") {
-		t.Fatalf("second real Claude args = %v, want --continue", second.Args)
-	}
-	if first.PID == 0 || second.PID == 0 || first.PID == second.PID {
-		t.Fatalf("real Claude PIDs = first:%d second:%d, want distinct nonzero processes", first.PID, second.PID)
-	}
-	combined := r.commandOut.String() + r.commandErr.String() + r.launcher.Transcript() + fmt.Sprint(launchErr)
-	if !strings.Contains(combined, "relaunching with the next available account") {
-		t.Fatalf("real Claude relaunch output missing visible rotation metadata\nstdout:\n%s\nstderr:\n%s\ntranscript:\n%s",
-			redactLiveSubscriptionOutput(r.commandOut.String()),
-			redactLiveSubscriptionOutput(r.commandErr.String()),
-			redactLiveSubscriptionOutput(r.launcher.Transcript()))
-	}
-	r.fixture.AssertCalls(t, []string{"personal"})
-	assertSubscriptionLaunchMetadata(t, r.dbPath, []subscriptionLaunchWant{
-		{account: "work", state: "failed"},
-		{account: "personal", state: "failed", endReason: "subscription_exhausted"},
-	})
-	statusOut, _, err := runLiveCommand(ctx, Dependencies{Secrets: r.secrets}, "--db", r.dbPath, "status")
+	fixture.AssertRotationCalls(t, "personal", "work")
+	assertSubscriptionLaunchMetadata(t, dbPath, []subscriptionLaunchWant{{account: "work", state: "failed"}})
+	statusOut, _, err := runLiveCommand(ctx, Dependencies{Secrets: secrets}, "--db", dbPath, "status")
 	if err != nil {
 		t.Fatalf("subscription-pool status error = %v", err)
 	}
 	if !strings.Contains(statusOut, "Launch auth: mode=subscription-pool account=work") {
 		t.Fatalf("subscription-pool status did not expose rotated account metadata: %s", statusOut)
 	}
-	assertSubscriptionDatabaseRedaction(t, r.dbPath, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
+	assertSubscriptionDatabaseRedaction(t, dbPath, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
 	assertNoSubscriptionTokenLeak(t, combined+statusOut, liveSubscriptionPersonalToken, liveSubscriptionWorkToken)
 }
 
@@ -380,6 +310,18 @@ func liveRealSubscriptionToken(t *testing.T) string {
 		)
 	}
 	return credentials.AccessToken
+}
+
+func seedLiveSubscriptionCredentials(
+	t *testing.T,
+	accounts []subscriptionAccountFixture,
+) (string, *accountTestSecrets) {
+	t.Helper()
+	values := make(map[string]string, len(accounts))
+	for _, account := range accounts {
+		values[secret.ClaudeAccountAccessTokenRef(account.name)] = account.token
+	}
+	return seedSubscriptionAccounts(t, accounts), &accountTestSecrets{values: values}
 }
 
 type liveSubscriptionResponse struct {
@@ -444,7 +386,11 @@ func (f *liveSubscriptionFixture) handleMessage(t *testing.T, w http.ResponseWri
 	}
 	response, _, ok := f.nextResponse(r.Header.Get("Authorization"))
 	if !ok {
-		t.Error("subscription-pool fixture received unexpected account auth")
+		t.Errorf(
+			"subscription-pool fixture received unexpected account auth: call=%d account=%s",
+			f.CallCount()+1,
+			f.accountForAuthorization(r.Header.Get("Authorization")),
+		)
 		http.Error(w, "unexpected auth", http.StatusUnauthorized)
 		return
 	}
@@ -527,6 +473,32 @@ func (f *liveSubscriptionFixture) AssertCalls(t *testing.T, want []string) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("subscription-pool upstream accounts = %v, want %v", got, want)
 	}
+}
+
+func (f *liveSubscriptionFixture) AssertRotationCalls(t *testing.T, first, active string) {
+	t.Helper()
+	f.mu.Lock()
+	got := append([]string(nil), f.calls...)
+	f.mu.Unlock()
+	if len(got) < 2 || got[0] != first || got[1] != active {
+		t.Fatalf("subscription-pool upstream accounts = %v, want %s then %s", got, first, active)
+	}
+	for _, account := range got[2:] {
+		if account != active {
+			t.Fatalf("subscription-pool upstream accounts after rotation = %v, want only %s", got, active)
+		}
+	}
+}
+
+func (f *liveSubscriptionFixture) accountForAuthorization(auth string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, response := range f.responses {
+		if strings.TrimSpace(auth) == "Bearer "+response.token {
+			return response.account
+		}
+	}
+	return "unknown"
 }
 
 func (f *liveSubscriptionFixture) WaitCallCount(ctx context.Context, want int) error {

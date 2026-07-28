@@ -14,13 +14,26 @@ lives under `docs/acceptance/`.
 - Keep generated settings and existing status-line commands out of process
   arguments through a private temporary settings file, and honor explicit
   higher-precedence `statusLine: null` overrides.
-- Resolve and claim a usable replacement account before stopping the current
-  Claude Code process after confirmed subscription exhaustion.
-- Keep Claude Code and its local gateway open with native limit behavior when
-  no replacement account is usable, retrying pool selection on a later
-  confirmed quota response.
-- Add deterministic fixture and real Claude PTY coverage for replacement
-  rotation and all-accounts-limited process continuity.
+- Move subscription account auth into gateway memory; Claude receives only a
+  generated loopback credential and never inherits a pooled OAuth token.
+- Transparently retry confirmed account-wide quota rejections with the next
+  eligible account while preserving the same Claude process, PID, session,
+  pending request, tools, browser connection, and gateway.
+- Coalesce concurrent stale quota responses by account generation, close
+  rejected response bodies before retry, and preserve Anthropic's original 429
+  when no replacement is usable.
+- Re-admit accounts when their persisted cooldown is cleared or expires during
+  a long-running Claude session.
+- Keep model-specific, unknown, token-count, and ambiguous 429 responses out of
+  account cooldown and rotation.
+- Make injected and preserved status lines resolve the active account from the
+  gateway after rotation, while keeping OAuth and observer credentials isolated.
+- Enforce provider-secret namespaces before keychain resolution so a corrupted
+  provider reference cannot resolve a Claude account OAuth credential.
+- Avoid issuing observer capabilities when lifecycle and status observation are
+  disabled, and keep account-transition warnings visible under notice bursts.
+- Add deterministic fixture and real Claude PTY coverage for same-process
+  rotation and all-accounts-limited continuity.
 
 ## v0.4.2
 

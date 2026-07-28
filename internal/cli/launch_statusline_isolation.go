@@ -66,7 +66,10 @@ func settingsFileStatusline(path string) (statusline map[string]any, found bool,
 	return statusline, true, nil
 }
 
-func isolateClaudeStatuslineCredentials(statusline map[string]any) (map[string]any, error) {
+func isolateClaudeStatuslineCredentials(
+	statusline map[string]any,
+	executable string,
+) (map[string]any, error) {
 	statuslineType, _ := statusline["type"].(string)
 	command, _ := statusline["command"].(string)
 	if statuslineType != "command" || strings.TrimSpace(command) == "" {
@@ -76,7 +79,11 @@ func isolateClaudeStatuslineCredentials(statusline map[string]any) (map[string]a
 	for key, value := range statusline {
 		isolated[key] = value
 	}
-	isolated["command"] = isolatedStatuslineShellCommand(command)
+	accountCommand, err := launchStatuslineAccountCommand(executable)
+	if err != nil {
+		return nil, err
+	}
+	isolated["command"] = isolatedStatuslineShellCommand(command, accountCommand)
 	return isolated, nil
 }
 
@@ -84,9 +91,12 @@ func statuslineCredentialIsolationSupported(goos string) bool {
 	return goos != "windows"
 }
 
-func isolatedStatuslineShellCommand(command string) string {
+func isolatedStatuslineShellCommand(command, accountCommand string) string {
 	var isolated strings.Builder
-	isolated.WriteString("env")
+	isolated.WriteString(statuslineClaudeAccountEnv)
+	isolated.WriteString("=\"$(")
+	isolated.WriteString(accountCommand)
+	isolated.WriteString(")\" env")
 	for _, name := range [...]string{
 		"CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",

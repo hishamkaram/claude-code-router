@@ -131,6 +131,22 @@ func (s *Store) SetLaunchStatuslineState(ctx context.Context, id int64, state st
 	return requireAffected("store.SetLaunchStatuslineState", "launch", id, result)
 }
 
+func (s *Store) SetLaunchClaudeAccount(ctx context.Context, id int64, name string) error {
+	if err := validateClaudeAccountName(name); err != nil {
+		return fmt.Errorf("store.SetLaunchClaudeAccount: %w", err)
+	}
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE launches SET claude_account_name = ? WHERE id = ?`,
+		name,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("store.SetLaunchClaudeAccount: updating launch %d: %w", id, err)
+	}
+	return requireAffected("store.SetLaunchClaudeAccount", "launch", id, result)
+}
+
 func (s *Store) GetLaunch(ctx context.Context, id int64) (Launch, error) {
 	row := s.db.QueryRowContext(ctx, launchSelectSQL+` WHERE id = ?`, id)
 	launch, err := scanLaunch(row)

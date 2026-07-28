@@ -232,22 +232,22 @@ Terminal input for `--oauth-token-stdin` is read without echo.
 Automatic pool selection atomically selects and stamps the least recently used
 enabled, unexpired, non-cooling account. The timestamp provides load balancing,
 not an exclusive lifetime lease; overlapping launches may reuse accounts.
-`--claude-account <name>` selects only that local label. Model requests use its
-stored OAuth token, while Claude's visible profile may remain the shared local
-login; there is no in-process credential swap. If a plain interactive pool
-launch receives a first-party Anthropic HTTP 429 with an
-explicit rejected unified usage-limit status, CCR marks the account cooling
-down and resolves the next usable account before stopping Claude Code and
-relaunching with `--continue`. If no replacement is usable, CCR keeps the
-current Claude process and gateway open so Claude Code retains its native limit
-state and session; a later rejected quota response retries pool selection.
-Temporary or ambiguous 429 responses stay with Claude Code for normal retry
-handling and do not cool the account. Automatic relaunch applies to plain
-interactive launches and to an explicit `--resume <session-id>`, optionally
-with a named `--worktree`. It remains disabled for `--print`,
-`--claude-account`, managed CUA, prompts, and other passthrough arguments.
-Launch stderr reports the decision. An initial launch with no usable account
-fails visibly instead of falling back to the default Claude login.
+`--claude-account <name>` selects and pins only that local label. Claude Code
+receives a generated local gateway credential, while account OAuth tokens stay
+in the OS keychain and CCR gateway memory.
+
+When first-party Anthropic reports a confirmed account-wide quota rejection,
+CCR marks the exhausted account cooling down, selects the next usable account,
+and retries the same buffered request inside the existing gateway. Claude Code
+is not stopped or relaunched: its process, PID, session, tools, browser
+connection, and pending turn stay in place. If no replacement is usable, CCR
+forwards Anthropic's original limit response and keeps Claude Code running. A
+later confirmed rejection retries pool selection.
+
+Model-specific limits with fallback, unknown claims, token-count throttles, and
+temporary or ambiguous 429 responses stay with Claude Code and do not cool or
+rotate the account. An initial launch with no usable account fails visibly
+instead of falling back to the default Claude login.
 
 Claude subscription account pools are for local individual use. Teams,
 automation, hosted tools, and third-party products should use Anthropic's

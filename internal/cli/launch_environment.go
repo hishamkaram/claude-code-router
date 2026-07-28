@@ -24,14 +24,18 @@ type launchEnvironmentOptions struct {
 	ModelID                string
 	DisableTools           bool
 	AuthMode               string
-	ClaudeOAuthToken       string
 	ClaudeAccountName      string
 	ProviderSecretEnvNames []string
 	ExternalTokenEnv       string
 }
 
 func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
-	unset := []string{"CLAUDE_CODE_USE_GATEWAY", statuslineClaudeAccountEnv}
+	unset := []string{
+		"CLAUDE_CODE_USE_GATEWAY",
+		statuslineGatewayURLEnv,
+		statuslineTokenEnv,
+		statuslineClaudeAccountEnv,
+	}
 	for _, name := range options.ProviderSecretEnvNames {
 		if options.AuthMode == launchAuthModePreserve && name == "ANTHROPIC_API_KEY" {
 			continue
@@ -46,10 +50,14 @@ func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
 		env.Set,
 		"ANTHROPIC_BASE_URL="+options.GatewayURL,
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
-		statuslineGatewayURLEnv+"="+options.GatewayURL,
-		statuslineTokenEnv+"="+options.ObserverToken,
 		fmt.Sprintf("CCR_LAUNCH_ID=%d", options.LaunchID),
 	)
+	if options.ObserverToken != "" {
+		env.Set = append(env.Set,
+			statuslineGatewayURLEnv+"="+options.GatewayURL,
+			statuslineTokenEnv+"="+options.ObserverToken,
+		)
+	}
 	if options.DisableTools {
 		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=")
 	} else {
@@ -70,13 +78,13 @@ func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
 	case launchAuthModeSubscriptionPool:
 		env.Unset = append(env.Unset,
 			"ANTHROPIC_API_KEY",
-			"ANTHROPIC_AUTH_TOKEN",
 			"ANTHROPIC_CUSTOM_HEADERS",
+			"CLAUDE_CODE_OAUTH_TOKEN",
 			"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
 			"CLAUDE_CODE_OAUTH_SCOPES",
 		)
 		env.Set = append(env.Set,
-			"CLAUDE_CODE_OAUTH_TOKEN="+options.ClaudeOAuthToken,
+			"ANTHROPIC_AUTH_TOKEN="+options.Token,
 			"ANTHROPIC_CUSTOM_HEADERS="+gatewaySessionHeaderValue(options.Token),
 			statuslineClaudeAccountEnv+"="+options.ClaudeAccountName,
 		)

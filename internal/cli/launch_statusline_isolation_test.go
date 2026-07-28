@@ -19,16 +19,10 @@ func TestIsolatedStatuslineShellCommandPreservesOutputAndScrubsCredentials(t *te
 	}
 
 	original := `printf '%s|%s|%s|%s|it'\''s' "$CCR_CLAUDE_ACCOUNT" "$CLAUDE_CODE_OAUTH_TOKEN" "$ANTHROPIC_CUSTOM_HEADERS" "$CCR_OBSERVER_TOKEN"`
-	isolated, err := isolateClaudeStatuslineCredentials(map[string]any{
-		"type": "command", "command": original, "padding": float64(2),
-	})
-	if err != nil {
-		t.Fatalf("isolateClaudeStatuslineCredentials() error = %v", err)
-	}
-	command, ok := isolated["command"].(string)
-	if !ok {
-		t.Fatalf("isolated command = %#v", isolated["command"])
-	}
+	command := isolatedStatuslineShellCommand(
+		original,
+		`printf '%s' "$CCR_CLAUDE_ACCOUNT"`,
+	)
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -44,9 +38,6 @@ func TestIsolatedStatuslineShellCommandPreservesOutputAndScrubsCredentials(t *te
 	if got, want := string(output), "personal||||it's"; got != want {
 		t.Fatalf("isolated status-line output = %q, want %q", got, want)
 	}
-	if isolated["padding"] != float64(2) {
-		t.Fatalf("isolated status-line padding = %#v", isolated["padding"])
-	}
 	for _, secret := range []string{"oauth-secret", "gateway-secret", "observer-secret"} {
 		if strings.Contains(string(output), secret) {
 			t.Fatalf("isolated status-line output leaked %s", secret)
@@ -61,7 +52,7 @@ func TestIsolateClaudeStatuslineCredentialsRejectsUnsupportedShape(t *testing.T)
 		{"type": "other", "command": "echo unsafe"},
 		{"type": "command", "command": " "},
 	} {
-		if _, err := isolateClaudeStatuslineCredentials(setting); err == nil {
+		if _, err := isolateClaudeStatuslineCredentials(setting, ""); err == nil {
 			t.Fatalf("isolateClaudeStatuslineCredentials(%#v) error = nil", setting)
 		}
 	}

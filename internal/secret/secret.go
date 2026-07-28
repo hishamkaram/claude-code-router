@@ -193,6 +193,22 @@ func ValidateRef(ref string) error {
 	return fmt.Errorf("unsupported secret reference %q; expected env:, file:, or keyring", RedactRef(ref))
 }
 
+// ResolveProvider validates the provider-only secret namespace before asking
+// the backend to resolve a credential.
+func ResolveProvider(ctx context.Context, backend Backend, ref string) (string, error) {
+	if strings.TrimSpace(ref) == "" {
+		return "", nil
+	}
+	if err := ValidateRef(ref); err != nil {
+		return "", fmt.Errorf("validating provider secret reference: %w", err)
+	}
+	value, err := backend.Resolve(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(value), nil
+}
+
 func RedactRef(ref string) string {
 	if ref == "" {
 		return ""

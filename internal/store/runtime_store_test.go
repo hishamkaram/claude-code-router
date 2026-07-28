@@ -117,6 +117,16 @@ func TestLaunchAuthMetadataRoundTrip(t *testing.T) {
 	if authLaunch.AuthMode != "subscription-pool" || authLaunch.ClaudeAccountName != "work" {
 		t.Fatalf("auth launch metadata = %#v", authLaunch)
 	}
+	if setErr := s.SetLaunchClaudeAccount(ctx, authID, "personal"); setErr != nil {
+		t.Fatalf("SetLaunchClaudeAccount() error = %v", setErr)
+	}
+	authLaunch, err = s.GetLaunch(ctx, authID)
+	if err != nil || authLaunch.ClaudeAccountName != "personal" {
+		t.Fatalf("rotated launch auth metadata = %#v, %v", authLaunch, err)
+	}
+	if setErr := s.SetLaunchClaudeAccount(ctx, authID, "bad/name"); setErr == nil {
+		t.Fatal("SetLaunchClaudeAccount() error = nil for invalid account name")
+	}
 	if _, err := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "claude-account", "bad/name"); err == nil {
 		t.Fatal("CreateLaunchWithAuth() error = nil for invalid account name")
 	}

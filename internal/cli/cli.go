@@ -27,6 +27,7 @@ type Dependencies struct {
 	StartManagedCUA        func(context.Context, managedCUAStart) (*managedCUALaunch, error)
 	ValidateExternalCUAURL func(context.Context, string) error
 	ProbeClaudeAccount     func(context.Context, string) (claudeaccount.AccountDiagnostics, error)
+	ExecutablePath         string
 }
 
 type options struct {
@@ -130,6 +131,7 @@ Significant gateway behavior must be proven with live Claude Code E2E tests.`,
 		newSessionsCommand(ctx, opts),
 		newAgentsCommand(ctx, opts),
 		newStatuslineCommand(),
+		newStatuslineAccountCommand(),
 	)
 	return cmd
 }

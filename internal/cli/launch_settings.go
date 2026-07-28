@@ -20,6 +20,7 @@ type launchSettingsOptions struct {
 	StatuslineEnabled            bool
 	IsolateStatuslineCredentials bool
 	GatewayURL                   string
+	StatuslineExecutable         string
 }
 
 type launchSettingsResult struct {
@@ -79,15 +80,15 @@ func addLaunchStatusline(settings map[string]any, options launchSettingsOptions)
 		return "disabled", nil
 	}
 	if statuslineState == claudeStatuslineAbsent {
-		return addCCRStatusline(settings, "injected")
+		return addCCRStatusline(settings, "injected", options.StatuslineExecutable)
 	}
 	if !options.IsolateStatuslineCredentials {
 		return "preserved", nil
 	}
 	if !statuslineCredentialIsolationSupported(runtime.GOOS) {
-		return addCCRStatusline(settings, "replaced")
+		return addCCRStatusline(settings, "replaced", options.StatuslineExecutable)
 	}
-	isolated, err := isolateClaudeStatuslineCredentials(statusline)
+	isolated, err := isolateClaudeStatuslineCredentials(statusline, options.StatuslineExecutable)
 	if err != nil {
 		return "", err
 	}
@@ -95,8 +96,8 @@ func addLaunchStatusline(settings map[string]any, options launchSettingsOptions)
 	return "isolated", nil
 }
 
-func addCCRStatusline(settings map[string]any, state string) (string, error) {
-	command, err := launchStatuslineCommand()
+func addCCRStatusline(settings map[string]any, state, executable string) (string, error) {
+	command, err := launchStatuslineCommand(executable)
 	if err != nil {
 		return "", err
 	}
@@ -176,13 +177,24 @@ func launchHookSettings(gatewayURL string) map[string][]claudeHookMatcher {
 	return hooks
 }
 
-func launchStatuslineCommand() (string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("building CCR status line command: %w", err)
+func launchStatuslineCommand(executable string) (string, error) {
+	return launchHiddenStatuslineCommand(executable, "__statusline")
+}
+
+func launchStatuslineAccountCommand(executable string) (string, error) {
+	return launchHiddenStatuslineCommand(executable, "__statusline-account")
+}
+
+func launchHiddenStatuslineCommand(executable, command string) (string, error) {
+	if strings.TrimSpace(executable) == "" {
+		var err error
+		executable, err = os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("building CCR status line command: %w", err)
+		}
 	}
 	if runtime.GOOS == "windows" {
-		return `"` + strings.ReplaceAll(executable, `"`, `""`) + `" __statusline`, nil
+		return `"` + strings.ReplaceAll(executable, `"`, `""`) + `" ` + command, nil
 	}
-	return quotePOSIXShellArg(executable) + " __statusline", nil
+	return quotePOSIXShellArg(executable) + " " + command, nil
 }
