@@ -343,6 +343,8 @@ type liveSubscriptionFixture struct {
 
 	mu    sync.Mutex
 	calls []string
+
+	nextResponseIndex int
 }
 
 func newLiveSubscriptionFixture(t *testing.T, responses []liveSubscriptionResponse) *liveSubscriptionFixture {
@@ -450,15 +452,29 @@ func (f *liveSubscriptionFixture) handleMessage(t *testing.T, w http.ResponseWri
 func (f *liveSubscriptionFixture) nextResponse(auth string) (liveSubscriptionResponse, string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	index := len(f.calls)
-	if index >= len(f.responses) {
-		if !f.repeatLast || len(f.responses) == 0 {
-			return liveSubscriptionResponse{}, "", false
+	normalizedAuth := strings.TrimSpace(auth)
+	index := f.nextResponseIndex
+	if index < len(f.responses) {
+		response := f.responses[index]
+		if normalizedAuth == "Bearer "+response.token {
+			f.calls = append(f.calls, response.account)
+			f.nextResponseIndex++
+			return response, response.account, true
 		}
-		index = len(f.responses) - 1
+		if index > 0 {
+			previous := f.responses[index-1]
+			if previous.status == http.StatusTooManyRequests && normalizedAuth == "Bearer "+previous.token {
+				f.calls = append(f.calls, previous.account)
+				return previous, previous.account, true
+			}
+		}
+		return liveSubscriptionResponse{}, "", false
 	}
-	response := f.responses[index]
-	if strings.TrimSpace(auth) != "Bearer "+response.token {
+	if !f.repeatLast || len(f.responses) == 0 {
+		return liveSubscriptionResponse{}, "", false
+	}
+	response := f.responses[len(f.responses)-1]
+	if normalizedAuth != "Bearer "+response.token {
 		return liveSubscriptionResponse{}, "", false
 	}
 	f.calls = append(f.calls, response.account)
@@ -480,10 +496,26 @@ func (f *liveSubscriptionFixture) AssertRotationCalls(t *testing.T, first, activ
 	f.mu.Lock()
 	got := append([]string(nil), f.calls...)
 	f.mu.Unlock()
-	if len(got) < 2 || got[0] != first || got[1] != active {
+	if len(got) < 2 || got[0] != first {
 		t.Fatalf("subscription-pool upstream accounts = %v, want %s then %s", got, first, active)
 	}
-	for _, account := range got[2:] {
+	activeIndex := -1
+	for index, account := range got[1:] {
+		if account == active {
+			activeIndex = index + 1
+			break
+		}
+		if account != first {
+			t.Fatalf(
+				"subscription-pool upstream accounts before rotation = %v, want only %s until %s",
+				got, first, active,
+			)
+		}
+	}
+	if activeIndex == -1 {
+		t.Fatalf("subscription-pool upstream accounts = %v, want %s then %s", got, first, active)
+	}
+	for _, account := range got[activeIndex+1:] {
 		if account != active {
 			t.Fatalf("subscription-pool upstream accounts after rotation = %v, want only %s", got, active)
 		}
