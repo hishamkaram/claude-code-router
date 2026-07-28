@@ -25,6 +25,7 @@ func TestLiveFixtureSubscriptionPoolIsolatesExistingStatuslineCredentials(t *tes
 	if _, err := liveclaude.Check(ctx); err != nil {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
+	ccrExecutable := buildLiveCCRExecutable(t, ctx)
 	configDir := isolateLiveSubscriptionClaudeHome(t)
 	probePath := filepath.Join(t.TempDir(), "statusline-environment.txt")
 	statuslineCommand := fmt.Sprintf(
@@ -48,7 +49,6 @@ func TestLiveFixtureSubscriptionPoolIsolatesExistingStatuslineCredentials(t *tes
 	}}
 	fixture := newLiveSubscriptionFixture(t, nil)
 	launcher := newLiveSubscriptionPTYLauncher("")
-	ccrExecutable := buildLiveCCRExecutable(t, ctx)
 	commandOut, commandErr := &bytes.Buffer{}, &bytes.Buffer{}
 	commandDone := make(chan error, 1)
 	t.Cleanup(func() {
