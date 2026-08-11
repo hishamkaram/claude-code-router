@@ -202,8 +202,8 @@ func claimEligibleClaudeAccount(
 func noUsableClaudeAccountError(explicitName string) error {
 	if explicitName != "" {
 		return fmt.Errorf(
-			"claude account %q is disabled, expired, or cooling down; inspect it with ccr claude-account show %s",
-			explicitName, explicitName,
+			"claude account %q is disabled, expired, or cooling down; inspect it with ccr claude-account show %s; if disabled run ccr claude-account enable %s, if cooling down run ccr claude-account clear-cooldown %s, or refresh credentials with ccr claude-account refresh %s --from current",
+			explicitName, explicitName, explicitName, explicitName, explicitName,
 		)
 	}
 	return fmt.Errorf(

@@ -124,7 +124,7 @@ func TestGatewaySubscriptionPoolNeverFallsBackToIncomingAuth(t *testing.T) {
 
 	resp := postSubscriptionGatewayMessage(t, context.Background(), server, "claude-sonnet-4-6")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway || upstreamCalls.Load() != 0 {
+	if resp.StatusCode != http.StatusUnauthorized || upstreamCalls.Load() != 0 {
 		t.Fatalf("status=%d upstream calls=%d, want visible failure without fallback",
 			resp.StatusCode, upstreamCalls.Load())
 	}

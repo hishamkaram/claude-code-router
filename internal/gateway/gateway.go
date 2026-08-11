@@ -131,7 +131,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 type handler struct {
-	cfg Config
+	cfg        Config
+	claudeAuth claudeAuthTracker
 }
 
 const (
@@ -220,7 +221,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 			writeAnthropicError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
+		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic)
 		return
 	case routeOpenAIResponses:
 		usage = h.handleOpenAIResponses(w, r, req, route)
@@ -376,10 +377,18 @@ func addIgnoredAnthropicFieldsHeader(header http.Header, fields []string) {
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, message string) {
+	writeAnthropicErrorType(w, status, "invalid_request_error", message)
+}
+
+func writeAnthropicAuthenticationError(w http.ResponseWriter, status int, message string) {
+	writeAnthropicErrorType(w, status, "authentication_error", message)
+}
+
+func writeAnthropicErrorType(w http.ResponseWriter, status int, errorType, message string) {
 	writeJSON(w, status, map[string]any{
 		"type": "error",
 		"error": map[string]string{
-			"type":    "invalid_request_error",
+			"type":    errorType,
 			"message": message,
 		},
 	})

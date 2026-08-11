@@ -70,7 +70,7 @@ func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	w.Header().Set(ccrTokenCountModeHeader, tokenCountModeProvider)
-	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel)
+	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic)
 }
 
 func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) observability.TokenUsage {
