@@ -24,7 +24,7 @@ func TestRuntimeInspectionCommandsEmitVersionedJSON(t *testing.T) {
 	if decodeErr := json.Unmarshal([]byte(statusOut), &status); decodeErr != nil {
 		t.Fatalf("status JSON error = %v\n%s", decodeErr, statusOut)
 	}
-	if status.SchemaVersion != 1 || status.LatestLaunch == nil ||
+	if status.SchemaVersion != 2 || status.LatestLaunch == nil ||
 		status.LatestLaunch.ID != launchID || status.LastRoute == nil ||
 		status.LastRoute.ModelAlias != "coder" {
 		t.Fatalf("status document = %#v", status)
@@ -110,6 +110,66 @@ func TestStatusFindsLatestRouteBeyondLifecycleEventPage(t *testing.T) {
 	}
 	if status.LastRoute == nil || status.LastRoute.ModelAlias != "coder" {
 		t.Fatalf("status last route = %#v", status.LastRoute)
+	}
+}
+
+func TestStatusReportsClaudeAuthRecoveryAction(t *testing.T) {
+	t.Parallel()
+	dbPath, launchID, sessionID := seedRuntimeInspectionStore(t)
+	ctx := context.Background()
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	if _, recordErr := s.RecordLifecycleEvent(ctx, store.LifecycleEvent{
+		LaunchID: launchID, SessionID: sessionID, Name: "claude_auth",
+		Status: "needs_relogin", Reason: "upstream_authentication_rejected",
+	}); recordErr != nil {
+		_ = s.Close()
+		t.Fatalf("RecordLifecycleEvent() error = %v", recordErr)
+	}
+	if closeErr := s.Close(); closeErr != nil {
+		t.Fatalf("Close() error = %v", closeErr)
+	}
+
+	jsonOut, _, err := runCommand(t, "--db", dbPath, "status", "--json")
+	if err != nil {
+		t.Fatalf("status --json error = %v", err)
+	}
+	var status statusDocument
+	if decodeErr := json.Unmarshal([]byte(jsonOut), &status); decodeErr != nil {
+		t.Fatalf("status JSON error = %v", decodeErr)
+	}
+	if status.ClaudeAuth.State != "needs_relogin" ||
+		status.ClaudeAuth.Reason != "upstream_authentication_rejected" ||
+		status.ClaudeAuth.Action != "claude /login" {
+		t.Fatalf("Claude auth status = %#v", status.ClaudeAuth)
+	}
+	if strings.Contains(jsonOut, "oauth") || strings.Contains(jsonOut, "secret") {
+		t.Fatalf("status JSON contains credential-like data: %s", jsonOut)
+	}
+
+	humanOut, _, err := runCommand(t, "--db", dbPath, "status")
+	if err != nil {
+		t.Fatalf("status error = %v", err)
+	}
+	for _, want := range []string{
+		"Claude subscription auth: state=needs_relogin",
+		"reason=upstream_authentication_rejected",
+		"action=claude /login",
+	} {
+		if !strings.Contains(humanOut, want) {
+			t.Fatalf("human status missing %q: %s", want, humanOut)
+		}
+	}
+}
+
+func TestClaudeAuthRepairActionUsesSubscriptionPoolAccount(t *testing.T) {
+	got := claudeAuthRepairAction(&launchView{
+		AuthMode: "subscription-pool", ClaudeAccount: "work",
+	}, "broken")
+	if got != "ccr claude-account refresh work --from current" {
+		t.Fatalf("claudeAuthRepairAction() = %q", got)
 	}
 }
 

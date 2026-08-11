@@ -15,6 +15,53 @@ ccr model list
 `ccr doctor` reports whether the `claude` binary is available. Install Claude
 Code, ensure it is on your `PATH`, then sign in before using first-party routes.
 
+## Claude Subscription Needs Relogin
+
+When a first-party Claude request returns an authentication failure, CCR keeps
+registered provider aliases available. Check the current state and recovery
+action with:
+
+```bash
+ccr status
+ccr model list
+```
+
+Run `claude /login` and relaunch. For a subscription-pool launch, repair the
+selected account explicitly:
+
+```bash
+ccr claude-account refresh <name> --from current
+```
+
+The first-party rows remain visible in `/model` and are marked as requiring
+re-login after the failure. Select a registered alias such as
+`/model anthropic.ccr.<alias>` to continue through its configured provider;
+CCR never silently falls back from a failed Claude route.
+
+## macOS Prints a MallocStackLogging Warning
+
+A message such as the following is a macOS malloc diagnostic, not a CCR routing
+failure:
+
+```text
+ccr(12345) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+```
+
+macOS discovers stack-logging configuration by scanning the process environment
+for `MallocStackLogging` variables. Setting a flag to `0` can still trigger that
+initialization; remove the variable to disable it:
+
+```bash
+env | grep '^MallocStackLogging'
+unset MallocStackLogging MallocStackLoggingNoCompact MallocStackLoggingDirectory
+```
+
+Remove matching exports from the shell or terminal profile that starts CCR,
+then open a new terminal. The process name and PID in the warning identify the
+process in which macOS printed the diagnostic; they do not mean CCR detected a
+Go allocation failure. If no matching variables are present, reproduce from a
+new terminal without memory-debugging or command-integration tooling enabled.
+
 ## A Provider Cannot Connect
 
 Validate the configured provider and model separately:

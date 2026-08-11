@@ -70,6 +70,7 @@ type TraceFilter struct {
 	LaunchID        int64
 	ClaudeSessionID string
 	Kind            string
+	Name            string
 	Since           string
 	AfterID         int64
 	OldestFirst     bool
@@ -237,11 +238,12 @@ func (s *Store) ListTraceEvents(ctx context.Context, filter TraceFilter) ([]Trac
 WHERE (? = 0 OR event_log.launch_id = ?)
   AND (? = '' OR sessions.claude_session_id = ?)
   AND (? = '' OR event_log.kind = ?)
+  AND (? = '' OR event_log.name = ?)
   AND (? = '' OR event_log.occurred_at >= ?)
   AND (? = 0 OR event_log.id > ?)
 ORDER BY event_log.id `+order+`
 LIMIT ?`, filter.LaunchID, filter.LaunchID, filter.ClaudeSessionID,
-		filter.ClaudeSessionID, filter.Kind, filter.Kind, since, since,
+		filter.ClaudeSessionID, filter.Kind, filter.Kind, filter.Name, filter.Name, since, since,
 		filter.AfterID, filter.AfterID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store.ListTraceEvents: querying events: %w", err)

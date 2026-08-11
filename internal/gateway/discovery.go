@@ -13,7 +13,7 @@ import (
 func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	entries := make([]gatewayModelEntry, 0)
 	seen := map[string]struct{}{}
-	for _, entry := range firstPartyAnthropicModelEntries() {
+	for _, entry := range h.firstPartyAnthropicModelEntries() {
 		appendGatewayModelEntry(&entries, seen, entry)
 	}
 	models, err := h.cfg.Store.ListModels(r.Context())
@@ -56,6 +56,17 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"data": entries, "first_id": firstID, "last_id": lastID, "has_more": false,
 	})
+}
+
+func (h *handler) firstPartyAnthropicModelEntries() []gatewayModelEntry {
+	entries := firstPartyAnthropicModelEntries()
+	if state := h.claudeAuthState(); state != claudeAuthNeedsRelogin && state != claudeAuthBroken {
+		return entries
+	}
+	for index := range entries {
+		entries[index].DisplayName += " (re-login required)"
+	}
+	return entries
 }
 
 func configuredGatewayModelEntry(model *store.Model, providerType string, provider providers.Capabilities) (gatewayModelEntry, bool, error) {

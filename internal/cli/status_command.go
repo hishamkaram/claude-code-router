@@ -18,6 +18,13 @@ type statusDocument struct {
 	LatestLaunch  *launchView         `json:"latest_launch,omitempty"`
 	Sessions      []claudeSessionView `json:"sessions"`
 	LastRoute     *traceRouteView     `json:"last_route,omitempty"`
+	ClaudeAuth    claudeAuthView      `json:"claude_auth"`
+}
+
+type claudeAuthView struct {
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
+	Action string `json:"action,omitempty"`
 }
 
 func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
@@ -49,8 +56,9 @@ func loadStatusDocument(ctx context.Context, opts *options) (statusDocument, err
 	}
 	defer closeStore(s)
 	document := statusDocument{
-		SchemaVersion: 1, Database: dbPath,
+		SchemaVersion: 2, Database: dbPath,
 		Providers: []providerView{}, Models: []modelView{}, Sessions: []claudeSessionView{},
+		ClaudeAuth: claudeAuthView{State: "unknown"},
 	}
 	if document.StoreSchema, err = s.SchemaVersion(ctx); err != nil {
 		return statusDocument{}, err
@@ -99,7 +107,32 @@ func loadLatestRuntimeStatus(ctx context.Context, s *store.Store, document statu
 		route := newTraceRouteView(events[0].Route)
 		document.LastRoute = &route
 	}
+	authEvents, err := s.ListTraceEvents(ctx, store.TraceFilter{
+		LaunchID: latest.ID, Kind: "lifecycle", Name: "claude_auth", Limit: 1,
+	})
+	if err != nil {
+		return statusDocument{}, err
+	}
+	if len(authEvents) == 1 {
+		event := authEvents[0]
+		document.ClaudeAuth.State = event.Lifecycle.Status
+		document.ClaudeAuth.Reason = event.Lifecycle.Reason
+		document.ClaudeAuth.Action = claudeAuthRepairAction(&latest, document.ClaudeAuth.State)
+	}
 	return document, nil
+}
+
+func claudeAuthRepairAction(launch *launchView, state string) string {
+	if state != "needs_relogin" && state != "broken" {
+		return ""
+	}
+	if launch != nil && launch.AuthMode == launchAuthModeSubscriptionPool {
+		if launch.ClaudeAccount != "" {
+			return fmt.Sprintf("ccr claude-account refresh %s --from current", launch.ClaudeAccount)
+		}
+		return "ccr claude-account list"
+	}
+	return "claude /login"
 }
 
 func writeHumanStatus(cmd *cobra.Command, document statusDocument) {
@@ -120,6 +153,14 @@ func writeHumanStatus(cmd *cobra.Command, document statusDocument) {
 			fmt.Fprintln(out)
 		}
 	}
+	fmt.Fprintf(out, "Claude subscription auth: state=%s", document.ClaudeAuth.State)
+	if document.ClaudeAuth.Reason != "" {
+		fmt.Fprintf(out, " reason=%s", document.ClaudeAuth.Reason)
+	}
+	if document.ClaudeAuth.Action != "" {
+		fmt.Fprintf(out, " action=%s", document.ClaudeAuth.Action)
+	}
+	fmt.Fprintln(out)
 	if document.LastRoute == nil {
 		fmt.Fprintln(out, "Last route: none observed")
 	} else {

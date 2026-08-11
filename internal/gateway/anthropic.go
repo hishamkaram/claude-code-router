@@ -16,18 +16,11 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string) observability.TokenUsage {
-	if body == nil {
-		var err error
-		body, err = io.ReadAll(io.LimitReader(r.Body, maxGatewayRequestBytes+1))
-		if err != nil {
-			writeAnthropicError(w, http.StatusBadRequest, "invalid Anthropic request")
-			return observability.TokenUsage{}
-		}
-		if len(body) > maxGatewayRequestBytes {
-			writeAnthropicError(w, http.StatusRequestEntityTooLarge, "Anthropic request exceeds the 32 MiB gateway limit")
-			return observability.TokenUsage{}
-		}
+func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string, firstParty bool) observability.TokenUsage {
+	body, status, message := readAnthropicPassThroughBody(r, body)
+	if status != 0 {
+		writeAnthropicError(w, status, message)
+		return observability.TokenUsage{}
 	}
 	if providerOverride == nil {
 		writeAnthropicError(w, http.StatusBadGateway, "Anthropic route missing upstream provider")
@@ -35,19 +28,10 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 	}
 	provider := *providerOverride
 	resource := anthropicResourceFromPath(r.URL.Path)
-	endpoint, err := anthropicEndpoint(provider.BaseURL, resource)
+	endpoint, err := anthropicPassThroughEndpoint(provider.BaseURL, resource, r.URL.RawQuery)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())
 		return observability.TokenUsage{}
-	}
-	if r.URL.RawQuery != "" {
-		parsed, parseErr := url.Parse(endpoint)
-		if parseErr != nil {
-			writeAnthropicError(w, http.StatusBadGateway, parseErr.Error())
-			return observability.TokenUsage{}
-		}
-		parsed.RawQuery = r.URL.RawQuery
-		endpoint = parsed.String()
 	}
 
 	var providerSecret string
@@ -60,14 +44,63 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 	}
 	resp, err := h.executeAnthropicPassThrough(r, body, endpoint, provider, authMode, resource, providerSecret)
 	if err != nil {
-		if errors.Is(err, errAnthropicSubscriptionCredentialUnavailable) {
-			writeAnthropicError(w, http.StatusBadGateway, "Claude subscription credential is unavailable")
-			return observability.TokenUsage{}
-		}
-		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("requesting Anthropic provider %q: %v", provider.Name, err))
+		h.writeAnthropicPassThroughFailure(w, r, provider, err, firstParty)
 		return observability.TokenUsage{}
 	}
 	defer func() { _ = resp.Body.Close() }()
+	return h.writeAnthropicPassThroughResponse(w, r, resp, provider, authMode, resource, responseModel, firstParty)
+}
+
+func readAnthropicPassThroughBody(r *http.Request, body []byte) (result []byte, status int, message string) {
+	if body != nil {
+		return body, 0, ""
+	}
+	var err error
+	result, err = io.ReadAll(io.LimitReader(r.Body, maxGatewayRequestBytes+1))
+	if err != nil {
+		return nil, http.StatusBadRequest, "invalid Anthropic request"
+	}
+	if len(result) > maxGatewayRequestBytes {
+		return nil, http.StatusRequestEntityTooLarge, "Anthropic request exceeds the 32 MiB gateway limit"
+	}
+	return result, 0, ""
+}
+
+func anthropicPassThroughEndpoint(baseURL, resource, rawQuery string) (string, error) {
+	endpoint, err := anthropicEndpoint(baseURL, resource)
+	if err != nil {
+		return "", err
+	}
+	if rawQuery == "" {
+		return endpoint, nil
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", err
+	}
+	parsed.RawQuery = rawQuery
+	return parsed.String(), nil
+}
+
+func (h *handler) writeAnthropicPassThroughFailure(w http.ResponseWriter, r *http.Request, provider store.Provider, err error, firstParty bool) {
+	if errors.Is(err, errAnthropicSubscriptionCredentialUnavailable) {
+		if firstParty {
+			h.recordClaudeAuthState(r.Context(), claudeAuthBroken, "local_subscription_credential_unavailable")
+			writeAnthropicAuthenticationError(w, http.StatusUnauthorized, claudeSubscriptionAuthFailureMessage())
+			return
+		}
+		writeAnthropicError(w, http.StatusBadGateway, "Claude subscription credential is unavailable")
+		return
+	}
+	writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("requesting Anthropic provider %q: %v", provider.Name, err))
+}
+
+func (h *handler) writeAnthropicPassThroughResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, provider store.Provider, authMode anthropicAuthMode, resource, responseModel string, firstParty bool) observability.TokenUsage {
+	h.observeClaudeAuthResponse(r.Context(), firstParty, resp.StatusCode)
+	if firstParty && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		writeAnthropicAuthenticationError(w, resp.StatusCode, claudeSubscriptionAuthFailureMessage())
+		return observability.TokenUsage{}
+	}
 	h.notifyAnthropicSubscriptionExhaustion(resp, provider, authMode, resource)
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)

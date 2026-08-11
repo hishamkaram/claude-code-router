@@ -66,6 +66,21 @@ func TestSubscriptionPoolLaunchSelectsAccountAndRecordsAuth(t *testing.T) {
 	}
 }
 
+func TestNoUsableClaudeAccountErrorIncludesEachRepairPath(t *testing.T) {
+	err := noUsableClaudeAccountError("work")
+	message := err.Error()
+	for _, want := range []string{
+		"ccr claude-account show work",
+		"ccr claude-account enable work",
+		"ccr claude-account clear-cooldown work",
+		"ccr claude-account refresh work --from current",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("noUsableClaudeAccountError() = %q, missing %q", message, want)
+		}
+	}
+}
+
 func TestSubscriptionPoolPreservesExistingStatusline(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
