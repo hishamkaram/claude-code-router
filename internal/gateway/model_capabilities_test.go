@@ -253,7 +253,7 @@ func TestOpenAIRequestTranslatesAnthropicResponseSchema(t *testing.T) {
 			"format":{"type":"json_schema","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}}
 		}`),
 	}
-	translated, err := toOpenAIChatRequest(req, openAIModelRoute{providerModel: "gpt-5"})
+	translated, _, err := toOpenAIChatRequest(req, openAIModelRoute{providerModel: "gpt-5"})
 	if err != nil {
 		t.Fatalf("toOpenAIChatRequest() error = %v", err)
 	}

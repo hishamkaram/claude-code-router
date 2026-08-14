@@ -8,16 +8,29 @@ import (
 	"unicode"
 )
 
-func openAIMessagesFromAnthropicWithResolver(ctx context.Context, message anthropicMessage, resolver imageSourceResolver) ([]openAIMessage, error) {
+type openAIMessageConversion struct {
+	messages      []openAIMessage
+	ignoredFields []string
+}
+
+func openAIMessagesFromAnthropicWithResolver(ctx context.Context, message anthropicMessage, resolver imageSourceResolver) (openAIMessageConversion, error) {
 	switch message.Role {
 	case "user":
-		return openAIUserMessagesFromAnthropicWithResolver(ctx, message.Content, resolver)
+		messages, err := openAIUserMessagesFromAnthropicWithResolver(ctx, message.Content, resolver)
+		if err != nil {
+			return openAIMessageConversion{}, err
+		}
+		return openAIMessageConversion{messages: messages}, nil
 	case "assistant":
 		return openAIAssistantMessagesFromAnthropic(message.Content)
 	case "system":
-		return openAISystemMessagesFromAnthropic(message.Content)
+		messages, err := openAISystemMessagesFromAnthropic(message.Content)
+		if err != nil {
+			return openAIMessageConversion{}, err
+		}
+		return openAIMessageConversion{messages: messages}, nil
 	default:
-		return nil, fmt.Errorf("unsupported message role %q", message.Role)
+		return openAIMessageConversion{}, fmt.Errorf("unsupported message role %q", message.Role)
 	}
 }
 
@@ -206,45 +219,52 @@ func openAIToolReferencePart(block map[string]any) (any, error) {
 	return map[string]any{"type": "text", "text": text}, nil
 }
 
-func openAIAssistantMessagesFromAnthropic(content any) ([]openAIMessage, error) {
+func openAIAssistantMessagesFromAnthropic(content any) (openAIMessageConversion, error) {
 	if text, ok := content.(string); ok {
-		return []openAIMessage{{Role: "assistant", Content: text}}, nil
+		return openAIMessageConversion{messages: []openAIMessage{{Role: "assistant", Content: text}}}, nil
 	}
 	blocks, ok := content.([]any)
 	if !ok {
-		return nil, fmt.Errorf("unsupported assistant message content type %T", content)
+		return openAIMessageConversion{}, fmt.Errorf("unsupported assistant message content type %T", content)
 	}
 	var textParts []string
 	var toolCalls []openAIToolCall
+	var ignoredFields []string
 	for _, item := range blocks {
 		block, ok := item.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("assistant content block is not an object")
+			return openAIMessageConversion{}, fmt.Errorf("assistant content block is not an object")
 		}
 		blockType, _ := block["type"].(string)
 		switch blockType {
 		case "text":
-			text, err := anthropicTextBlockText(block)
+			text, citationsPresent, err := anthropicAssistantTextBlockText(block)
 			if err != nil {
-				return nil, fmt.Errorf("unsupported assistant text block: %w", err)
+				return openAIMessageConversion{}, fmt.Errorf("unsupported assistant text block: %w", err)
 			}
 			textParts = append(textParts, text)
+			if citationsPresent {
+				ignoredFields = appendIgnoredAnthropicField(ignoredFields, ccrIgnoredAssistantCitationsField)
+			}
 		case "tool_use":
 			toolCall, err := openAIToolCallFromAnthropic(block)
 			if err != nil {
-				return nil, err
+				return openAIMessageConversion{}, err
 			}
 			toolCalls = append(toolCalls, toolCall)
 		case "thinking", "redacted_thinking":
 			continue
 		default:
-			return nil, fmt.Errorf("assistant content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
+			return openAIMessageConversion{}, fmt.Errorf("assistant content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
 		}
 	}
 	if len(textParts) == 0 && len(toolCalls) == 0 {
-		return nil, nil
+		return openAIMessageConversion{ignoredFields: ignoredFields}, nil
 	}
-	return []openAIMessage{{Role: "assistant", Content: strings.Join(textParts, "\n"), ToolCalls: toolCalls}}, nil
+	return openAIMessageConversion{
+		messages:      []openAIMessage{{Role: "assistant", Content: strings.Join(textParts, "\n"), ToolCalls: toolCalls}},
+		ignoredFields: ignoredFields,
+	}, nil
 }
 
 func openAIToolCallFromAnthropic(block map[string]any) (openAIToolCall, error) {
@@ -359,18 +379,34 @@ func anthropicContentText(value any) (string, error) {
 }
 
 func anthropicTextBlockText(block map[string]any) (string, error) {
+	text, _, err := anthropicTextBlockTextWithCitations(block, false)
+	return text, err
+}
+
+func anthropicAssistantTextBlockText(block map[string]any) (text string, citationsPresent bool, err error) {
+	return anthropicTextBlockTextWithCitations(block, true)
+}
+
+func anthropicTextBlockTextWithCitations(block map[string]any, allowCitations bool) (text string, citationsPresent bool, err error) {
 	for key := range block {
-		if key != "type" && key != "text" && key != "cache_control" {
-			return "", fmt.Errorf("content block field %q is not supported", key)
+		switch key {
+		case "type", "text", "cache_control":
+		case "citations":
+			if !allowCitations {
+				return "", false, fmt.Errorf("content block field %q is not supported", key)
+			}
+			citationsPresent = true
+		default:
+			return "", false, fmt.Errorf("content block field %q is not supported", key)
 		}
 	}
 	blockType, _ := block["type"].(string)
 	if blockType != "text" {
-		return "", fmt.Errorf("content block type %q is not supported", blockType)
+		return "", false, fmt.Errorf("content block type %q is not supported", blockType)
 	}
 	text, ok := block["text"].(string)
 	if !ok {
-		return "", fmt.Errorf("content block text must be a string")
+		return "", false, fmt.Errorf("content block text must be a string")
 	}
-	return text, nil
+	return text, citationsPresent, nil
 }

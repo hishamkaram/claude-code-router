@@ -5,6 +5,17 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.5
+
+- Accept Anthropic assistant text blocks that include `citations` when routing
+  through OpenAI-compatible Chat Completions providers.
+- Preserve assistant text while dropping unsupported citation metadata, and
+  expose the degraded field through `X-CCR-Ignored-Anthropic-Fields`.
+- Keep unknown assistant metadata and citations in user, system, and tool
+  result content strict so unsupported input remains visible as an error.
+- Add a live Claude Code model-switch fixture covering citation-bearing
+  assistant history and the provider request shape.
+
 ## v0.4.3
 
 - Preserve existing Claude Code status-line behavior in subscription-pool

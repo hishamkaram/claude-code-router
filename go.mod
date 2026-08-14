@@ -1,6 +1,6 @@
 module github.com/hishamkaram/claude-code-router
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/charmbracelet/huh v1.0.0

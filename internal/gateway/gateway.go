@@ -136,11 +136,12 @@ type handler struct {
 }
 
 const (
-	defaultAnthropicBaseURL = "https://api.anthropic.com"
-	maxGatewayRequestBytes  = 32 << 20
-	ccrSessionTokenHeader   = "X-CCR-Session-Token"
-	ccrSessionTokenLower    = "x-ccr-session-token"
-	ccrIgnoredFieldsHeader  = "X-CCR-Ignored-Anthropic-Fields"
+	defaultAnthropicBaseURL           = "https://api.anthropic.com"
+	maxGatewayRequestBytes            = 32 << 20
+	ccrSessionTokenHeader             = "X-CCR-Session-Token"
+	ccrSessionTokenLower              = "x-ccr-session-token"
+	ccrIgnoredFieldsHeader            = "X-CCR-Ignored-Anthropic-Fields"
+	ccrIgnoredAssistantCitationsField = "messages[].content[].citations"
 )
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +249,7 @@ func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req a
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(route.provider.SecretRef)))
 		return usage
 	}
-	openAIReq, err := h.toOpenAIChatRequest(r.Context(), req, openAIModelRoute{
+	openAIReq, ignoredFields, err := h.toOpenAIChatRequest(r.Context(), req, openAIModelRoute{
 		alias:                         route.model.Alias,
 		providerName:                  route.provider.Name,
 		providerModel:                 route.model.ProviderModel,
@@ -260,6 +261,8 @@ func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req a
 		writeAnthropicError(w, http.StatusNotImplemented, err.Error())
 		return usage
 	}
+	ignoredFields = append(ignoredOpenAIAnthropicFields(req.Fields), ignoredFields...)
+	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredFields)
 	resp, err := h.callOpenAICompatible(r.Context(), route.provider, apiKey, openAIReq)
 	if err != nil {
 		var statusErr *openAIProviderStatusError
@@ -370,10 +373,28 @@ func ignoredOpenAIAnthropicFields(fields map[string]json.RawMessage) []string {
 }
 
 func addIgnoredAnthropicFieldsHeader(header http.Header, fields []string) {
+	fields = uniqueIgnoredAnthropicFields(fields)
 	if len(fields) == 0 {
 		return
 	}
 	header.Set(ccrIgnoredFieldsHeader, strings.Join(fields, ", "))
+}
+
+func appendIgnoredAnthropicField(fields []string, field string) []string {
+	for _, existing := range fields {
+		if existing == field {
+			return fields
+		}
+	}
+	return append(fields, field)
+}
+
+func uniqueIgnoredAnthropicFields(fields []string) []string {
+	unique := make([]string, 0, len(fields))
+	for _, field := range fields {
+		unique = appendIgnoredAnthropicField(unique, field)
+	}
+	return unique
 }
 
 func writeAnthropicError(w http.ResponseWriter, status int, message string) {

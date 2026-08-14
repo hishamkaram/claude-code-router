@@ -284,6 +284,29 @@ pre-compact transcript, because that would make the selected provider keep
 seeing stale context. Use a first-party or Anthropic-compatible route for
 sessions where `/compact` must work.
 
+## `501 unsupported assistant text block: citations`
+
+Anthropic assistant history can attach citation annotations to a text block.
+OpenAI Chat Completions has no equivalent field, so CCR preserves the
+assistant text and drops only `citations` when translating that history for an
+OpenAI-compatible provider. Successful `/v1/messages` responses expose this
+degradation with:
+
+```text
+X-CCR-Ignored-Anthropic-Fields: messages[].content[].citations
+```
+
+The annotation is not sent to the provider. Citation metadata is therefore not
+preserved on this route; use a first-party or Anthropic-compatible alias when
+the citation details are required. If the 501 continues, inspect the failing
+request for an unsupported field on a user, system, or tool-result text block,
+or for an assistant field other than `citations`:
+
+```bash
+ccr trace --since 10m
+ccr status
+```
+
 ## First-Party Subscription Authentication Fails
 
 Use the default `--auth-mode preserve` and verify the ordinary `claude` CLI is

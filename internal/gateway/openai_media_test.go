@@ -25,10 +25,11 @@ func TestOpenAIRequestConvertsBase64Images(t *testing.T) {
 			map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}},
 		},
 	}}}
-	messages, err := openAIMessagesFromRequestWithResolver(context.Background(), req, openAIModelRoute{}, newImageSourceResolver(nil))
+	conversion, err := openAIMessagesFromRequestWithResolver(context.Background(), req, openAIModelRoute{}, newImageSourceResolver(nil))
 	if err != nil {
 		t.Fatalf("openAIMessagesFromRequestWithResolver() error = %v", err)
 	}
+	messages := conversion.messages
 	if len(messages) != 1 {
 		t.Fatalf("messages = %#v", messages)
 	}
@@ -85,7 +86,7 @@ func TestOpenAIChatConversionRejectsAggregateURLImageBudget(t *testing.T) {
 		},
 	}}}
 
-	_, err := toOpenAIChatRequestWithResolver(context.Background(), req, openAIModelRoute{}, resolver)
+	_, _, err := toOpenAIChatRequestWithResolver(context.Background(), req, openAIModelRoute{}, resolver)
 	if err == nil || !strings.Contains(err.Error(), "gateway request budget") {
 		t.Fatalf("toOpenAIChatRequestWithResolver() error = %v, want aggregate budget rejection", err)
 	}
