@@ -46,11 +46,11 @@ func (route openAIModelRoute) identityContent() (string, bool) {
 	return content, true
 }
 
-func toOpenAIChatRequest(req anthropicRequest, route openAIModelRoute) (openAIChatRequest, error) {
+func toOpenAIChatRequest(req anthropicRequest, route openAIModelRoute) (openAIChatRequest, []string, error) {
 	return toOpenAIChatRequestWithResolver(context.Background(), req, route, newChatImageSourceResolver(nil))
 }
 
-func (h *handler) toOpenAIChatRequest(ctx context.Context, req anthropicRequest, route openAIModelRoute) (openAIChatRequest, error) {
+func (h *handler) toOpenAIChatRequest(ctx context.Context, req anthropicRequest, route openAIModelRoute) (openAIChatRequest, []string, error) {
 	return toOpenAIChatRequestWithResolver(ctx, req, route, newChatImageSourceResolver(h.cfg.ImageHTTPClient))
 }
 
@@ -58,30 +58,30 @@ func newChatImageSourceResolver(client *http.Client) imageSourceResolver {
 	return newImageSourceResolver(client, newImageFetchBudget(int64(maxURLImageBytes)))
 }
 
-func toOpenAIChatRequestWithResolver(ctx context.Context, req anthropicRequest, route openAIModelRoute, resolver imageSourceResolver) (openAIChatRequest, error) {
+func toOpenAIChatRequestWithResolver(ctx context.Context, req anthropicRequest, route openAIModelRoute, resolver imageSourceResolver) (openAIChatRequest, []string, error) {
 	options, err := openAIOptionsFromAnthropic(req)
 	if err != nil {
-		return openAIChatRequest{}, err
+		return openAIChatRequest{}, nil, err
 	}
 	tools, err := openAIToolsFromAnthropic(req.Tools)
 	if err != nil {
-		return openAIChatRequest{}, err
+		return openAIChatRequest{}, nil, err
 	}
 	toolChoice, parallelTools, err := openAIToolChoiceFromAnthropic(req.ToolChoice)
 	if err != nil {
-		return openAIChatRequest{}, err
+		return openAIChatRequest{}, nil, err
 	}
 	if route.forceDisableParallelTools && len(tools) > 0 {
 		parallelDisabled := false
 		parallelTools = &parallelDisabled
 	}
-	messages, err := openAIMessagesFromRequestWithResolver(ctx, req, route, resolver)
+	messageConversion, err := openAIMessagesFromRequestWithResolver(ctx, req, route, resolver)
 	if err != nil {
-		return openAIChatRequest{}, err
+		return openAIChatRequest{}, nil, err
 	}
 	return openAIChatRequest{
 		Model:           route.providerModel,
-		Messages:        messages,
+		Messages:        messageConversion.messages,
 		MaxTokens:       req.MaxTokens,
 		Temperature:     req.Temperature,
 		Stop:            req.StopSequences,
@@ -92,17 +92,18 @@ func toOpenAIChatRequestWithResolver(ctx context.Context, req anthropicRequest, 
 		Tools:           tools,
 		ToolChoice:      toolChoice,
 		ParallelTools:   parallelTools,
-	}, nil
+	}, messageConversion.ignoredFields, nil
 }
 
-func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicRequest, route openAIModelRoute, resolver imageSourceResolver) ([]openAIMessage, error) {
+func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicRequest, route openAIModelRoute, resolver imageSourceResolver) (openAIMessageConversion, error) {
 	identityMessage, includeIdentity := route.identityMessage()
 	includeIdentity = includeIdentity && latestUserAsksModelIdentity(req.Messages)
 	messages := make([]openAIMessage, 0, len(req.Messages)+2)
+	var ignoredFields []string
 	if req.System != nil {
 		text, err := anthropicContentText(req.System)
 		if err != nil {
-			return nil, fmt.Errorf("unsupported system content: %w", err)
+			return openAIMessageConversion{}, fmt.Errorf("unsupported system content: %w", err)
 		}
 		if text != "" {
 			messages = append(messages, openAIMessage{Role: "system", Content: text})
@@ -116,14 +117,17 @@ func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicReq
 		}
 		converted, err := openAIMessagesFromAnthropicWithResolver(ctx, message, resolver)
 		if err != nil {
-			return nil, err
+			return openAIMessageConversion{}, err
 		}
-		messages = append(messages, converted...)
+		messages = append(messages, converted.messages...)
+		for _, field := range converted.ignoredFields {
+			ignoredFields = appendIgnoredAnthropicField(ignoredFields, field)
+		}
 	}
 	if includeIdentity && !identityAdded {
 		messages = append(messages, identityMessage)
 	}
-	return messages, nil
+	return openAIMessageConversion{messages: messages, ignoredFields: ignoredFields}, nil
 }
 
 func latestUserAsksModelIdentity(messages []anthropicMessage) bool {

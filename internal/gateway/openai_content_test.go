@@ -4,13 +4,47 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
+
+func TestOpenAIAssistantCitationsPreserveTextAndRecordDegradation(t *testing.T) {
+	t.Parallel()
+
+	conversion, err := openAIAssistantMessagesFromAnthropic([]any{
+		map[string]any{
+			"type": "text", "text": "first",
+			"citations": []any{map[string]any{"type": "char_location", "document_index": float64(0)}},
+		},
+		map[string]any{"type": "text", "text": "second", "citations": []any{}},
+	})
+	if err != nil {
+		t.Fatalf("openAIAssistantMessagesFromAnthropic() error = %v", err)
+	}
+	if len(conversion.messages) != 1 || conversion.messages[0].Content != "first\nsecond" {
+		t.Fatalf("assistant conversion = %#v, want joined text", conversion.messages)
+	}
+	if got, want := conversion.ignoredFields, []string{ccrIgnoredAssistantCitationsField}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ignored fields = %#v, want %#v", got, want)
+	}
+}
+
+func TestOpenAIAssistantTextRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
+
+	_, err := openAIAssistantMessagesFromAnthropic([]any{
+		map[string]any{"type": "text", "text": "answer", "unexpected": true},
+	})
+	if err == nil || !strings.Contains(err.Error(), `content block field "unexpected" is not supported`) {
+		t.Fatalf("openAIAssistantMessagesFromAnthropic() error = %v, want unknown-field rejection", err)
+	}
+}
 
 func TestAnthropicToolResultTextConvertsToolReferences(t *testing.T) {
 	t.Parallel()
@@ -148,6 +182,64 @@ func TestGatewayRoutesToolSearchToolReferenceResultToOpenAIProvider(t *testing.T
 	wantContent := "Loaded matching tools:\n[Loaded tool: Agent]\nUse it for child work."
 	if gotMessages[1].Content != wantContent {
 		t.Fatalf("tool result content = %q, want %q", gotMessages[1].Content, wantContent)
+	}
+}
+
+func TestGatewayDropsAssistantCitationsOnOpenAIChat(t *testing.T) {
+	ctx := context.Background()
+	var gotMessages []openAIMessage
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("provider read error = %v", err)
+		}
+		if strings.Contains(string(body), "citations") {
+			t.Fatalf("provider received dropped citation metadata: %s", body)
+		}
+		var payload struct {
+			Messages []openAIMessage `json:"messages"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		gotMessages = payload.Messages
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-citations","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	body := `{
+		"model":"gpt",
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"text","text":"first","citations":[{"type":"char_location","document_index":0}]},
+				{"type":"text","text":"second","citations":[]}
+			]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get(ccrIgnoredFieldsHeader), ccrIgnoredAssistantCitationsField; got != want {
+		t.Fatalf("%s = %q, want %q", ccrIgnoredFieldsHeader, got, want)
+	}
+	if len(gotMessages) != 2 || gotMessages[0].Role != "assistant" || gotMessages[0].Content != "first\nsecond" || gotMessages[1].Role != "user" {
+		t.Fatalf("provider messages = %#v, want cited assistant text followed by user message", gotMessages)
 	}
 }
 

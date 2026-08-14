@@ -54,6 +54,18 @@ func TestRequestFromAnthropicMessagesJSONBasicCases(t *testing.T) {
 			},
 		},
 		{
+			name: "assistant citation metadata is ignored",
+			raw:  `{"model":"claude","messages":[{"role":"assistant","content":[{"type":"text","text":"prior","citations":[{"type":"char_location","document_index":0}]}]}]}`,
+			want: &Request{
+				Model: "claude",
+				Input: []InputItem{{
+					Type:    "message",
+					Role:    "assistant",
+					Content: []Content{{Type: "output_text", Text: "prior"}},
+				}},
+			},
+		},
+		{
 			name: "system message history uses developer role",
 			raw:  `{"model":"claude","messages":[{"role":"system","content":[{"type":"text","text":"do not disclose secrets"}]},{"role":"user","content":"hello"}]}`,
 			want: &Request{
