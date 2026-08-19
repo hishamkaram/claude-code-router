@@ -95,12 +95,20 @@ func TestOpenAIChatConversionRejectsAggregateURLImageBudget(t *testing.T) {
 	}
 }
 
-func TestGatewayRejectsImageToolResultForOpenAIChat(t *testing.T) {
+func TestGatewayConvertsImageToolResultForOpenAIChat(t *testing.T) {
 	ctx := context.Background()
 	var providerCalls atomic.Int64
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var providerBody []byte
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		providerCalls.Add(1)
-		http.Error(w, "Chat Completions must not receive image tool results", http.StatusBadRequest)
+		var err error
+		providerBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "reading provider body failed", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"tool-result-image-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	}))
 	defer provider.Close()
 
@@ -129,14 +137,16 @@ func TestGatewayRejectsImageToolResultForOpenAIChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading gateway response: %v", err)
 	}
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("gateway status = %d body=%s, want %d", resp.StatusCode, raw, http.StatusNotImplemented)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "tool-result-image-ok") {
+		t.Fatalf("gateway status = %d body=%s, want successful provider response", resp.StatusCode, raw)
 	}
-	if !strings.Contains(string(raw), "image tool_result content is not supported") {
-		t.Fatalf("gateway response = %s", raw)
+	if !strings.Contains(string(providerBody), `"role":"tool"`) ||
+		!strings.Contains(string(providerBody), `"content":"[image output]"`) ||
+		!strings.Contains(string(providerBody), `data:image/png;base64,iVBORw0KGgo=`) {
+		t.Fatalf("provider body = %s, want placeholder tool content and trailing image user content", providerBody)
 	}
-	if providerCalls.Load() != 0 {
-		t.Fatalf("provider calls = %d, want 0", providerCalls.Load())
+	if providerCalls.Load() != 1 {
+		t.Fatalf("provider calls = %d, want 1", providerCalls.Load())
 	}
 }
 

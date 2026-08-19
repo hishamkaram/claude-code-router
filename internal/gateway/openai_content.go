@@ -58,6 +58,7 @@ func openAIUserMessagesFromAnthropicWithResolver(ctx context.Context, content an
 
 type openAIUserBlockConversion struct {
 	part        any
+	userParts   []any
 	toolMessage *openAIMessage
 }
 
@@ -71,9 +72,11 @@ func openAIUserBlockMessages(ctx context.Context, blocks []any, resolver imageSo
 		}
 		if converted.toolMessage != nil {
 			toolMessages = append(toolMessages, *converted.toolMessage)
-			continue
 		}
-		parts = append(parts, converted.part)
+		if converted.part != nil {
+			parts = append(parts, converted.part)
+		}
+		parts = append(parts, converted.userParts...)
 	}
 
 	// OpenAI requires every tool response to directly follow the assistant
@@ -107,24 +110,64 @@ func openAIUserBlock(ctx context.Context, item any, resolver imageSourceResolver
 		}
 		return openAIUserBlockConversion{part: image}, nil
 	case "tool_result":
-		return openAIToolResultMessage(block)
+		return openAIToolResultMessage(ctx, block, resolver)
 	default:
 		return openAIUserBlockConversion{}, fmt.Errorf("user content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
 	}
 }
 
-func openAIToolResultMessage(block map[string]any) (openAIUserBlockConversion, error) {
+func openAIToolResultMessage(ctx context.Context, block map[string]any, resolver imageSourceResolver) (openAIUserBlockConversion, error) {
 	toolCallID, _ := block["tool_use_id"].(string)
 	toolCallID = strings.TrimSpace(toolCallID)
 	if toolCallID == "" {
 		return openAIUserBlockConversion{}, fmt.Errorf("tool_result block missing tool_use_id")
 	}
-	resultContent, err := openAIToolResultContent(block["content"])
+	textContent, imageParts, err := splitOpenAIToolResultImages(ctx, block["content"], resolver)
 	if err != nil {
 		return openAIUserBlockConversion{}, err
 	}
+	resultContent, err := openAIToolResultContent(textContent)
+	if err != nil {
+		return openAIUserBlockConversion{}, err
+	}
+	if len(imageParts) > 0 {
+		if text, ok := resultContent.(string); ok && text == "" {
+			resultContent = "[image output]"
+		}
+	}
 	message := openAIMessage{Role: "tool", ToolCallID: toolCallID, Content: resultContent}
-	return openAIUserBlockConversion{toolMessage: &message}, nil
+	return openAIUserBlockConversion{toolMessage: &message, userParts: imageParts}, nil
+}
+
+// splitOpenAIToolResultImages keeps image_url parts out of the OpenAI tool
+// message, which many Chat Completions providers require to remain text-only.
+// The extracted images are emitted in the trailing user message after all tool
+// messages so parallel tool results remain contiguous after assistant calls.
+func splitOpenAIToolResultImages(ctx context.Context, value any, resolver imageSourceResolver) (remainingContent any, imageParts []any, err error) {
+	blocks, ok := value.([]any)
+	if !ok {
+		return value, nil, nil
+	}
+	textBlocks := make([]any, 0, len(blocks))
+	images := make([]any, 0)
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok {
+			textBlocks = append(textBlocks, item)
+			continue
+		}
+		blockType, _ := block["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(blockType), "image") {
+			image, err := resolver(ctx, block)
+			if err != nil {
+				return nil, nil, err
+			}
+			images = append(images, image)
+			continue
+		}
+		textBlocks = append(textBlocks, item)
+	}
+	return textBlocks, images, nil
 }
 
 func openAIContentFromParts(parts []any) any {
@@ -196,8 +239,6 @@ func openAIToolResultPart(item any) (any, error) {
 		return openAIToolResultTextPart(block)
 	case "tool_reference":
 		return openAIToolReferencePart(block)
-	case "image":
-		return nil, fmt.Errorf("image tool_result content is not supported by the OpenAI-compatible Chat Completions gateway path")
 	default:
 		return nil, fmt.Errorf("tool_result content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
 	}
