@@ -322,11 +322,17 @@ func TestLiveFixtureOpenAIImageConversion(t *testing.T) {
 
 	toolResultBody := []byte(`{"model":"vision","max_tokens":16,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_image","content":[{"type":"image","source":{"type":"base64","media_type":"image/webp","data":"UklGRg=="}}]}]}]}`)
 	status, raw = postLiveGatewayMessage(t, ctx, gatewayURL, toolResultBody, nil)
-	if status != http.StatusNotImplemented || !strings.Contains(raw, "image tool_result content is not supported") {
-		t.Fatalf("gateway status=%d body=%s, want Chat Completions tool-result image rejection", status, raw)
+	if status != http.StatusOK || !strings.Contains(raw, "images-ok") {
+		t.Fatalf("gateway status=%d body=%s, want Chat Completions tool-result image conversion", status, raw)
 	}
-	if got := providerCalls.Load(); got != 1 {
-		t.Fatalf("image tool_result reached the Chat Completions provider: calls=%d", got)
+	if got := providerCalls.Load(); got != 2 {
+		t.Fatalf("image tool_result provider calls=%d, want top-level and tool-result requests", got)
+	}
+	compact = compactLiveJSON(t, providerBody)
+	if !strings.Contains(compact, `"role":"tool"`) ||
+		!strings.Contains(compact, `"content":"[image output]"`) ||
+		!strings.Contains(compact, "data:image/webp;base64,UklGRg==") {
+		t.Fatalf("converted tool-result request missing placeholder or image data URL\n%s", compact)
 	}
 }
 

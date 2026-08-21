@@ -432,10 +432,10 @@ func TestOpenAIUserMessagesKeepParallelToolResultsContiguous(t *testing.T) {
 	}
 }
 
-func TestOpenAIToolResultRejectsImageContent(t *testing.T) {
+func TestOpenAIToolResultImageSurfacesInTrailingUserMessage(t *testing.T) {
 	t.Parallel()
 
-	_, err := openAIUserMessagesFromAnthropicWithResolver(context.Background(), []any{
+	messages, err := openAIUserMessagesFromAnthropicWithResolver(context.Background(), []any{
 		map[string]any{"type": "tool_result", "tool_use_id": "toolu_shot", "content": []any{
 			map[string]any{"type": "text", "text": "screenshot captured"},
 			map[string]any{"type": "image", "source": map[string]any{
@@ -443,8 +443,92 @@ func TestOpenAIToolResultRejectsImageContent(t *testing.T) {
 			}},
 		}},
 	}, testImageSourceResolver)
-	if err == nil || !strings.Contains(err.Error(), "image tool_result content is not supported") {
-		t.Fatalf("error = %v, want image tool_result rejection", err)
+	if err != nil {
+		t.Fatalf("openAIUserMessagesFromAnthropicWithResolver() error = %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v, want tool message and image user message", messages)
+	}
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "toolu_shot" || messages[0].Content != "screenshot captured" {
+		t.Fatalf("tool message = %#v", messages[0])
+	}
+	parts := messageContentParts(t, messages[1])
+	if messages[1].Role != "user" || len(parts) != 1 || parts[0]["type"] != "image_url" || partImageURL(t, parts[0]) != "data:image/png;base64,SHOT" {
+		t.Fatalf("image user message = %#v", messages[1])
+	}
+}
+
+func TestOpenAIToolResultImageOnlyUsesPlaceholderToolContent(t *testing.T) {
+	t.Parallel()
+
+	messages := openAIUserMessagesFromAnthropicForTest(t, []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_only", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{
+				"type": "url", "url": "https://example.com/output.png",
+			}},
+		}},
+	})
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v, want tool message and image user message", messages)
+	}
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "toolu_only" || messages[0].Content != "[image output]" {
+		t.Fatalf("tool message = %#v", messages[0])
+	}
+	parts := messageContentParts(t, messages[1])
+	if messages[1].Role != "user" || len(parts) != 1 || parts[0]["type"] != "image_url" || partImageURL(t, parts[0]) != "https://example.com/output.png" {
+		t.Fatalf("image user message = %#v", messages[1])
+	}
+}
+
+func TestOpenAIUserMessagesKeepToolResultImagesAfterAllToolMessages(t *testing.T) {
+	t.Parallel()
+
+	messages := openAIUserMessagesFromAnthropicForTest(t, []any{
+		map[string]any{"type": "text", "text": "before tools"},
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{
+				"type": "base64", "media_type": "image/png", "data": "AAAA",
+			}},
+		}},
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_2", "content": []any{
+			map[string]any{"type": "text", "text": "second result"},
+			map[string]any{"type": "image", "source": map[string]any{
+				"type": "base64", "media_type": "image/jpeg", "data": "BBBB",
+			}},
+		}},
+		map[string]any{"type": "text", "text": "after tools"},
+	})
+	if len(messages) != 3 {
+		t.Fatalf("messages = %#v, want two contiguous tools and one user message", messages)
+	}
+	if messages[0].Role != "tool" || messages[0].ToolCallID != "toolu_1" || messages[0].Content != "[image output]" {
+		t.Fatalf("first tool message = %#v", messages[0])
+	}
+	if messages[1].Role != "tool" || messages[1].ToolCallID != "toolu_2" || messages[1].Content != "second result" {
+		t.Fatalf("second tool message = %#v", messages[1])
+	}
+	parts := messageContentParts(t, messages[2])
+	if messages[2].Role != "user" || len(parts) != 4 {
+		t.Fatalf("trailing user message = %#v", messages[2])
+	}
+	if parts[0]["type"] != "text" || partText(parts[0]) != "before tools" ||
+		parts[1]["type"] != "image_url" || partImageURL(t, parts[1]) != "data:image/png;base64,AAAA" ||
+		parts[2]["type"] != "image_url" || partImageURL(t, parts[2]) != "data:image/jpeg;base64,BBBB" ||
+		parts[3]["type"] != "text" || partText(parts[3]) != "after tools" {
+		t.Fatalf("trailing user parts = %#v", parts)
+	}
+}
+
+func TestOpenAIToolResultRejectsInvalidImageSource(t *testing.T) {
+	t.Parallel()
+
+	_, err := openAIUserMessagesFromAnthropicWithResolver(context.Background(), []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "toolu_bad", "content": []any{
+			map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": "image/png"}},
+		}},
+	}, testImageSourceResolver)
+	if err == nil || !strings.Contains(err.Error(), "media_type and data") {
+		t.Fatalf("error = %v, want nested image validation failure", err)
 	}
 }
 

@@ -307,6 +307,35 @@ ccr trace --since 10m
 ccr status
 ```
 
+## `501 image tool_result content` on an OpenAI-compatible alias
+
+This error came from an older CCR Chat Completions adapter that rejected an
+image nested inside Claude Code tool output. It is not normally fixed by
+retrying the same request. Upgrade CCR, then verify the selected alias and its
+effective capability facts:
+
+```bash
+ccr version
+ccr model show <alias> --json
+ccr doctor --live --all
+```
+
+With the fix, CCR keeps the tool response text (or an `[image output]`
+placeholder when the result contains only an image) and sends the extracted
+image as a later OpenAI user message. The alias must still be marked as
+vision-capable; CCR will continue to reject image history when the provider
+does not advertise or override vision support, rather than silently dropping
+the image. For example:
+
+```bash
+ccr model update <alias> --input-modalities text,image --vision true
+```
+
+Use a first-party or Anthropic-compatible alias as a temporary workaround if
+CCR cannot be upgraded. This issue is separate from explicit `/compact`
+context-management edits, which remain unsupported on OpenAI-compatible
+routes.
+
 ## First-Party Subscription Authentication Fails
 
 Use the default `--auth-mode preserve` and verify the ordinary `claude` CLI is

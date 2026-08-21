@@ -5,6 +5,14 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.6
+
+- Translate image-bearing Anthropic `tool_result` blocks on OpenAI-compatible
+  Chat Completions routes by keeping tool responses text-only and surfacing
+  extracted images in the trailing user message.
+- Add direct gateway, live route-fixture, and live Claude Code MCP coverage for
+  image tool results after an in-session `/model` switch.
+
 ## v0.4.5
 
 - Accept Anthropic assistant text blocks that include `citations` when routing
