@@ -83,6 +83,42 @@ func TestLaunchAutoPermissionModeDoesNotForceLegacyAutoEnv(t *testing.T) {
 	}
 }
 
+func TestAutoModeClassifierLaunchSummaryExplainsRouting(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		modelAlias string
+		want       string
+	}{
+		{
+			name:       "active CCR alias",
+			modelAlias: "gpt",
+			want:       "follow the active CCR alias; routing failures are visible and never fall back",
+		},
+		{
+			name: "no active CCR alias",
+			want: "use Claude Code's requested first-party model until /model selects a CCR alias",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var out strings.Builder
+			writeAutoModeClassifierSummary(&out, test.modelAlias, "auto")
+			if !strings.Contains(out.String(), test.want) {
+				t.Fatalf("auto-mode summary = %q, want %q", out.String(), test.want)
+			}
+		})
+	}
+
+	var out strings.Builder
+	writeAutoModeClassifierSummary(&out, "gpt", "manual")
+	if out.Len() != 0 {
+		t.Fatalf("non-auto summary = %q, want empty", out.String())
+	}
+}
+
 func TestLaunchForwardsClaudeCodeArguments(t *testing.T) {
 	t.Parallel()
 

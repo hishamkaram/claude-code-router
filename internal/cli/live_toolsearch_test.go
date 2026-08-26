@@ -55,7 +55,8 @@ func TestLiveLaunchOpenAIProviderAutoModePluginResearchAgent(t *testing.T) {
 	if !strings.Contains(out, liveToolSearchAgentResult) {
 		t.Fatalf("launch output missing completed agent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut, classifier.Seen())
+	state.assertComplete(t, out, errOut)
+	classifier.AssertUnused(t)
 	assertLiveAgentVisibility(t, ctx, dbPath)
 }
 
@@ -152,12 +153,12 @@ func writeLiveToolCall(w http.ResponseWriter, id, toolID, name string, args any)
 	})
 }
 
-func (s *liveToolSearchAgentState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
+func (s *liveToolSearchAgentState) assertComplete(t *testing.T, out, errOut string) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadToolSearch || !s.toolReferenceResultSeen || (!s.classifierRequestSeen && !firstPartyClassifierSeen) || !s.childPromptSeen {
-		t.Fatalf("Research Agent live route incomplete: firstRequestHadToolSearch=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadToolSearch, s.toolReferenceResultSeen, s.classifierRequestSeen, firstPartyClassifierSeen, s.childPromptSeen, s.callerAgentResultSeen, s.chatCalls, out, errOut)
+	if !s.firstRequestHadToolSearch || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen {
+		t.Fatalf("Research Agent live route incomplete: firstRequestHadToolSearch=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadToolSearch, s.toolReferenceResultSeen, s.classifierRequestSeen, s.childPromptSeen, s.callerAgentResultSeen, s.chatCalls, out, errOut)
 	}
 }
 

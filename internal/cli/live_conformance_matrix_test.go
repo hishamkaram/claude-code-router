@@ -26,12 +26,16 @@ type liveClaudeConformanceFixture struct {
 	protocol string
 	server   *httptest.Server
 
-	mu            sync.Mutex
-	aliasModels   map[string]int
-	firstParty    int
-	agentToolSeen bool
-	workflowSeen  bool
-	requestSteps  []string
+	mu                              sync.Mutex
+	aliasModels                     map[string]int
+	firstParty                      int
+	selectedClassifierMessages      int
+	selectedClassifierCountTokens   int
+	firstPartyClassifierMessages    int
+	firstPartyClassifierCountTokens int
+	agentToolSeen                   bool
+	workflowSeen                    bool
+	requestSteps                    []string
 }
 
 func TestLiveClaudeConformanceMatrix(t *testing.T) {
@@ -245,8 +249,7 @@ func (f *liveClaudeConformanceFixture) handle(t *testing.T, w http.ResponseWrite
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"data":[{"id":"fixture-full-model"},{"id":"fixture-chat-model"}]}`)
 	case "/v1/messages/count_tokens":
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"input_tokens":7}`)
+		f.handleCountTokens(t, w, r)
 	case "/v1/chat/completions":
 		f.handleOpenAI(t, w, r)
 	case "/v1/responses":
@@ -267,6 +270,11 @@ func (f *liveClaudeConformanceFixture) handleOpenAI(t *testing.T, w http.Respons
 		return
 	}
 	f.recordAlias(payload.Model)
+	if isLiveAutoClassifierRequest(payload) {
+		f.recordSelectedClassifier(false)
+		writeLiveOpenAIClassifierResponse(w, payload)
+		return
+	}
 	latest := latestOpenAIMessage(payload.Messages)
 	f.recordRequestStep(payload.Model, latest)
 	if strings.Contains(latest, "CCR_CONFORMANCE_CANCEL") {
@@ -277,8 +285,6 @@ func (f *liveClaudeConformanceFixture) handleOpenAI(t *testing.T, w http.Respons
 	switch {
 	case liveToolsContain(payload.Tools, "ccr_probe"):
 		writeOpenAIToolCall(w, "ccr_probe", "toolu_conformance", map[string]any{})
-	case isLiveAutoClassifierRequest(payload):
-		writeLiveOpenAIClassifierResponse(w, payload)
 	case !f.workflowStarted() && strings.Contains(latest, claudeConformanceWorkflowParent):
 		f.markWorkflow()
 		writeOpenAIToolCall(w, "Workflow", "toolu_workflow_conformance", map[string]any{"script": conformanceWorkflowScript()})
@@ -318,14 +324,15 @@ func (f *liveClaudeConformanceFixture) handleResponses(t *testing.T, w http.Resp
 		return
 	}
 	f.recordAlias(payload.Model)
+	if isLiveResponsesAutoClassifierRequest(payload) {
+		f.recordSelectedClassifier(false)
+		writeLiveResponsesText(w, payload.Model, liveClassifierAllowResponse(payload.Instructions))
+		return
+	}
 	latest := latestResponsesInput(payload.Input)
 	f.recordRequestStep(payload.Model, latest)
 	if strings.Contains(latest, "CCR_CONFORMANCE_CANCEL") {
 		waitForFixtureCancellation(r)
-		return
-	}
-	if isLiveResponsesAutoClassifierRequest(payload) {
-		writeLiveResponsesText(w, payload.Model, liveClassifierAllowResponse(payload.Instructions))
 		return
 	}
 	switch {
@@ -365,6 +372,16 @@ func (f *liveClaudeConformanceFixture) handleAnthropic(t *testing.T, w http.Resp
 		return
 	}
 	aliasRoute := strings.HasPrefix(payload.Model, "fixture-")
+	if isLiveAnthropicAutoClassifierRequest(payload) {
+		if aliasRoute {
+			f.recordAlias(payload.Model)
+			f.recordSelectedClassifier(false)
+		} else {
+			f.recordFirstPartyClassifier(false)
+		}
+		writeLiveAnthropicClassifierResponse(w, payload)
+		return
+	}
 	if aliasRoute {
 		f.recordAlias(payload.Model)
 	} else {
@@ -374,10 +391,6 @@ func (f *liveClaudeConformanceFixture) handleAnthropic(t *testing.T, w http.Resp
 	f.recordRequestStep(payload.Model, latest)
 	if strings.Contains(latest, "CCR_CONFORMANCE_CANCEL") {
 		waitForFixtureCancellation(r)
-		return
-	}
-	if isLiveAnthropicAutoClassifierRequest(payload) {
-		writeLiveAnthropicClassifierResponse(w, payload)
 		return
 	}
 	if !aliasRoute {
@@ -635,22 +648,4 @@ func (f *liveClaudeConformanceFixture) recordRequestStep(model, latest string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requestSteps = append(f.requestSteps, model+":"+latestConformanceSentinel(latest))
-}
-
-func (f *liveClaudeConformanceFixture) summary() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return fmt.Sprintf("aliases=%v firstParty=%d agent=%t workflow=%t steps=%v",
-		f.aliasModels, f.firstParty, f.agentToolSeen, f.workflowSeen, f.requestSteps)
-}
-
-func (f *liveClaudeConformanceFixture) assertComplete(t *testing.T, out, errOut string) {
-	t.Helper()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.aliasModels["fixture-full-model"] == 0 || f.aliasModels["fixture-chat-model"] == 0 ||
-		f.firstParty == 0 || !f.agentToolSeen || !f.workflowSeen {
-		t.Fatalf("live conformance fixture incomplete: aliases=%v firstParty=%d agent=%v workflow=%v\nstdout:\n%s\nstderr:\n%s",
-			f.aliasModels, f.firstParty, f.agentToolSeen, f.workflowSeen, out, errOut)
-	}
 }

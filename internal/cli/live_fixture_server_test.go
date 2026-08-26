@@ -19,8 +19,9 @@ import (
 type liveFirstPartyClassifierFixture struct {
 	server *httptest.Server
 
-	mu    sync.Mutex
-	calls int
+	mu               sync.Mutex
+	messageCalls     int
+	countTokensCalls int
 }
 
 func newLiveFirstPartyClassifierFixture(t *testing.T) *liveFirstPartyClassifierFixture {
@@ -41,19 +42,32 @@ func (f *liveFirstPartyClassifierFixture) StartGateway(ctx context.Context, cfg 
 	return gateway.Start(ctx, cfg)
 }
 
-func (f *liveFirstPartyClassifierFixture) Seen() bool {
+func (f *liveFirstPartyClassifierFixture) AssertUnused(t *testing.T) {
+	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.calls > 0
+	if f.messageCalls != 0 || f.countTokensCalls != 0 {
+		t.Fatalf(
+			"auto-mode classifier leaked to first-party Anthropic: messages=%d count_tokens=%d",
+			f.messageCalls,
+			f.countTokensCalls,
+		)
+	}
 }
 
 func (f *liveFirstPartyClassifierFixture) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	t.Helper()
 	switch r.URL.Path {
 	case "/v1/messages/count_tokens":
+		f.mu.Lock()
+		f.countTokensCalls++
+		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"input_tokens":3}`)
 	case "/v1/messages":
+		f.mu.Lock()
+		f.messageCalls++
+		f.mu.Unlock()
 		var payload liveAnthropicMessagePayload
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decoding first-party classifier request: %v", err)
@@ -65,9 +79,6 @@ func (f *liveFirstPartyClassifierFixture) handle(t *testing.T, w http.ResponseWr
 			http.Error(w, "unexpected request", http.StatusBadRequest)
 			return
 		}
-		f.mu.Lock()
-		f.calls++
-		f.mu.Unlock()
 		writeLiveAnthropicClassifierResponse(w, payload)
 	default:
 		http.NotFound(w, r)
@@ -79,7 +90,32 @@ func isLiveAutoClassifierRequest(payload liveOpenAIChatPayload) bool {
 }
 
 func isLiveAnthropicAutoClassifierRequest(payload liveAnthropicMessagePayload) bool {
-	return strings.Contains(string(payload.System), "You are a security monitor for autonomous AI coding agents.")
+	return strings.Contains(liveAnthropicSystemText(payload.System), "You are a security monitor for autonomous AI coding agents.")
+}
+
+func liveAnthropicSystemText(raw json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return ""
+	}
+	var combined strings.Builder
+	for _, block := range blocks {
+		if block.Type != "text" || block.Text == "" {
+			continue
+		}
+		if combined.Len() > 0 {
+			combined.WriteByte('\n')
+		}
+		combined.WriteString(block.Text)
+	}
+	return combined.String()
 }
 
 func liveClassifierAllowResponse(system string) string {
@@ -96,7 +132,7 @@ func writeLiveOpenAIClassifierResponse(w http.ResponseWriter, payload liveOpenAI
 }
 
 func writeLiveAnthropicClassifierResponse(w http.ResponseWriter, payload liveAnthropicMessagePayload) {
-	text := liveClassifierAllowResponse(string(payload.System))
+	text := liveClassifierAllowResponse(liveAnthropicSystemText(payload.System))
 	if payload.Stream {
 		writeLiveAnthropicStream(w, payload.Model, text)
 		return

@@ -69,7 +69,7 @@ func TestLiveFixtureSubscriptionPoolIsolatesExistingStatuslineCredentials(t *tes
 	}()
 
 	start := launcher.WaitStart(t, ctx, commandDone, commandOut, commandErr)
-	waitForLivePickerText(t, ctx, start.Transcript, commandDone, "Welcome back!")
+	start.WaitReady(t, ctx, commandDone)
 	probe := waitForStatuslineProbe(t, ctx, probePath, commandDone)
 	if probe != "unset|unset|unset|personal" {
 		t.Fatalf("credential-isolated status-line environment = %q", probe)
@@ -158,7 +158,7 @@ func TestLiveFixtureSubscriptionPoolKeepsRealClaudeOpenWhenAllAccountsLimited(t 
 		ctx, dbPath, secrets, launcher, fixture, commandOut, commandErr, commandDone,
 	)
 	start := launcher.WaitStart(t, ctx, commandDone, commandOut, commandErr)
-	waitForLivePickerText(t, ctx, start.Transcript, commandDone, "Welcome back!")
+	start.WaitReady(t, ctx, commandDone)
 	start.Submit(t, "Trigger the configured rate-limit response.")
 	if err := fixture.WaitCallCount(ctx, 1); err != nil {
 		t.Fatalf("waiting for real Claude rate-limit request: %v", err)

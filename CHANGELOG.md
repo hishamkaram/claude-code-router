@@ -5,6 +5,18 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.7
+
+- Route Claude Code auto-mode safety classifier messages and token-count
+  requests through the active CCR alias for each Claude session.
+- Apply in-session `/model` changes to later classifier requests without
+  leaking model selection across concurrent Claude sessions.
+- Refuse silent first-party Anthropic fallback when an active alias cannot be
+  routed, and expose dedicated classifier trace operations.
+- Add direct gateway, protocol-matrix, concurrency, and live Claude Code
+  coverage proving selected-provider classifier traffic with zero unintended
+  first-party calls.
+
 ## v0.4.6
 
 - Translate image-bearing Anthropic `tool_result` blocks on OpenAI-compatible

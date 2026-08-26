@@ -324,9 +324,7 @@ func assertLiveAgentVisibility(t *testing.T, ctx context.Context, dbPath string)
 	}
 	launch := launches[0]
 	agents, err := s.ListRuntimeAgents(ctx, launch.ID, 0, false)
-	if err != nil || len(agents) == 0 {
-		t.Fatalf("ListRuntimeAgents() = %#v, %v", agents, err)
-	}
+	agentErr := err
 	completedAgent := false
 	for _, agent := range agents {
 		completedAgent = completedAgent || agent.Status == "completed"
@@ -340,7 +338,7 @@ func assertLiveAgentVisibility(t *testing.T, ctx context.Context, dbPath string)
 		subagentStart = subagentStart || event.Kind == "lifecycle" && event.Name == "SubagentStart"
 		subagentStop = subagentStop || event.Kind == "lifecycle" && event.Name == "SubagentStop"
 	}
-	if !completedAgent || !subagentStart || !subagentStop {
-		t.Fatalf("subagent lifecycle evidence incomplete: completed=%v start=%v stop=%v agents=%#v events=%#v", completedAgent, subagentStart, subagentStop, agents, events)
+	if agentErr != nil || len(agents) == 0 || !completedAgent || !subagentStart || !subagentStop {
+		t.Fatalf("subagent lifecycle evidence incomplete: agentErr=%v completed=%v start=%v stop=%v agents=%#v events=%#v", agentErr, completedAgent, subagentStart, subagentStop, agents, events)
 	}
 }

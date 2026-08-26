@@ -46,7 +46,7 @@ test-live:
 	$(GO) test -tags=live -count=1 -p 1 ./...
 
 test-live-fixture:
-	$(GO) test -tags=live -count=1 -p 1 -run '^(TestLiveFixture.*|TestLiveClaudeConformanceMatrix|TestLiveLaunchOpenAIProviderStreamsAgentToolInput|TestLiveLaunchOpenAIProviderRunsDynamicWorkflow|TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent)$$' ./internal/cli
+	$(GO) test -tags=live -count=1 -p 1 -run '^(TestLiveFixture.*|TestLiveClaudeConformanceMatrix|TestLiveLaunchOpenAIProviderStreamsAgentToolInput|TestLiveLaunchOpenAIProviderAutoModeClassifierRequest|TestLiveLaunchOpenAIProviderAutoModePluginResearchAgent|TestLiveLaunchOpenAIProviderRunsDynamicWorkflow|TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent)$$' ./internal/cli
 
 test-live-subscription-pool-fixture:
 	$(GO) test -tags=live -count=1 -p 1 -run '^TestLiveFixtureSubscriptionPool(FirstParty|IsolatesExistingStatuslineCredentials|RotatesOneProcessAndPreservesFinalLimit|DoesNotRotateOnTemporary429|DoesNotRotateModelOrUnknownLimits|RotatesRealClaudeWithoutRestart|KeepsRealClaudeOpenWhenAllAccountsLimited)$$' ./internal/cli

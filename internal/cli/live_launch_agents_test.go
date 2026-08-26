@@ -69,7 +69,8 @@ func TestLiveLaunchOpenAIProviderRunsDynamicWorkflow(t *testing.T) {
 	if !strings.Contains(out, "CCR_LIVE_WORKFLOW_LAUNCHED_OK") {
 		t.Fatalf("launch output missing workflow launch response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut, classifier.Seen())
+	state.assertComplete(t, out, errOut)
+	classifier.AssertUnused(t)
 	assertLiveAgentVisibility(t, ctx, dbPath)
 }
 
@@ -260,12 +261,12 @@ func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.Res
 	_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-child","choices":[{"message":{"content":"CCR_LIVE_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
 }
 
-func (s *liveWorkflowProviderState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
+func (s *liveWorkflowProviderState) assertComplete(t *testing.T, out, errOut string) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadWorkflowTool || (!s.workflowClassifierSeen && !firstPartyClassifierSeen) || !s.workflowChildPromptSeen || !s.workflowLaunchResultSeen {
-		t.Fatalf("Workflow live route incomplete: firstRequestHadWorkflowTool=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v workflowChildPromptSeen=%v workflowLaunchResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWorkflowTool, s.workflowClassifierSeen, firstPartyClassifierSeen, s.workflowChildPromptSeen, s.workflowLaunchResultSeen, s.chatCalls, out, errOut)
+	if !s.firstRequestHadWorkflowTool || !s.workflowClassifierSeen || !s.workflowChildPromptSeen || !s.workflowLaunchResultSeen {
+		t.Fatalf("Workflow live route incomplete: firstRequestHadWorkflowTool=%v selectedClassifierSeen=%v workflowChildPromptSeen=%v workflowLaunchResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWorkflowTool, s.workflowClassifierSeen, s.workflowChildPromptSeen, s.workflowLaunchResultSeen, s.chatCalls, out, errOut)
 	}
 }
 

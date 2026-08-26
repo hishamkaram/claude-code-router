@@ -51,6 +51,22 @@ Because exact aliases take precedence, do not name a third-party alias `sonnet`,
 `opus`, `haiku`, or another first-party model identifier unless you intentionally
 want it to override that route.
 
+Claude Code auto mode sends safety classification as a separate model request.
+When a CCR alias is active for a Claude session, CCR routes a recognized
+classifier request and its token-count request from that session through the
+alias while preserving the classifier's original response model identity. The
+startup `--model` alias is active immediately. Later non-classifier requests
+selected through `/model` replace the active route for their session. A
+classifier message changes that state only when it explicitly names a valid CCR
+alias; classifier token-count requests and first-party-named classifier messages
+do not.
+
+If the active alias is blocked, deleted, unroutable, or rejected by its provider,
+CCR returns the failure and explicitly refuses first-party Anthropic fallback.
+When no CCR alias is active, including after an intentional switch to a standard
+first-party model, classifier requests use Claude Code's requested first-party
+route.
+
 ## Model Switching and Workers
 
 Open `/model` and select the printed `anthropic.ccr.<alias>` row, including its
@@ -62,10 +78,13 @@ possible. Subagents, workflow agents, and teammates created after a switch
 inherit the active model where Claude Code permits it. Existing workers can
 remain on the model used when they were created; CCR does not hide that fact.
 
-The next authenticated request after `/model` is the routing source of truth.
+The next authenticated non-classifier request after `/model`, or a classifier
+message that explicitly names a valid CCR alias, is the routing source of truth.
 Its actual alias, provider model, protocol, capabilities, result, latency, and
 provider-reported token usage appear in `ccr status`, `ccr trace`, and the CCR
-status line. CCR does not infer a route from generated model self-identification.
+status line. Classifier traces use the operations `auto_mode_classifier` and
+`auto_mode_classifier_count_tokens`. CCR does not infer a route from generated
+model self-identification.
 
 ## Runtime and Lifecycle Visibility
 
@@ -125,7 +144,8 @@ CCR uses only its generated local gateway token. Original Anthropic subscription
 and API-key authentication are deliberately disabled. Because a no-startup-model
 session must preserve first-party auth, `gateway-token` requires an explicit CCR
 startup alias. Claude Code can authenticate to `/v1/models` in this mode and use
-its friendly discovery metadata. See Anthropic's
+its friendly discovery metadata. Auto-mode safety classification follows that
+active alias and fails visibly if it cannot be routed. See Anthropic's
 [gateway documentation](https://code.claude.com/docs/en/llm-gateway).
 
 ### `subscription-pool`
@@ -304,6 +324,13 @@ ccr launch --model coding-model --permission-mode auto
 Supported values are `default`, `manual`, `acceptEdits`, `plan`, `auto`,
 `dontAsk`, and `bypassPermissions`. Your organization policy and Claude Code
 settings can still restrict what is available.
+
+Classifier detection follows the request signature used by the Claude Code
+versions in CCR's required live fixture matrix. CI runs pinned and latest Claude
+Code releases across OpenAI Chat Completions, OpenAI Responses, and
+Anthropic-compatible routes. A signature change must fail that matrix and be
+reviewed before the new Claude Code version is considered supported; untested
+versions are not verified by this guarantee.
 
 ## Computer-Use Boundary
 
