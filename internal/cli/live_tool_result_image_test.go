@@ -94,14 +94,18 @@ func TestLiveClaudeOpenAIImageToolResultSurvivesModelSwitch(t *testing.T) {
 type liveImageToolFixture struct {
 	server *httptest.Server
 
-	mu              sync.Mutex
-	chatCalls       int
-	toolName        string
-	toolSearchSeen  bool
-	toolCallSeen    bool
-	imageModelSeen  bool
-	imageResultSeen bool
-	fixtureError    string
+	mu                              sync.Mutex
+	chatCalls                       int
+	toolName                        string
+	toolSearchSeen                  bool
+	toolCallSeen                    bool
+	imageModelSeen                  bool
+	imageResultSeen                 bool
+	selectedClassifierMessages      int
+	selectedClassifierCountTokens   int
+	firstPartyClassifierMessages    int
+	firstPartyClassifierCountTokens int
+	fixtureError                    string
 }
 
 func newLiveImageToolFixture(t *testing.T) *liveImageToolFixture {
@@ -133,8 +137,7 @@ func (f *liveImageToolFixture) handle(t *testing.T, w http.ResponseWriter, r *ht
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, `{"data":[{"id":"image-chat-model"}]}`)
 	case "/v1/messages/count_tokens":
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"input_tokens":7}`)
+		f.handleCountTokens(t, w, r)
 	case "/v1/messages":
 		f.handleFirstParty(w, r)
 	case "/v1/chat/completions":
@@ -144,6 +147,27 @@ func (f *liveImageToolFixture) handle(t *testing.T, w http.ResponseWriter, r *ht
 	}
 }
 
+func (f *liveImageToolFixture) handleCountTokens(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	var payload liveAnthropicMessagePayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		f.setError(fmt.Sprintf("decode count_tokens request: %v", err))
+		http.Error(w, "bad count_tokens request", http.StatusBadRequest)
+		return
+	}
+	if isLiveAnthropicAutoClassifierRequest(payload) {
+		f.mu.Lock()
+		if payload.Model == "image-chat-model" {
+			f.selectedClassifierCountTokens++
+		} else {
+			f.firstPartyClassifierCountTokens++
+		}
+		f.mu.Unlock()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprint(w, `{"input_tokens":7}`)
+}
+
 func (f *liveImageToolFixture) handleFirstParty(w http.ResponseWriter, r *http.Request) {
 	var payload liveAnthropicMessagePayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -151,6 +175,9 @@ func (f *liveImageToolFixture) handleFirstParty(w http.ResponseWriter, r *http.R
 		return
 	}
 	if isLiveAnthropicAutoClassifierRequest(payload) {
+		f.mu.Lock()
+		f.firstPartyClassifierMessages++
+		f.mu.Unlock()
 		writeLiveAnthropicClassifierResponse(w, payload)
 		return
 	}
@@ -175,6 +202,13 @@ func (f *liveImageToolFixture) handleOpenAI(t *testing.T, w http.ResponseWriter,
 	f.chatCalls++
 	if payload.Model == "image-chat-model" {
 		f.imageModelSeen = true
+	}
+	classifierPayload := liveImageClassifierPayload(payload)
+	if isLiveAutoClassifierRequest(classifierPayload) {
+		f.selectedClassifierMessages++
+		f.mu.Unlock()
+		writeLiveOpenAIClassifierResponse(w, classifierPayload)
+		return
 	}
 	toolName := f.toolName
 	if toolName == "" {
@@ -239,15 +273,16 @@ func (f *liveImageToolFixture) AssertImageToolResult(t *testing.T) {
 	if f.fixtureError != "" {
 		t.Fatalf("image tool-result fixture error: %s", f.fixtureError)
 	}
-	if f.chatCalls < 2 || !f.imageModelSeen || !f.toolCallSeen || !f.imageResultSeen {
-		t.Fatalf("image tool-result fixture calls=%d imageModelSeen=%v tool=%q toolCallSeen=%v imageResultSeen=%v", f.chatCalls, f.imageModelSeen, f.toolName, f.toolCallSeen, f.imageResultSeen)
+	if f.chatCalls < 2 || !f.imageModelSeen || !f.toolCallSeen || !f.imageResultSeen ||
+		f.selectedClassifierMessages == 0 || f.firstPartyClassifierMessages != 0 || f.firstPartyClassifierCountTokens != 0 {
+		t.Fatalf("image tool-result fixture calls=%d imageModelSeen=%v tool=%q toolCallSeen=%v imageResultSeen=%v selectedClassifier=%d/%d firstPartyClassifier=%d/%d", f.chatCalls, f.imageModelSeen, f.toolName, f.toolCallSeen, f.imageResultSeen, f.selectedClassifierMessages, f.selectedClassifierCountTokens, f.firstPartyClassifierMessages, f.firstPartyClassifierCountTokens)
 	}
 }
 
 func (f *liveImageToolFixture) Diagnostic() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return fmt.Sprintf("calls=%d imageModelSeen=%v tool=%q toolCallSeen=%v imageResultSeen=%v error=%q", f.chatCalls, f.imageModelSeen, f.toolName, f.toolCallSeen, f.imageResultSeen, f.fixtureError)
+	return fmt.Sprintf("calls=%d imageModelSeen=%v tool=%q toolCallSeen=%v imageResultSeen=%v selectedClassifier=%d/%d firstPartyClassifier=%d/%d error=%q", f.chatCalls, f.imageModelSeen, f.toolName, f.toolCallSeen, f.imageResultSeen, f.selectedClassifierMessages, f.selectedClassifierCountTokens, f.firstPartyClassifierMessages, f.firstPartyClassifierCountTokens, f.fixtureError)
 }
 
 type liveImageOpenAITool struct {
@@ -266,6 +301,18 @@ type liveImageOpenAIRequest struct {
 	Model    string                   `json:"model"`
 	Tools    []liveImageOpenAITool    `json:"tools"`
 	Messages []liveImageOpenAIMessage `json:"messages"`
+}
+
+func liveImageClassifierPayload(payload liveImageOpenAIRequest) liveOpenAIChatPayload {
+	classifier := liveOpenAIChatPayload{Model: payload.Model}
+	for _, message := range payload.Messages {
+		var content string
+		if err := json.Unmarshal(message.Content, &content); err != nil {
+			continue
+		}
+		classifier.Messages = append(classifier.Messages, liveOpenAIChatMessage{Role: message.Role, Content: content})
+	}
+	return classifier
 }
 
 func findLiveImageTool(tools []liveImageOpenAITool) string {

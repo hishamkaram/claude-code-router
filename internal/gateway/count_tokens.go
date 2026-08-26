@@ -35,12 +35,16 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	observedWriter := &observedResponseWriter{ResponseWriter: w}
 	w = observedWriter
-	span := h.beginRoute(w, r, "count_tokens", req)
+	operation := "count_tokens"
+	if isAutoModeClassifierRequest(req) {
+		operation = "auto_mode_classifier_count_tokens"
+	}
+	span := h.beginRoute(w, r, operation, req)
 	var usage observability.TokenUsage
 	defer func(ctx context.Context) {
 		completeRoute(span, ctx, observedWriter.Status(), usage)
 	}(r.Context())
-	route, validationErr := h.selectRoute(r.Context(), req.Model)
+	route, validationErr := h.selectRouteForRequest(r.Context(), claudeCodeSessionID(r), req)
 	if validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return

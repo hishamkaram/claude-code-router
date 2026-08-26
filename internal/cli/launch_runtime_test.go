@@ -435,8 +435,9 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	if !strings.Contains(out, "not active in --auth-mode gateway-token") {
 		t.Fatalf("launch output missing gateway-token warning:\n%s", out)
 	}
-	if !strings.Contains(out, "auto mode may require first-party Anthropic access") {
-		t.Fatalf("launch output missing auto-mode compatibility warning:\n%s", out)
+	if !strings.Contains(out, "Auto-mode safety classifier requests follow the active CCR alias") ||
+		!strings.Contains(out, "never fall back to first-party Anthropic") {
+		t.Fatalf("launch output missing auto-mode routing guarantee:\n%s", out)
 	}
 }
 

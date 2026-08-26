@@ -78,7 +78,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("gateway.Start: listening on loopback: %w", err)
 	}
 
-	handler := &handler{cfg: cfg}
+	handler := &handler{
+		cfg:         cfg,
+		activeModel: newActiveModelSelection(cfg.DefaultModelAlias),
+	}
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -131,8 +134,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 type handler struct {
-	cfg        Config
-	claudeAuth claudeAuthTracker
+	cfg         Config
+	claudeAuth  claudeAuthTracker
+	activeModel activeModelSelection
 }
 
 const (
@@ -194,12 +198,16 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	observedWriter := &observedResponseWriter{ResponseWriter: w}
 	w = observedWriter
-	span := h.beginRoute(w, r, "messages", req)
+	operation := "messages"
+	if isAutoModeClassifierRequest(req) {
+		operation = "auto_mode_classifier"
+	}
+	span := h.beginRoute(w, r, operation, req)
 	var usage observability.TokenUsage
 	defer func(ctx context.Context) {
 		completeRoute(span, ctx, observedWriter.Status(), usage)
 	}(r.Context())
-	route, validationErr := h.selectRoute(r.Context(), req.Model)
+	route, validationErr := h.selectMessageRouteForRequest(r.Context(), claudeCodeSessionID(r), req)
 	if validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return

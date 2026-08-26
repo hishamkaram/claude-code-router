@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,16 +53,36 @@ func TestLiveLaunchOpenAIProviderAutoModeClassifierRequest(t *testing.T) {
 		In: strings.NewReader(prompt + "\n"), Launcher: liveDebugClaudeLauncher{debugPath: debugPath},
 		StartGateway: classifier.StartGateway,
 	}
-	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "preserve", "--permission-mode", "auto")
+	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "preserve", "--permission-mode", "auto", "--no-lifecycle", "--no-statusline")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !strings.Contains(out, "CCR_LIVE_CLASSIFIER_OK") {
 		t.Fatalf("launch output missing classifier sentinel:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut, classifier.Seen())
+	state.assertComplete(t, out, errOut)
+	classifier.AssertUnused(t)
 	if _, err := os.Stat(writePath); err != nil {
 		t.Fatalf("classified Write did not create test file: %v", err)
+	}
+}
+
+func TestLiveAnthropicSystemTextDecodesClassifierPrompt(t *testing.T) {
+	t.Parallel()
+	const want = "You are a security monitor for autonomous AI coding agents.\n<severity>N</severity>"
+	for _, tc := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{name: "plain string", raw: json.RawMessage(`"You are a security monitor for autonomous AI coding agents.\n<severity>N</severity>"`)},
+		{name: "escaped text block", raw: json.RawMessage(`[{"type":"text","text":"You are a security monitor for autonomous AI coding agents."},{"type":"text","text":"\u003cseverity\u003eN\u003c/severity\u003e"}]`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := liveAnthropicSystemText(tc.raw); got != want {
+				t.Fatalf("liveAnthropicSystemText() = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -119,12 +140,12 @@ func (s *liveAutoClassifierState) handleChat(t *testing.T, w http.ResponseWriter
 	}
 }
 
-func (s *liveAutoClassifierState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
+func (s *liveAutoClassifierState) assertComplete(t *testing.T, out, errOut string) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadWrite || (!s.classifierRequestSeen && !firstPartyClassifierSeen) || !s.writeToolResultSeen {
-		t.Fatalf("Classifier live route incomplete: firstRequestHadWrite=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v writeToolResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWrite, s.classifierRequestSeen, firstPartyClassifierSeen, s.writeToolResultSeen, s.chatCalls, out, errOut)
+	if !s.firstRequestHadWrite || !s.classifierRequestSeen || !s.writeToolResultSeen {
+		t.Fatalf("Classifier live route incomplete: firstRequestHadWrite=%v selectedClassifierSeen=%v writeToolResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadWrite, s.classifierRequestSeen, s.writeToolResultSeen, s.chatCalls, out, errOut)
 	}
 }
 

@@ -199,7 +199,12 @@ CCR reports that limitation instead of bypassing it.
 3. Standard first-party model names route to Anthropic. The default
    `--auth-mode preserve` keeps an existing Claude Code subscription login or
    Anthropic API-key authentication available for those routes.
-4. CCR checks provider capabilities before a request is sent. Unsupported or
+4. While a CCR alias is active in a Claude session, auto-mode safety classifier
+   requests from that session follow the alias. A classifier routing failure is
+   returned visibly; CCR does not retry it through first-party Anthropic. With
+   no active CCR alias, the classifier uses Claude Code's requested first-party
+   route.
+5. CCR checks provider capabilities before a request is sent. Unsupported or
    unsafe behavior is rejected with an explanation; it is never redirected to
    Claude or another configured provider.
 
@@ -219,9 +224,10 @@ Use `ccr launch --auth-mode gateway-token --model <alias>` when you want a
 third-party-only session. That mode intentionally disables the original
 Anthropic subscription and API-key authentication. It also lets Claude Code
 authenticate to CCR's `/v1/models` endpoint for friendly discovery metadata.
-Current Claude Code auto mode may require first-party Anthropic access for its
-safety classifier, so use the default `--auth-mode preserve` for Agent or
-Workflow actions. CCR surfaces classifier denial instead of bypassing it.
+Auto-mode safety classification follows the active CCR alias, including aliases
+selected later through `/model`; it does not require a preserved Anthropic
+subscription. CCR's pinned/latest real-CLI fixture matrix verifies this request
+contract and rejects any classifier traffic that reaches first-party Anthropic.
 
 ## Common Commands
 

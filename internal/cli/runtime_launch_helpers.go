@@ -31,14 +31,23 @@ func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gate
 		fmt.Fprintln(out, "No ccr startup model selected; Claude Code will use its configured default model.")
 	}
 	writeLaunchAuthSummary(out, authMode)
+	writeAutoModeClassifierSummary(out, modelAlias, permissionMode)
 	if authMode == launchAuthModeGatewayToken {
-		if permissionMode == "auto" {
-			fmt.Fprintln(out, "Claude Code auto mode may require first-party Anthropic access for safety classification; use --auth-mode preserve if Agent or Workflow actions are denied.")
-		}
 		fmt.Fprintln(out, "Gateway model discovery is requested; registered aliases are exposed through /v1/models.")
 		return
 	}
 	writePreserveAuthModelGuidance(ctx, out, s, disableTools)
+}
+
+func writeAutoModeClassifierSummary(out io.Writer, modelAlias, permissionMode string) {
+	if permissionMode != "auto" {
+		return
+	}
+	if modelAlias == "" {
+		fmt.Fprintln(out, "No CCR alias is active, so auto-mode safety classifier requests use Claude Code's requested first-party model until /model selects a CCR alias.")
+		return
+	}
+	fmt.Fprintln(out, "Auto-mode safety classifier requests follow the active CCR alias; routing failures are visible and never fall back to first-party Anthropic.")
 }
 
 func writePreserveAuthModelGuidance(ctx context.Context, out io.Writer, s *store.Store, includeToolDisabled bool) {

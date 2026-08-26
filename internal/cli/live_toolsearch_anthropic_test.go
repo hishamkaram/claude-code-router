@@ -59,7 +59,8 @@ func TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent(t *tes
 	if !strings.Contains(out, liveToolSearchAgentResult) {
 		t.Fatalf("launch output missing completed agent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	state.assertComplete(t, out, errOut, classifier.Seen())
+	state.assertComplete(t, out, errOut)
+	classifier.AssertUnused(t)
 	assertLiveAgentVisibility(t, ctx, dbPath)
 }
 
@@ -71,6 +72,9 @@ type liveAnthropicToolSearchAgentState struct {
 	classifierRequestSeen   bool
 	childPromptSeen         bool
 	callerAgentResultSeen   bool
+	claudeSessionID         string
+	sessionHeaderSeen       bool
+	sessionMismatch         bool
 }
 
 type liveAnthropicMessagePayload struct {
@@ -112,7 +116,15 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.messageCalls++
-	if isLiveAnthropicAutoClassifierRequest(payload) {
+	sessionID := strings.TrimSpace(r.Header.Get("x-claude-code-session-id"))
+	if !s.sessionHeaderSeen {
+		s.sessionHeaderSeen = true
+		s.claudeSessionID = sessionID
+	} else if sessionID != s.claudeSessionID {
+		s.sessionMismatch = true
+	}
+	classifier := isLiveAnthropicAutoClassifierRequest(payload)
+	if classifier {
 		s.classifierRequestSeen = true
 		writeLiveAnthropicClassifierResponse(w, payload)
 		return
@@ -141,12 +153,13 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	}
 }
 
-func (s *liveAnthropicToolSearchAgentState) assertComplete(t *testing.T, out, errOut string, firstPartyClassifierSeen bool) {
+func (s *liveAnthropicToolSearchAgentState) assertComplete(t *testing.T, out, errOut string) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.toolSearchSeen || !s.toolReferenceResultSeen || (!s.classifierRequestSeen && !firstPartyClassifierSeen) || !s.childPromptSeen {
-		t.Fatalf("Anthropic research Agent live route incomplete: toolSearchSeen=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v firstPartyClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v messageCalls=%d\nstdout:\n%s\nstderr:\n%s", s.toolSearchSeen, s.toolReferenceResultSeen, s.classifierRequestSeen, firstPartyClassifierSeen, s.childPromptSeen, s.callerAgentResultSeen, s.messageCalls, out, errOut)
+	if !s.toolSearchSeen || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen ||
+		!s.sessionHeaderSeen || s.claudeSessionID == "" || s.sessionMismatch {
+		t.Fatalf("Anthropic research Agent live route incomplete: toolSearchSeen=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v messageCalls=%d sessionID=%q sessionMismatch=%v\nstdout:\n%s\nstderr:\n%s", s.toolSearchSeen, s.toolReferenceResultSeen, s.classifierRequestSeen, s.childPromptSeen, s.callerAgentResultSeen, s.messageCalls, s.claudeSessionID, s.sessionMismatch, out, errOut)
 	}
 }
 
