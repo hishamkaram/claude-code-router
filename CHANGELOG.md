@@ -25,6 +25,9 @@ lives under `docs/acceptance/`.
   behavior for authenticated users.
 - Add unit, persistence, environment-isolation, and live Claude Code coverage
   for authenticated, provider-only, and missing-auth launch paths.
+- Keep live `/model` conformance compatible with Claude Code 2.1.258 display
+  labels by requiring an affirmative local-command result and ordered route
+  transitions instead of matching the rendered model label.
 
 ## v0.4.7
 

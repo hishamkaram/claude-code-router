@@ -24,6 +24,7 @@ const (
 	claudeConformanceWorkflowChild  = "CCR_CONFORMANCE_WORKFLOW_CHILD_OK"
 	claudeConformanceWorkflowParent = "CCR_CONFORMANCE_WORKFLOW_PARENT_OK"
 	claudeConformanceStepTimeout    = 2 * time.Minute
+	claudeModelSelectionPrefix      = "Set model to "
 )
 
 type claudeConformancePlan struct {
@@ -37,8 +38,9 @@ type claudeConformancePlan struct {
 }
 
 type claudeStreamExpectation struct {
-	eventType string
-	marker    string
+	eventType    string
+	marker       string
+	localCommand bool
 }
 
 type claudeStreamStep struct {
@@ -52,7 +54,12 @@ type claudeStreamObserver struct {
 	pending      bytes.Buffer
 	expectations []claudeStreamExpectation
 	next         int
-	observed     chan struct{}
+	observed     chan error
+}
+
+type claudeRouteExpectation struct {
+	kind  string
+	alias string
 }
 
 func runClaudeConformance(ctx context.Context, opts *options, deps Dependencies, s *store.Store, alias string, includeAnthropic bool) conformancecheck.Check {
@@ -329,7 +336,7 @@ func encodeClaudeStreamSteps(messages, markers []string) ([]claudeStreamStep, er
 			steps = append(steps, claudeStreamStep{
 				input: encoded,
 				expectation: claudeStreamExpectation{
-					marker: strings.TrimPrefix(message, "/model "),
+					localCommand: true,
 				},
 			})
 			continue
@@ -358,7 +365,7 @@ func newClaudeStreamObserver(steps []claudeStreamStep) *claudeStreamObserver {
 	}
 	return &claudeStreamObserver{
 		expectations: expectations,
-		observed:     make(chan struct{}, len(expectations)),
+		observed:     make(chan error, len(expectations)),
 	}
 }
 
@@ -385,18 +392,35 @@ func (o *claudeStreamObserver) observeLine(line []byte) {
 		return
 	}
 	var event struct {
-		Type string `json:"type"`
+		Type     string  `json:"type"`
+		Subtype  string  `json:"subtype"`
+		IsError  *bool   `json:"is_error"`
+		NumTurns *int    `json:"num_turns"`
+		Result   *string `json:"result"`
 	}
 	if json.Unmarshal(line, &event) != nil {
 		return
 	}
 	expected := o.expectations[o.next]
+	if expected.localCommand {
+		if event.Type != "result" || event.NumTurns == nil || *event.NumTurns != 0 {
+			return
+		}
+		if event.Subtype != "success" || event.IsError == nil || *event.IsError ||
+			event.Result == nil || !strings.HasPrefix(*event.Result, claudeModelSelectionPrefix) {
+			o.observed <- errors.New("claude did not confirm the local model selection")
+			return
+		}
+		o.next++
+		o.observed <- nil
+		return
+	}
 	if (expected.eventType != "" && event.Type != expected.eventType) ||
 		!bytes.Contains(line, []byte(expected.marker)) {
 		return
 	}
 	o.next++
-	o.observed <- struct{}{}
+	o.observed <- nil
 }
 
 func (o *claudeStreamObserver) String() string {
@@ -405,11 +429,11 @@ func (o *claudeStreamObserver) String() string {
 	return o.output.String()
 }
 
-func feedClaudeStreamSteps(ctx context.Context, writer *io.PipeWriter, steps []claudeStreamStep, observed <-chan struct{}) (resultErr error) {
+func feedClaudeStreamSteps(ctx context.Context, writer *io.PipeWriter, steps []claudeStreamStep, observed <-chan error) (resultErr error) {
 	return feedClaudeStreamStepsWithTimeout(ctx, writer, steps, observed, claudeConformanceStepTimeout)
 }
 
-func feedClaudeStreamStepsWithTimeout(ctx context.Context, writer *io.PipeWriter, steps []claudeStreamStep, observed <-chan struct{}, stepTimeout time.Duration) (resultErr error) {
+func feedClaudeStreamStepsWithTimeout(ctx context.Context, writer *io.PipeWriter, steps []claudeStreamStep, observed <-chan error, stepTimeout time.Duration) (resultErr error) {
 	defer func() {
 		resultErr = errors.Join(resultErr, writer.CloseWithError(resultErr))
 	}()
@@ -424,11 +448,14 @@ func feedClaudeStreamStepsWithTimeout(ctx context.Context, writer *io.PipeWriter
 	return nil
 }
 
-func waitForClaudeStreamStep(ctx context.Context, observed <-chan struct{}, timeout time.Duration) error {
+func waitForClaudeStreamStep(ctx context.Context, observed <-chan error, timeout time.Duration) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-observed:
+	case observationErr := <-observed:
+		if observationErr != nil {
+			return fmt.Errorf("waiting for Claude stream step: %w", observationErr)
+		}
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("waiting for Claude stream step: %w", ctx.Err())
@@ -459,7 +486,7 @@ func verifyLatestClaudeMatrix(ctx context.Context, s *store.Store, aliases []str
 	if err != nil || len(sessions) == 0 {
 		return fmt.Errorf("claude lifecycle hook evidence is missing")
 	}
-	events, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launch.ID, Limit: 1000})
+	events, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launch.ID, Limit: 1000, OldestFirst: true})
 	if err != nil {
 		return err
 	}
@@ -481,7 +508,7 @@ func verifyLatestClaudeRoute(ctx context.Context, s *store.Store, alias string) 
 	if launch.State != "completed" {
 		return fmt.Errorf("explicit Claude launch did not complete")
 	}
-	events, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launch.ID, Limit: 1000})
+	events, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launch.ID, Limit: 1000, OldestFirst: true})
 	if err != nil {
 		return err
 	}
@@ -489,29 +516,39 @@ func verifyLatestClaudeRoute(ctx context.Context, s *store.Store, alias string) 
 }
 
 func verifyClaudeRoutes(events []store.TraceEvent, aliases []string, requireAnthropic bool) error {
-	routed := make(map[string]bool, len(aliases))
-	anthropic := false
-	for index := range events {
-		event := &events[index]
-		if event.Kind != "route" || event.Status != "succeeded" {
-			continue
-		}
-		if event.Route.RouteKind == "first-party-anthropic" {
-			anthropic = true
-		}
-		if event.Route.RouteKind == "registered" {
-			routed[event.Route.ModelAlias] = true
-		}
+	expected := make([]claudeRouteExpectation, 0, len(aliases)*2+1)
+	if requireAnthropic {
+		expected = append(expected, claudeRouteExpectation{kind: "first-party-anthropic"})
 	}
 	for _, alias := range aliases {
-		if !routed[alias] {
-			return fmt.Errorf("claude route trace omitted a configured alias")
+		expected = append(expected, claudeRouteExpectation{kind: "registered", alias: alias})
+		if requireAnthropic {
+			expected = append(expected, claudeRouteExpectation{kind: "first-party-anthropic"})
 		}
 	}
-	if requireAnthropic && !anthropic {
-		return fmt.Errorf("claude route trace omitted first-party Anthropic")
+
+	next := 0
+	for index := range events {
+		event := &events[index]
+		if next == len(expected) {
+			break
+		}
+		if event.Kind != "route" || event.Status != "succeeded" || event.Route.Operation != "messages" {
+			continue
+		}
+		want := expected[next]
+		if event.Route.RouteKind == want.kind && (want.alias == "" || event.Route.ModelAlias == want.alias) {
+			next++
+		}
 	}
-	return nil
+	if next == len(expected) {
+		return nil
+	}
+	missing := expected[next]
+	if missing.kind == "first-party-anthropic" {
+		return fmt.Errorf("claude route trace omitted an ordered first-party Anthropic transition")
+	}
+	return fmt.Errorf("claude route trace omitted an ordered transition to configured alias %q", missing.alias)
 }
 
 func verifyClaudeWorkers(ctx context.Context, s *store.Store, launchID int64, events []store.TraceEvent) error {
