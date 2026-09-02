@@ -66,7 +66,7 @@ func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
 		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=true")
 	}
 	switch options.AuthMode {
-	case launchAuthModeGatewayToken:
+	case launchAuthModeProviderOnly, launchAuthModeGatewayToken:
 		env.Unset = append(env.Unset,
 			"ANTHROPIC_API_KEY",
 			"ANTHROPIC_CUSTOM_HEADERS",

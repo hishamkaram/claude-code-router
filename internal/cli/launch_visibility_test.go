@@ -19,8 +19,7 @@ import (
 )
 
 func TestLaunchInjectsLifecycleHooksAndStatuslineWithoutWritingSettings(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestClaudeHome(t)
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch"); err != nil {
@@ -81,8 +80,7 @@ func TestLaunchInjectsLifecycleHooksAndStatuslineWithoutWritingSettings(t *testi
 }
 
 func TestLaunchPreservesExistingStatusline(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestClaudeHome(t)
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
@@ -119,7 +117,7 @@ func TestLaunchPreservesExistingStatusline(t *testing.T) {
 }
 
 func TestLaunchVisibilityOptOutsAreIndependent(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestClaudeHome(t)
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	var gatewayConfig gateway.Config
@@ -164,8 +162,7 @@ func TestLaunchVisibilityOptOutsAreIndependent(t *testing.T) {
 }
 
 func TestLaunchStartupFailureIsFinalized(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestClaudeHome(t)
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)
@@ -188,7 +185,7 @@ func TestLaunchStartupFailureIsFinalized(t *testing.T) {
 }
 
 func TestLaunchRejectedSettingsOverrideHasNoRuntimeSideEffects(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestClaudeHome(t)
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	gatewayStarts := 0
@@ -212,7 +209,7 @@ func TestLaunchRejectedSettingsOverrideHasNoRuntimeSideEffects(t *testing.T) {
 }
 
 func TestLaunchProcessFailureIsFinalized(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setTestClaudeHome(t)
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	launcher := &fakeLauncher{pid: os.Getpid(), waitErr: errors.New("process failed")}
 	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch"); err == nil {

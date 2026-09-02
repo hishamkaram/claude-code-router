@@ -58,6 +58,21 @@ func TestParseCredentialsErrorsNeverContainTokens(t *testing.T) {
 	}
 }
 
+func TestParseCredentialsClassifiesMissingClaudeOAuth(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range [][]byte{
+		[]byte(`{}`),
+		[]byte(`{"mcpOAuth":{"server":{"accessToken":"unrelated-token"}}}`),
+		[]byte(`{"claudeAiOauth":{"accessToken":"  "}}`),
+	} {
+		_, err := ParseCredentials(raw)
+		if !errors.Is(err, ErrCurrentCredentialsNoAccessToken) {
+			t.Fatalf("ParseCredentials error = %v, want ErrCurrentCredentialsNoAccessToken", err)
+		}
+	}
+}
+
 func TestCredentialsFromTokenValidatesBoundedInput(t *testing.T) {
 	t.Parallel()
 

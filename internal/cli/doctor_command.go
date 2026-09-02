@@ -219,7 +219,7 @@ func offlineProviderChecks(configuredProviders []store.Provider) []doctorCheckVi
 }
 
 func localDependencyChecks(ctx context.Context, deps Dependencies, s *store.Store) []doctorCheckView {
-	checks := make([]doctorCheckView, 0, 3)
+	checks := make([]doctorCheckView, 0, 4)
 	secretCheck := doctorCheckView{Name: "secrets", Status: "passed", Evidence: "secret backend is available"}
 	if err := deps.Secrets.Available(ctx); err != nil {
 		secretCheck.Status, secretCheck.Evidence = "warning", "secret backend is unavailable"
@@ -243,11 +243,18 @@ func localDependencyChecks(ctx context.Context, deps Dependencies, s *store.Stor
 		}
 	}
 	launchCheck := doctorCheckView{Name: "launches", Status: "passed", Evidence: "no stale running launches"}
-	if err != nil {
+	switch {
+	case err != nil:
 		launchCheck.Status, launchCheck.Evidence = "failed", "launch state is unreadable"
-	} else if stale > 0 {
+	case stale > 0:
 		launchCheck.Status = "warning"
 		launchCheck.Evidence = fmt.Sprintf("%d launch records are stale", stale)
+	}
+	if err == nil && len(launches) > 0 && launches[0].AuthMode != "" {
+		checks = append(checks, doctorCheckView{
+			Name: "launch_auth", Status: "passed",
+			Evidence: "mode=" + launches[0].AuthMode,
+		})
 	}
 	return append(checks, launchCheck)
 }
@@ -393,6 +400,8 @@ func writeHumanDoctor(cmd *cobra.Command, document doctorDocument) {
 			}
 		case "claude":
 			fmt.Fprintf(cmd.OutOrStdout(), "Claude Code: %s\n", check.Evidence)
+		case "launch_auth":
+			fmt.Fprintf(cmd.OutOrStdout(), "Launch auth: %s\n", check.Evidence)
 		default:
 			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s)\n", check.Name, check.Status, check.Evidence)
 		}

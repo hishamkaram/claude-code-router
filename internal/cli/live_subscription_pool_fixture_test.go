@@ -194,6 +194,7 @@ func TestLiveFixtureSubscriptionPoolRotatesRealClaudeWithoutRestart(t *testing.T
 		{account: "work", token: liveSubscriptionWorkToken, text: "CCR_LIVE_SAME_PROCESS_ROTATION_OK"},
 	})
 	fixture.repeatLast = true
+	fixture.allowInFlightStaleLimits = true
 	dbPath, secrets := seedLiveSubscriptionCredentials(t, []subscriptionAccountFixture{
 		{name: "personal", token: liveSubscriptionPersonalToken},
 		{name: "work", token: liveSubscriptionWorkToken},
@@ -337,9 +338,10 @@ type liveSubscriptionResponse struct {
 }
 
 type liveSubscriptionFixture struct {
-	server     *httptest.Server
-	responses  []liveSubscriptionResponse
-	repeatLast bool
+	server                   *httptest.Server
+	responses                []liveSubscriptionResponse
+	repeatLast               bool
+	allowInFlightStaleLimits bool
 
 	mu    sync.Mutex
 	calls []string
@@ -474,11 +476,19 @@ func (f *liveSubscriptionFixture) nextResponse(auth string) (liveSubscriptionRes
 		return liveSubscriptionResponse{}, "", false
 	}
 	response := f.responses[len(f.responses)-1]
-	if normalizedAuth != "Bearer "+response.token {
-		return liveSubscriptionResponse{}, "", false
+	if normalizedAuth == "Bearer "+response.token {
+		f.calls = append(f.calls, response.account)
+		return response, response.account, true
 	}
-	f.calls = append(f.calls, response.account)
-	return response, response.account, true
+	if f.allowInFlightStaleLimits {
+		for _, previous := range f.responses[:len(f.responses)-1] {
+			if previous.status == http.StatusTooManyRequests && normalizedAuth == "Bearer "+previous.token {
+				f.calls = append(f.calls, previous.account)
+				return previous, previous.account, true
+			}
+		}
+	}
+	return liveSubscriptionResponse{}, "", false
 }
 
 func (f *liveSubscriptionFixture) AssertCalls(t *testing.T, want []string) {
@@ -516,9 +526,12 @@ func (f *liveSubscriptionFixture) AssertRotationCalls(t *testing.T, first, activ
 		t.Fatalf("subscription-pool upstream accounts = %v, want %s then %s", got, first, active)
 	}
 	for _, account := range got[activeIndex+1:] {
-		if account != active {
-			t.Fatalf("subscription-pool upstream accounts after rotation = %v, want only %s", got, active)
+		if account != active && (!f.allowInFlightStaleLimits || account != first) {
+			t.Fatalf("subscription-pool upstream accounts after rotation = %v, want %s or stale %s", got, active, first)
 		}
+	}
+	if got[len(got)-1] != active {
+		t.Fatalf("subscription-pool final upstream account = %s, want active account %s; calls=%v", got[len(got)-1], active, got)
 	}
 }
 

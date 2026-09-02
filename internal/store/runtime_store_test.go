@@ -117,6 +117,17 @@ func TestLaunchAuthMetadataRoundTrip(t *testing.T) {
 	if authLaunch.AuthMode != "subscription-pool" || authLaunch.ClaudeAccountName != "work" {
 		t.Fatalf("auth launch metadata = %#v", authLaunch)
 	}
+	providerOnlyID, err := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if err != nil {
+		t.Fatalf("CreateLaunchWithAuth(provider-only) error = %v", err)
+	}
+	providerOnlyLaunch, err := s.GetLaunch(ctx, providerOnlyID)
+	if err != nil {
+		t.Fatalf("GetLaunch(provider-only) error = %v", err)
+	}
+	if providerOnlyLaunch.AuthMode != "provider-only" || providerOnlyLaunch.ClaudeAccountName != "" {
+		t.Fatalf("provider-only launch metadata = %#v", providerOnlyLaunch)
+	}
 	if setErr := s.SetLaunchClaudeAccount(ctx, authID, "personal"); setErr != nil {
 		t.Fatalf("SetLaunchClaudeAccount() error = %v", setErr)
 	}

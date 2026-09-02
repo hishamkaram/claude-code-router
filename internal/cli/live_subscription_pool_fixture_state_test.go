@@ -49,6 +49,31 @@ func TestLiveSubscriptionFixtureAcceptsOldAccountDuringPendingRotation(t *testin
 	fixture.AssertRotationCalls(t, "personal", "work")
 }
 
+func TestLiveSubscriptionFixtureAcceptsInFlightOldAccountAfterRotation(t *testing.T) {
+	t.Parallel()
+
+	fixture := &liveSubscriptionFixture{
+		responses: []liveSubscriptionResponse{
+			{account: "personal", token: liveSubscriptionPersonalToken, status: http.StatusTooManyRequests},
+			{account: "work", token: liveSubscriptionWorkToken},
+		},
+		repeatLast:               true,
+		allowInFlightStaleLimits: true,
+	}
+	for _, token := range []string{
+		liveSubscriptionPersonalToken,
+		liveSubscriptionWorkToken,
+		liveSubscriptionPersonalToken,
+		liveSubscriptionWorkToken,
+	} {
+		if _, _, ok := fixture.nextResponse("Bearer " + token); !ok {
+			t.Fatalf("fixture rejected expected token at call %d", fixture.CallCount()+1)
+		}
+	}
+	fixture.AssertCalls(t, []string{"personal", "work", "personal", "work"})
+	fixture.AssertRotationCalls(t, "personal", "work")
+}
+
 func TestLiveSubscriptionFixtureRejectsInvalidRotationOrder(t *testing.T) {
 	t.Parallel()
 

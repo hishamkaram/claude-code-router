@@ -53,6 +53,25 @@ func TestParseLaunchInvocationParsesCUAFlags(t *testing.T) {
 	}
 }
 
+func TestParseLaunchInvocationDefaultsAuthModeAuto(t *testing.T) {
+	t.Parallel()
+
+	invocation, err := parseLaunchInvocation(nil)
+	if err != nil {
+		t.Fatalf("parseLaunchInvocation() error = %v", err)
+	}
+	if invocation.authMode != launchAuthModeAuto || invocation.authModeSet {
+		t.Fatalf("auth mode = %q set=%t, want auto false", invocation.authMode, invocation.authModeSet)
+	}
+	invocation, err = parseLaunchInvocation([]string{"--auth-mode", "auto"})
+	if err != nil {
+		t.Fatalf("parseLaunchInvocation(--auth-mode auto) error = %v", err)
+	}
+	if invocation.authMode != launchAuthModeAuto || !invocation.authModeSet {
+		t.Fatalf("explicit auth mode = %q set=%t, want auto true", invocation.authMode, invocation.authModeSet)
+	}
+}
+
 func TestParseLaunchInvocationForwardsCUAFlagsAfterTerminator(t *testing.T) {
 	t.Parallel()
 

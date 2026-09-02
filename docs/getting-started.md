@@ -64,11 +64,12 @@ Launch once through CCR:
 ccr launch
 ```
 
-Without `--model`, Claude Code starts on its normal configured model. CCR passes
-an ephemeral allowlist that adds configured, non-blocked routable aliases to the visual
-`/model` picker beside the permitted Anthropic models. Subscription or API-key
-authentication remains available for first-party routes. Launch output also
-prints each `/model anthropic.ccr.<alias>` ID for scripted selection.
+Without `--model`, Claude Code starts on its normal configured model when a
+Claude subscription login or Anthropic API key is available. CCR passes an
+ephemeral allowlist that adds configured, non-blocked routable aliases to the
+visual `/model` picker beside the permitted Anthropic models. Subscription or
+API-key authentication remains available for first-party routes. Launch output
+also prints each `/model anthropic.ccr.<alias>` ID for scripted selection.
 An effective context window of at least one million tokens is printed and shown
 with a terminal `[1m]` marker. The picker allowlist is generated once per
 launch; after changing aliases or capabilities, relaunch to refresh what Claude
@@ -114,6 +115,11 @@ model:
 ccr launch --model coding-model
 ```
 
+If Claude auth is not available, an explicit `--model <alias>` lets the default
+`--auth-mode auto` resolve to provider-only local gateway auth. A no-model launch
+without Claude auth fails before Claude Code starts; CCR does not choose a
+provider implicitly for first-party requests.
+
 CCR reserves `--model`, `--auth-mode`, `--claude-account`,
 `--permission-mode`, `--print`/`-p`, and `--db`. Use `ccr launch --help` for CCR
 help, or `ccr launch -- --help` for underlying Claude Code help without starting
@@ -157,9 +163,10 @@ computer-use requirements.
 ## Multiple Providers
 
 You can configure several providers and many aliases before launching. A normal
-`ccr launch` preserves Claude Code's default startup model and adds every
-non-blocked, routable, tool-compatible alias to `/model`. Use the picker or the printed
-`/model anthropic.ccr.<alias>` IDs to switch providers in the same session.
+`ccr launch` preserves Claude Code's default startup model when Claude auth is
+available and adds every non-blocked, routable, tool-compatible alias to
+`/model`. Use the picker or the printed `/model anthropic.ccr.<alias>` IDs to
+switch providers in the same session.
 Use the exact printed ID when it includes `[1m]` or selective family-name
 escaping.
 Start directly with `--model <alias>` when an alias is `chat-only` or otherwise
@@ -178,19 +185,30 @@ remains client-managed by Claude Code.
 
 ## Authentication
 
-Use the default authentication mode to preserve a Claude Code subscription login
-or Anthropic API-key authentication for ordinary first-party Claude model names:
+`ccr launch` defaults to `--auth-mode auto`. Auto preserves a Claude Code
+subscription login or Anthropic API-key authentication when one is available,
+and resolves to provider-only when Claude auth is absent and `--model <alias>`
+selects a registered provider alias:
+
+```bash
+ccr launch
+ccr launch --model coding-model
+```
+
+Use `preserve` when first-party Claude routes must remain available and you want
+an unavailable or unreadable Claude login to fail as a first-party auth problem:
 
 ```bash
 ccr launch --auth-mode preserve
 ```
 
-`--auth-mode gateway-token` disables the original Anthropic credentials,
+`--auth-mode provider-only` disables the original Anthropic credentials,
 requires an explicit startup CCR alias, and enables authenticated `/v1/models`
-discovery metadata:
+discovery metadata. The older `gateway-token` spelling remains accepted for
+compatibility:
 
 ```bash
-ccr launch --auth-mode gateway-token --model coding-model
+ccr launch --auth-mode provider-only --model coding-model
 ```
 
 `--auth-mode subscription-pool` selects a registered local Claude subscription
