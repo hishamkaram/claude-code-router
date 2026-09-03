@@ -32,7 +32,7 @@ func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gate
 	}
 	writeLaunchAuthSummary(out, authMode)
 	writeAutoModeClassifierSummary(out, modelAlias, permissionMode)
-	if authMode == launchAuthModeGatewayToken {
+	if providerOnlyLaunchAuthMode(authMode) {
 		fmt.Fprintln(out, "Gateway model discovery is requested; registered aliases are exposed through /v1/models.")
 		return
 	}
@@ -73,9 +73,12 @@ func writePreserveAuthModelGuidance(ctx context.Context, out io.Writer, s *store
 
 func writeLaunchAuthSummary(out io.Writer, authMode string) {
 	switch authMode {
+	case launchAuthModeProviderOnly:
+		fmt.Fprintln(out, "Provider-only auth is active for this launch; Claude Code authenticates only to CCR's loopback gateway with a generated local token.")
+		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in provider-only mode.")
 	case launchAuthModeGatewayToken:
 		fmt.Fprintln(out, "Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN for this process.")
-		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in --auth-mode gateway-token.")
+		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in --auth-mode gateway-token; use --auth-mode provider-only for the product-facing spelling.")
 	case launchAuthModeSubscriptionPool:
 		fmt.Fprintln(out, "Claude authenticates only to this process's loopback gateway with a generated local token.")
 		fmt.Fprintln(out, "Model requests use CCR's active account OAuth token in gateway memory; confirmed account-wide limits rotate without restarting Claude Code.")

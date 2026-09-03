@@ -5,6 +5,30 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.8
+
+- Let `ccr launch --model <alias>` use configured providers when Claude
+  subscription or API authentication is unavailable.
+- Resolve the default launch authentication mode automatically: preserve
+  detected Claude authentication, otherwise isolate Claude Code behind CCR's
+  generated loopback credential for provider-only routing.
+- Fail before gateway or database startup when neither Claude authentication
+  nor an explicit CCR startup model is available, with actionable login and
+  provider guidance.
+- Add explicit `provider-only` launch mode, retain `gateway-token` as a legacy
+  compatible spelling, and expose the resolved launch mode through launch
+  summaries and `ccr doctor`.
+- Detect macOS Keychain-backed Claude login state through structured
+  `claude auth status` output so signed-out users receive provider-only routing.
+- Remove inherited Anthropic and OAuth credentials from provider-only child
+  processes, while preserving current side-by-side subscription and provider
+  behavior for authenticated users.
+- Add unit, persistence, environment-isolation, and live Claude Code coverage
+  for authenticated, provider-only, and missing-auth launch paths.
+- Keep live `/model` conformance compatible with Claude Code 2.1.258 display
+  labels by requiring an affirmative local-command result and ordered route
+  transitions instead of matching the rendered model label.
+
 ## v0.4.7
 
 - Route Claude Code auto-mode safety classifier messages and token-count

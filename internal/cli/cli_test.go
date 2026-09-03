@@ -57,7 +57,7 @@ func TestRootHelpExplainsRouterConcepts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("help error = %v", err)
 	}
-	for _, want := range []string{"fixed local gateway", "normal startup", "launch --model <alias>", "SQLite", "never silently fall back"} {
+	for _, want := range []string{"fixed local gateway", "preserves Claude auth", "launch --model <alias>", "SQLite", "never silently fall back"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help output missing %q:\n%s", want, out)
 		}
@@ -180,6 +180,14 @@ func runCommand(t *testing.T, args ...string) (string, string, error) {
 	return runCommandWithDeps(t, Dependencies{}, args...)
 }
 
+func setTestClaudeHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	return home
+}
+
 func runCommandWithDeps(t *testing.T, deps Dependencies, args ...string) (string, string, error) {
 	t.Helper()
 	var out bytes.Buffer
@@ -191,6 +199,9 @@ func runCommandWithDeps(t *testing.T, deps Dependencies, args ...string) (string
 	deps.Err = &errOut
 	if deps.Secrets == nil {
 		deps.Secrets = &fakeSecrets{}
+	}
+	if deps.DetectClaudeAuth == nil {
+		deps.DetectClaudeAuth = func(context.Context) (bool, error) { return true, nil }
 	}
 	cmd := NewRootCommand(context.Background(), deps)
 	cmd.SetArgs(args)

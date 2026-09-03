@@ -94,6 +94,40 @@ func TestDoctorIsOfflineByDefaultAndBoundsLiveTargets(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsLaunchAuthWhenLaunchIsStale(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	s, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("store.Open() error = %v", err)
+	}
+	if migrateErr := s.Migrate(ctx); migrateErr != nil {
+		t.Fatalf("Migrate() error = %v", migrateErr)
+	}
+	launchID, err := s.CreateLaunchWithAuth(ctx, "fixture", "pending", "pending", launchAuthModeProviderOnly, "")
+	if err != nil {
+		t.Fatalf("CreateLaunchWithAuth() error = %v", err)
+	}
+	if activateErr := s.ActivateLaunch(ctx, launchID, "http://127.0.0.1:1", 2_147_483_647); activateErr != nil {
+		t.Fatalf("ActivateLaunch() error = %v", activateErr)
+	}
+	if closeErr := s.Close(); closeErr != nil {
+		t.Fatalf("Close() error = %v", closeErr)
+	}
+
+	out, _, err := runCommand(t, "--db", dbPath, "doctor")
+	if err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	for _, want := range []string{"Launch auth: mode=provider-only", "1 launch records are stale"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("doctor output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestDoctorLiveFailureReturnsNonzeroWithJSON(t *testing.T) {
 	t.Parallel()
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

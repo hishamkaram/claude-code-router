@@ -38,6 +38,23 @@ re-login after the failure. Select a registered alias such as
 `/model anthropic.ccr.<alias>` to continue through its configured provider;
 CCR never silently falls back from a failed Claude route.
 
+## No Claude Subscription, But You Want a Provider
+
+Configure and test at least one provider alias, then launch with that alias:
+
+```bash
+ccr provider test <provider>
+ccr model test <alias>
+ccr launch --model <alias>
+```
+
+With the default `--auth-mode auto`, CCR resolves this to provider-only local
+gateway auth when no Claude subscription login or Anthropic API key is available.
+First-party Claude routes are not available in that launch. If you run
+`ccr launch` without `--model` and Claude auth is absent, CCR fails before
+starting Claude Code and prints an explicit `ccr launch --model <alias>` example
+instead of choosing a provider implicitly.
+
 ## macOS Prints a MallocStackLogging Warning
 
 A message such as the following is a macOS malloc diagnostic, not a CCR routing
@@ -118,10 +135,11 @@ Claude Code organization policy can still restrict the model picker. CCR cannot
 bypass that policy; use an allowed default model or ask the organization
 administrator to permit the needed model option.
 
-`--auth-mode gateway-token` requires `--model <alias>` and lets Claude Code
-authenticate to CCR's `/v1/models` endpoint for discovery metadata. That mode
-intentionally disables the original subscription and API-key authentication;
-do not use it when first-party subscription routes must remain available.
+`--auth-mode provider-only` requires `--model <alias>` and lets Claude Code
+authenticate to CCR's `/v1/models` endpoint for discovery metadata. The older
+`gateway-token` spelling behaves the same way for existing scripts. These modes
+intentionally disable the original subscription and API-key authentication; do
+not use them when first-party subscription routes must remain available.
 This includes current Claude Code auto-mode safety classification for some
 Agent and Workflow actions. Use `--auth-mode preserve`; CCR does not reroute or
 bypass a safety classifier that cannot reach its required Anthropic model.
@@ -338,9 +356,10 @@ routes.
 
 ## First-Party Subscription Authentication Fails
 
-Use the default `--auth-mode preserve` and verify the ordinary `claude` CLI is
-signed in. `gateway-token` intentionally disables original Anthropic
-subscription and API-key authentication, so it cannot use a first-party route.
+Use the default `--auth-mode auto` or explicit `--auth-mode preserve`, then
+verify the ordinary `claude` CLI is signed in. `provider-only` and the legacy
+`gateway-token` spelling intentionally disable original Anthropic subscription
+and API-key authentication, so they cannot use a first-party route.
 
 ## Claude Account Import Has No Linux Keychain
 

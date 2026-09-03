@@ -95,7 +95,8 @@ func TestEncodeClaudeStreamStepsSeparatesModelCommandAndPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encodeClaudeStreamSteps() error = %v", err)
 	}
-	if len(steps) != 3 || steps[0].expectation.eventType != "" || steps[0].expectation.marker != "anthropic.ccr.fixture" ||
+	if len(steps) != 3 || !steps[0].expectation.localCommand ||
+		steps[0].expectation.eventType != "" || steps[0].expectation.marker != "" ||
 		steps[1].expectation.eventType != "assistant" || steps[2].expectation.marker != "CCR_CONFORMANCE_SECOND" {
 		t.Fatalf("encoded steps = %#v", steps)
 	}
@@ -112,46 +113,104 @@ func TestEncodeClaudeStreamStepsSeparatesModelCommandAndPrompt(t *testing.T) {
 	}
 }
 
-func TestClaudeStreamObserverDistinguishesReplayAndAssistantEvents(t *testing.T) {
+func TestClaudeStreamObserverDistinguishesLocalCommandAndAssistantEvents(t *testing.T) {
 	t.Parallel()
 	observer := newClaudeStreamObserver([]claudeStreamStep{
-		{expectation: claudeStreamExpectation{marker: "fixture"}},
+		{expectation: claudeStreamExpectation{localCommand: true}},
 		{expectation: claudeStreamExpectation{eventType: "assistant", marker: "CCR_FIRST"}},
 	})
-	if _, err := observer.Write([]byte("{\"type\":\"assistant\",\"text\":\"startup\"}\n")); err != nil {
-		t.Fatalf("Write(startup) error = %v", err)
+	ignored := []struct {
+		name  string
+		event string
+	}{
+		{name: "assistant", event: "{\"type\":\"assistant\",\"text\":\"startup\"}\n"},
+		{name: "incomplete result", event: "{\"type\":\"result\",\"subtype\":\"success\"}\n"},
+		{name: "ordinary result", event: "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1}\n"},
+	}
+	for _, test := range ignored {
+		if _, err := observer.Write([]byte(test.event)); err != nil {
+			t.Fatalf("Write(%s) error = %v", test.name, err)
+		}
+		select {
+		case observationErr := <-observer.observed:
+			t.Fatalf("%s produced a local command observation: %v", test.name, observationErr)
+		default:
+		}
+	}
+	rejected := []struct {
+		name  string
+		event string
+	}{
+		{name: "missing result", event: "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":0}\n"},
+		{name: "failed command", event: "{\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\"num_turns\":0,\"result\":\"failed\"}\n"},
+		{name: "misleading success", event: "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":0,\"result\":\"Unable to validate model\"}\n"},
+	}
+	for _, test := range rejected {
+		if _, err := observer.Write([]byte(test.event)); err != nil {
+			t.Fatalf("Write(%s) error = %v", test.name, err)
+		}
+		select {
+		case observationErr := <-observer.observed:
+			if observationErr == nil || !strings.Contains(observationErr.Error(), "did not confirm") {
+				t.Fatalf("%s observation error = %v", test.name, observationErr)
+			}
+		default:
+			t.Fatalf("%s did not reject the local command", test.name)
+		}
+	}
+	commandResult := "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":0,\"result\":\"Set model to `CCR fixture` for this session only\"}\n"
+	if _, err := observer.Write([]byte(commandResult)); err != nil {
+		t.Fatalf("Write(command result) error = %v", err)
 	}
 	select {
-	case <-observer.observed:
-		t.Fatal("startup event satisfied a model command expectation")
+	case observationErr := <-observer.observed:
+		if observationErr != nil {
+			t.Fatalf("successful local command observation error = %v", observationErr)
+		}
 	default:
-	}
-	if _, err := observer.Write([]byte("{\"type\":\"system\",\"message\":{\"content\":\"model fixture\"}}\n")); err != nil {
-		t.Fatalf("Write(model replay) error = %v", err)
-	}
-	select {
-	case <-observer.observed:
-	default:
-		t.Fatal("model replay was not observed")
+		t.Fatal("successful local command result was not observed")
 	}
 	if _, err := observer.Write([]byte("{\"type\":\"user\",\"message\":{\"content\":\"CCR_FIRST\"}}\n")); err != nil {
 		t.Fatalf("Write(prompt replay) error = %v", err)
 	}
 	select {
-	case <-observer.observed:
-		t.Fatal("prompt replay satisfied an assistant expectation")
+	case observationErr := <-observer.observed:
+		t.Fatalf("prompt replay satisfied an assistant expectation: %v", observationErr)
 	default:
 	}
 	if _, err := observer.Write([]byte("{\"type\":\"assistant\",\"text\":\"CCR_FIRST\"}\n")); err != nil {
 		t.Fatalf("Write(assistant) error = %v", err)
 	}
 	select {
-	case <-observer.observed:
+	case observationErr := <-observer.observed:
+		if observationErr != nil {
+			t.Fatalf("assistant observation error = %v", observationErr)
+		}
 	default:
 		t.Fatal("assistant marker was not observed")
 	}
-	if !strings.Contains(observer.String(), "model fixture") || !strings.Contains(observer.String(), "CCR_FIRST") {
+	if !strings.Contains(observer.String(), claudeModelSelectionPrefix) || !strings.Contains(observer.String(), "CCR_FIRST") {
 		t.Fatalf("observer output = %q", observer.String())
+	}
+}
+
+func TestVerifyClaudeRoutesRequiresOrderedMessageTransitions(t *testing.T) {
+	t.Parallel()
+	events := make([]store.TraceEvent, 0, 4)
+	events = append(events,
+		successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
+		successfulClaudeMessageRoute(2, "registered", "fixture"),
+		store.TraceEvent{
+			ID: 3, Kind: "route", Status: "succeeded",
+			Route: store.RouteEvent{Operation: "auto_mode_classifier", RouteKind: "first-party-anthropic"},
+		},
+	)
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true); err == nil || !strings.Contains(err.Error(), "Anthropic transition") {
+		t.Fatalf("verifyClaudeRoutes() error = %v, want missing ordered Anthropic transition", err)
+	}
+	events = append(events, successfulClaudeMessageRoute(4, "first-party-anthropic", "claude-sonnet"))
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true); err != nil {
+		t.Fatalf("verifyClaudeRoutes() error = %v", err)
 	}
 }
 
@@ -173,13 +232,20 @@ func TestFeedClaudeStreamStepsTimesOutAndClosesPipeWithError(t *testing.T) {
 
 	err := feedClaudeStreamStepsWithTimeout(
 		context.Background(), writer,
-		[]claudeStreamStep{{input: "step\n"}}, make(chan struct{}), 20*time.Millisecond,
+		[]claudeStreamStep{{input: "step\n"}}, make(chan error), 20*time.Millisecond,
 	)
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("feedClaudeStreamStepsWithTimeout() error = %v, want timeout", err)
 	}
 	if readErr := <-readDone; readErr == nil || !strings.Contains(readErr.Error(), "timed out") {
 		t.Fatalf("pipe read error = %v, want propagated timeout", readErr)
+	}
+}
+
+func successfulClaudeMessageRoute(id int64, kind, alias string) store.TraceEvent {
+	return store.TraceEvent{
+		ID: id, Kind: "route", Status: "succeeded",
+		Route: store.RouteEvent{Operation: "messages", RouteKind: kind, ModelAlias: alias},
 	}
 }
 

@@ -3,9 +3,10 @@
 A provider is a connection definition. A model alias is the stable name used by
 `ccr launch --model <alias>` and the matching `/model` picker row. Picker model
 IDs use `anthropic.ccr.<alias>`. An effective context window of at least one
-million tokens adds the terminal `[1m]` marker. In gateway-token sessions,
+million tokens adds the terminal `[1m]` marker. In provider-only sessions,
 authenticated discovery can additionally supply the friendly `CCR <alias>`
-display name.
+display name. The legacy `gateway-token` launch mode keeps the same discovery
+behavior for existing scripts.
 
 Keeping providers and aliases separate lets you change a provider model without
 changing workflows that use the alias.
@@ -225,7 +226,7 @@ Provider capabilities also gate tools, streaming, thinking, model discovery, and
 token counting. CCR reports safe degradation and rejects unsafe translations; it
 does not silently change providers.
 
-Model capabilities refine that provider-level contract. In gateway-token
+Model capabilities refine that provider-level contract. In provider-only
 sessions, CCR's authenticated `/v1/models` response exposes known standardized
 input/output limits and image, PDF, structured-output, and thinking support.
 Picker IDs also carry Claude Code's terminal `[1m]` context marker when

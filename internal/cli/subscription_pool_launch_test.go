@@ -82,8 +82,7 @@ func TestNoUsableClaudeAccountErrorIncludesEachRepairPath(t *testing.T) {
 }
 
 func TestSubscriptionPoolPreservesExistingStatusline(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := setTestClaudeHome(t)
 	claudeDir := filepath.Join(home, ".claude")
 	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll() error = %v", err)

@@ -15,6 +15,7 @@ type launchInvocation struct {
 	modelAlias     string
 	printMode      bool
 	authMode       string
+	authModeSet    bool
 	claudeAccount  string
 	permissionMode string
 	dbPath         string
@@ -36,7 +37,7 @@ type launchInvocation struct {
 
 func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
 	if invocation.modelAlias != "" || invocation.printMode ||
-		invocation.authMode != launchAuthModePreserve || invocation.claudeAccount != "" ||
+		invocation.authModeSet || invocation.claudeAccount != "" ||
 		invocation.permissionMode != "" ||
 		invocation.noHistory || invocation.noLifecycle || invocation.noStatusline ||
 		invocation.cuaOptionsConfigured() {
@@ -63,7 +64,7 @@ func (invocation launchInvocation) cuaOptionsConfigured() bool {
 }
 
 func parseLaunchInvocation(args []string) (launchInvocation, error) {
-	invocation := launchInvocation{authMode: launchAuthModePreserve}
+	invocation := launchInvocation{authMode: launchAuthModeAuto}
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		if arg == "--" {
@@ -400,7 +401,7 @@ func launchStringOptionTarget(invocation *launchInvocation, option string) (targ
 	case "--model":
 		return &invocation.modelAlias, nil
 	case "--auth-mode":
-		return &invocation.authMode, nil
+		return &invocation.authMode, &invocation.authModeSet
 	case "--claude-account":
 		return &invocation.claudeAccount, nil
 	case "--permission-mode":

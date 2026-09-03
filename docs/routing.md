@@ -14,12 +14,16 @@ allowlist for that launch:
   terminal `[1m]` picker marker;
 - `~/.claude/settings.json` is never written.
 
-Without `--model`, Claude Code keeps its normal startup model. In the default
-subscription-preserving mode, IDs beginning with `anthropic.` become custom
-rows in the visual picker, so registered models appear beside the permitted
-Anthropic models without authenticated gateway discovery. Pass `--model
-<alias>` when you want that alias to be the startup model, or when it is
-`chat-only` and needs tools disabled for the whole launch. See Claude Code's
+Without `--model`, Claude Code keeps its normal startup model when Claude auth
+is available. In resolved preserve mode, IDs beginning with `anthropic.` become
+custom rows in the visual picker, so registered models appear beside the
+permitted Anthropic models without authenticated gateway discovery. If Claude
+auth is absent, pass `--model <alias>` to start directly on a registered
+provider alias; default `--auth-mode auto` resolves that launch to provider-only
+local gateway auth. A no-model launch without Claude auth fails before Claude
+Code starts instead of selecting a provider implicitly. Pass `--model <alias>`
+when you want that alias to be the startup model, or when it is `chat-only` and
+needs tools disabled for the whole launch. See Claude Code's
 [`availableModels` documentation](https://code.claude.com/docs/en/model-config).
 Because the allowlist is launch-scoped, capability refreshes and local
 overrides affect new launches. Relaunch Claude Code after `ccr model refresh`,
@@ -121,7 +125,25 @@ respective feature for one launch.
 
 ## Authentication Modes
 
-### `preserve` (default)
+### `auto` (default)
+
+```bash
+ccr launch
+ccr launch --model coding-model
+```
+
+CCR detects whether the current shell has usable Claude Code subscription or
+Anthropic API-key auth. If it does, `auto` resolves to `preserve`, so first-party
+Claude models and registered provider aliases can be used side by side. If
+Claude auth is absent and `--model <alias>` names a registered provider alias,
+`auto` resolves to `provider-only`. If Claude auth is absent and no alias is
+selected, CCR fails before starting Claude Code and prints an explicit
+`ccr launch --model <alias>` example from the configured routable aliases.
+On macOS, CCR obtains only the signed-in boolean from `claude auth status --json`;
+it does not read or expose Keychain credential values. A detection failure is
+treated as unknown and preserves authentication rather than disabling it.
+
+### `preserve`
 
 ```bash
 ccr launch --auth-mode preserve
@@ -134,19 +156,29 @@ when a session can use both first-party and external routes. Claude Code does
 not run authenticated gateway discovery in this mode; CCR supplies registered
 picker rows through the launch-only `availableModels` override instead.
 
+### `provider-only`
+
+```bash
+ccr launch --auth-mode provider-only --model coding-model
+```
+
+CCR uses only its generated local gateway token. Original Anthropic subscription
+and API-key authentication are deliberately disabled. Because a no-startup-model
+session must preserve first-party auth, `provider-only` requires an explicit CCR
+startup alias. Claude Code can authenticate to `/v1/models` in this mode and use
+its friendly discovery metadata. Auto-mode safety classification follows that
+active alias and fails visibly if it cannot be routed. See Anthropic's
+[gateway documentation](https://code.claude.com/docs/en/llm-gateway).
+
 ### `gateway-token`
 
 ```bash
 ccr launch --auth-mode gateway-token --model coding-model
 ```
 
-CCR uses only its generated local gateway token. Original Anthropic subscription
-and API-key authentication are deliberately disabled. Because a no-startup-model
-session must preserve first-party auth, `gateway-token` requires an explicit CCR
-startup alias. Claude Code can authenticate to `/v1/models` in this mode and use
-its friendly discovery metadata. Auto-mode safety classification follows that
-active alias and fails visibly if it cannot be routed. See Anthropic's
-[gateway documentation](https://code.claude.com/docs/en/llm-gateway).
+`gateway-token` is the older spelling for provider-only local gateway auth. It
+keeps the same behavior for existing scripts, but new commands should use
+`provider-only`.
 
 ### `subscription-pool`
 
@@ -313,7 +345,7 @@ web-search backend.
 
 ## Automation Modes
 
-CCR requests Claude Code gateway model discovery in `gateway-token` mode and
+CCR requests Claude Code gateway model discovery in `provider-only` mode and
 enables deferred tool search when the active route can use tools. Choose the
 desired Claude Code permission mode explicitly:
 

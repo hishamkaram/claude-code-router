@@ -26,6 +26,7 @@ type Dependencies struct {
 	StartGateway           func(context.Context, gateway.Config) (*gateway.Server, error)
 	StartManagedCUA        func(context.Context, managedCUAStart) (*managedCUALaunch, error)
 	ValidateExternalCUAURL func(context.Context, string) error
+	DetectClaudeAuth       func(context.Context) (bool, error)
 	ProbeClaudeAccount     func(context.Context, string) (claudeaccount.AccountDiagnostics, error)
 	ExecutablePath         string
 }
@@ -80,6 +81,9 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	if deps.ValidateExternalCUAURL == nil {
 		deps.ValidateExternalCUAURL = validateExternalCUAURL
 	}
+	if deps.DetectClaudeAuth == nil {
+		deps.DetectClaudeAuth = detectClaudeLaunchAuth
+	}
 	if deps.ProbeClaudeAccount == nil {
 		client := claudeaccount.NewDiagnosticsClient(nil)
 		deps.ProbeClaudeAccount = client.Probe
@@ -94,8 +98,8 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 
 	Claude Code is launched once through a fixed local gateway. First-party Claude
 	model names route to Anthropic, and configured CCR aliases are exposed in
-	Claude Code's /model picker. ccr launch keeps Claude Code's normal startup
-	model unless you explicitly pass ccr launch --model <alias>.
+	Claude Code's /model picker. ccr launch preserves Claude auth when available;
+	without Claude auth, start on a provider with ccr launch --model <alias>.
 
 ccr stores providers, model aliases, compatibility metadata, sessions, and
 usage metadata in a local SQLite database. API keys are never stored raw in

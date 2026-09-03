@@ -26,7 +26,7 @@ func TestLiveLaunchForwardsChromeOption(t *testing.T) {
 	}
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--chrome", "--version")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--auth-mode", "preserve", "--chrome", "--version")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
@@ -181,6 +181,9 @@ func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
 
 	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--print", "/model anthropic.ccr.gpt")
 	if err != nil {
+		if liveAutoLaunchAuthUnavailable(err) {
+			t.Skipf("live Claude Code Anthropic auth unavailable before model selection: %v", err)
+		}
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !chatCalled {
@@ -248,7 +251,7 @@ func TestLiveLaunchPreserveAuthRoutesThroughFakeAnthropicCompatibleProvider(t *t
 		}
 	}
 
-	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "glm", "--print")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{In: strings.NewReader("hello\n")}, "--db", dbPath, "launch", "--model", "glm", "--print", "--auth-mode", "preserve")
 	if err != nil {
 		if liveAnthropicAuthUnavailable(out + errOut) {
 			t.Skipf("live Claude Code Anthropic auth unavailable:\nstdout:\n%s\nstderr:\n%s", out, errOut)
@@ -412,6 +415,13 @@ func liveAnthropicAuthUnavailable(output string) bool {
 		strings.Contains(normalized, "oauth session expired") ||
 		strings.Contains(normalized, "oauth refresh token is no longer valid") ||
 		strings.Contains(normalized, "run /login to re-authenticate")
+}
+
+func liveAutoLaunchAuthUnavailable(err error) bool {
+	return err != nil && strings.Contains(
+		strings.ToLower(err.Error()),
+		"claude subscription authentication was not found",
+	)
 }
 
 type liveOpenAIChatMessage struct {

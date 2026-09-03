@@ -29,11 +29,17 @@ Claude Code with its Chrome integration.
 Fallback and detached background modes are rejected because they cannot preserve
 CCR's selected route and local gateway ownership.
 
-Without --model, Claude Code starts on its normal configured model. CCR adds
-registered, compatible aliases to the visual /model picker alongside the
-permitted Anthropic models while preserving subscription or API-key
-authentication. Pass --model <alias> when you want that CCR alias to be the
-startup model.
+By default, --auth-mode auto preserves a working Claude subscription or API-key
+login so first-party Claude models and registered CCR providers work side by
+side. If no Claude auth is available and --model <alias> selects a registered
+provider alias, CCR uses provider-only local gateway auth so that provider can
+run without a Claude subscription. Without --model and without Claude auth, CCR
+fails before starting Claude Code and tells you which provider alias to select.
+CCR never chooses a provider implicitly for first-party Claude requests.
+
+Use --auth-mode provider-only with --model <alias> to force provider-only local
+gateway auth. The older spelling --auth-mode gateway-token is accepted for
+compatibility.
 
 Use --auth-mode subscription-pool to route first-party model requests through a
 registered local Claude account. Claude authenticates only to the loopback
@@ -89,7 +95,7 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 		},
 	}
 	cmd.Flags().String("model", "", "Optional CCR model alias to use as the startup model")
-	cmd.Flags().String("auth-mode", launchAuthModePreserve, "Gateway auth mode: preserve, gateway-token, or subscription-pool")
+	cmd.Flags().String("auth-mode", launchAuthModeAuto, "Gateway auth mode: auto, preserve, provider-only, or subscription-pool")
 	cmd.Flags().String("claude-account", "", "Named Claude account to use with subscription-pool auth")
 	cmd.Flags().String("permission-mode", "", "Optional Claude Code permission mode to pass through")
 	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
@@ -115,7 +121,9 @@ func runClaudeMetadata(ctx context.Context, cmd *cobra.Command, deps Dependencie
 }
 
 const (
+	launchAuthModeAuto             = "auto"
 	launchAuthModePreserve         = "preserve"
+	launchAuthModeProviderOnly     = "provider-only"
 	launchAuthModeGatewayToken     = "gateway-token"
 	launchAuthModeSubscriptionPool = "subscription-pool"
 )
@@ -123,6 +131,7 @@ const (
 type resolvedLaunch struct {
 	modelAlias    string
 	claudeModelID string
+	authMode      string
 	disableTools  bool
 }
 
@@ -160,6 +169,10 @@ func runLaunchAttempt(
 		return err
 	}
 	if err := validateLaunchPassthroughArgs(invocation.claudeArgs); err != nil {
+		return err
+	}
+	invocation, err := preflightAutoLaunchAuthBeforeStore(ctx, opts, deps, invocation)
+	if err != nil {
 		return err
 	}
 
@@ -268,7 +281,7 @@ func createLaunchExecution(
 		accountName = selectedAccount.Account.Name
 	}
 	launchID, err := s.CreateLaunchWithAuth(
-		ctx, resolved.modelAlias, lifecycleState, statuslineState, invocation.authMode, accountName,
+		ctx, resolved.modelAlias, lifecycleState, statuslineState, resolved.authMode, accountName,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating launch record: %w", err)
@@ -316,19 +329,19 @@ func validateResolvedLaunchPassthroughArgs(ctx context.Context, s *store.Store, 
 	if findLaunchOption(invocation.claudeArgs, "--settings") == "" {
 		return nil
 	}
-	hasSettings, err := launchWillInjectSettings(ctx, s, invocation, resolved.disableTools)
+	hasSettings, err := launchWillInjectSettings(ctx, s, invocation, resolved)
 	if err != nil {
 		return err
 	}
 	return validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, hasSettings)
 }
 
-func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation launchInvocation, includeToolDisabled bool) (bool, error) {
+func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch) (bool, error) {
 	if !invocation.noLifecycle {
 		return true, nil
 	}
 	if !invocation.noStatusline {
-		if invocation.authMode == launchAuthModeSubscriptionPool {
+		if resolved.authMode == launchAuthModeSubscriptionPool {
 			return true, nil
 		}
 		_, state, err := claudeStatuslineSetting()
@@ -340,7 +353,7 @@ func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation la
 		}
 	}
 	settings := make(map[string]any, 1)
-	if err := addLaunchAvailableModels(ctx, s, includeToolDisabled, settings); err != nil {
+	if err := addLaunchAvailableModels(ctx, s, resolved.disableTools, settings); err != nil {
 		return false, err
 	}
 	return len(settings) > 0, nil
@@ -351,7 +364,11 @@ func resolveLaunch(ctx context.Context, deps Dependencies, s *store.Store, invoc
 	if err != nil {
 		return resolvedLaunch{}, err
 	}
-	if authErr := validateResolvedLaunchAuthMode(invocation.authMode, modelAlias); authErr != nil {
+	authMode, err := resolveLaunchAuthMode(ctx, deps, s, invocation, modelAlias)
+	if err != nil {
+		return resolvedLaunch{}, err
+	}
+	if authErr := validateResolvedLaunchAuthMode(authMode, modelAlias); authErr != nil {
 		return resolvedLaunch{}, authErr
 	}
 	disableTools, err := launchShouldDisableTools(ctx, s, modelAlias)
@@ -371,7 +388,7 @@ func resolveLaunch(ctx context.Context, deps Dependencies, s *store.Store, invoc
 	}
 	return resolvedLaunch{
 		modelAlias: modelAlias, claudeModelID: claudeModelID,
-		disableTools: disableTools,
+		authMode: authMode, disableTools: disableTools,
 	}, nil
 }
 
@@ -477,7 +494,7 @@ func runClaudeLaunchProcess(
 		GatewayURL: execution.server.URL(), Token: execution.token,
 		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
 		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
-		DisableTools: resolved.disableTools, AuthMode: invocation.authMode,
+		DisableTools: resolved.disableTools, AuthMode: resolved.authMode,
 		ClaudeAccountName:      selectedClaudeAccountName(execution.claudeAccount),
 		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
 	})
@@ -499,7 +516,7 @@ func runClaudeLaunchProcess(
 		summaryOut = errOut
 	}
 	writeLaunchSummary(ctx, summaryOut, execution.store, execution.server.URL(), execution.launchID,
-		process.PID(), resolved.modelAlias, resolved.disableTools, invocation.authMode, invocation.permissionMode)
+		process.PID(), resolved.modelAlias, resolved.disableTools, resolved.authMode, invocation.permissionMode)
 	var notices <-chan string
 	if execution.subscriptionPool != nil {
 		notices = execution.subscriptionPool.Notices()
@@ -523,6 +540,9 @@ func validateLaunchInputs(modelAlias, authMode, claudeAccount, permissionMode st
 	if err := validateLaunchAuthMode(authMode); err != nil {
 		return err
 	}
+	if providerOnlyLaunchAuthMode(authMode) && modelAlias == "" {
+		return fmt.Errorf("--auth-mode %s requires --model <alias>; use --auth-mode preserve for Claude Code default first-party routing", authMode)
+	}
 	if claudeAccount != "" {
 		if err := validateName("Claude account name", claudeAccount); err != nil {
 			return err
@@ -532,25 +552,6 @@ func validateLaunchInputs(modelAlias, authMode, claudeAccount, permissionMode st
 		}
 	}
 	return validateClaudePermissionMode(permissionMode)
-}
-
-func validateLaunchAuthMode(value string) error {
-	switch value {
-	case launchAuthModePreserve, launchAuthModeGatewayToken, launchAuthModeSubscriptionPool:
-		return nil
-	default:
-		return fmt.Errorf(
-			"invalid launch auth mode %q; expected %s, %s, or %s",
-			value, launchAuthModePreserve, launchAuthModeGatewayToken, launchAuthModeSubscriptionPool,
-		)
-	}
-}
-
-func validateResolvedLaunchAuthMode(authMode, modelAlias string) error {
-	if authMode == launchAuthModeGatewayToken && modelAlias == "" {
-		return fmt.Errorf("--auth-mode gateway-token requires --model <alias>; use preserve auth mode for Claude Code default first-party routing")
-	}
-	return nil
 }
 
 func validateClaudePermissionMode(mode string) error {

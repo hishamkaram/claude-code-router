@@ -17,7 +17,10 @@ const (
 	maxTokenBytes       = 64 << 10
 )
 
-var ErrCurrentCredentialsUnsupported = errors.New("current Claude credentials cannot be imported on this platform")
+var (
+	ErrCurrentCredentialsUnsupported   = errors.New("current Claude credentials cannot be imported on this platform")
+	ErrCurrentCredentialsNoAccessToken = errors.New("current Claude credentials do not contain a usable access token")
+)
 
 type Credentials struct {
 	AccessToken  string
@@ -137,6 +140,9 @@ func ParseCredentials(raw []byte) (Credentials, error) {
 	var document credentialDocument
 	if err := json.Unmarshal(raw, &document); err != nil {
 		return Credentials{}, fmt.Errorf("current Claude credentials contain invalid JSON")
+	}
+	if strings.TrimSpace(document.ClaudeAIOAuth.AccessToken) == "" {
+		return Credentials{}, ErrCurrentCredentialsNoAccessToken
 	}
 	accessToken, err := ValidateToken(document.ClaudeAIOAuth.AccessToken)
 	if err != nil {

@@ -72,9 +72,13 @@ ccr model list
 ccr launch
 ```
 
-`ccr launch` keeps Claude Code's normal startup model, preserves subscription
-authentication, and adds safe registered aliases to the `/model` picker beside
-the permitted Anthropic models. CCR also prints each picker ID, such as
+`ccr launch` defaults to `--auth-mode auto`. When a working Claude subscription
+login or Anthropic API key is available, CCR preserves it and adds safe
+registered aliases to the `/model` picker beside the permitted Anthropic models.
+If Claude auth is not available, launch with an explicit provider alias; CCR
+resolves `auto` to provider-only local gateway auth for that launch. Without
+Claude auth and without `--model`, CCR fails before starting Claude Code instead
+of choosing a provider implicitly. CCR also prints each picker ID, such as
 `/model anthropic.ccr.<alias>`, for scripted selection. Models with an effective
 context window of at least one million tokens are advertised with Claude Code's
 terminal `[1m]` marker. Picker rows are computed once per launch; after
@@ -193,12 +197,16 @@ CCR reports that limitation instead of bypassing it.
 ## How Routing Works
 
 1. CCR launches Claude Code through a loopback-only local gateway.
-2. Default subscription-preserving launches add registered, non-blocked,
-   routable, tool-compatible aliases to the `/model` picker. Tool-disabled aliases are
-   available by starting directly with `ccr launch --model <alias>`.
-3. Standard first-party model names route to Anthropic. The default
-   `--auth-mode preserve` keeps an existing Claude Code subscription login or
-   Anthropic API-key authentication available for those routes.
+2. Default `--auth-mode auto` preserves a working Claude Code subscription login
+   or Anthropic API key. In that resolved preserve mode, registered, non-blocked,
+   routable, tool-compatible aliases are added to the `/model` picker.
+   Tool-disabled aliases are available by starting directly with
+   `ccr launch --model <alias>`.
+3. If Claude auth is absent and `--model <alias>` names a registered provider
+   alias, `auto` resolves to provider-only local gateway auth. If Claude auth is
+   absent and no model alias is selected, launch fails visibly. Standard
+   first-party model names route to Anthropic only when preserved or
+   subscription-pool auth is available.
 4. While a CCR alias is active in a Claude session, auto-mode safety classifier
    requests from that session follow the alias. A classifier routing failure is
    returned visibly; CCR does not retry it through first-party Anthropic. With
@@ -220,10 +228,12 @@ OpenAI-compatible model is asked which model is active, CCR adds route context
 so the answer can reflect the current alias and provider model instead of an
 older turn from the same Claude Code session.
 
-Use `ccr launch --auth-mode gateway-token --model <alias>` when you want a
-third-party-only session. That mode intentionally disables the original
-Anthropic subscription and API-key authentication. It also lets Claude Code
-authenticate to CCR's `/v1/models` endpoint for friendly discovery metadata.
+Use `ccr launch --auth-mode provider-only --model <alias>` when you want a
+provider-only session, or rely on default `auto` to choose that mode when Claude
+auth is absent and a startup alias is explicit. That mode intentionally disables
+the original Anthropic subscription and API-key authentication. It also lets
+Claude Code authenticate to CCR's `/v1/models` endpoint for friendly discovery
+metadata. The older `gateway-token` spelling remains accepted for compatibility.
 Auto-mode safety classification follows the active CCR alias, including aliases
 selected later through `/model`; it does not require a preserved Anthropic
 subscription. CCR's pinned/latest real-CLI fixture matrix verifies this request
@@ -239,8 +249,8 @@ ccr model show <alias> --json     # inspect sources, overrides, and effective va
 ccr model test <alias>            # validate a route against its provider
 ccr conformance run <alias>       # record compatibility checks
 ccr conformance run --all         # check every registered non-blocked routable alias
-ccr launch                        # preserve subscription; expose aliases in /model
-ccr launch --model <alias>        # start directly on one CCR alias
+ccr launch                        # auto auth; preserve Claude auth when available
+ccr launch --model <alias>        # start directly on one CCR alias; provider-only if no Claude auth
 ccr claude-account import personal --from current
 ccr claude-account list
 ccr launch --auth-mode subscription-pool

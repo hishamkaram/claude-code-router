@@ -283,8 +283,10 @@ func TestLaunchHelpDescribesPreserveAuthModelSelection(t *testing.T) {
 		t.Fatalf("launch help error = %v", err)
 	}
 	for _, want := range []string{
-		"registered, compatible aliases to the visual /model picker",
-		"permitted Anthropic models while preserving subscription or API-key",
+		"--auth-mode auto preserves a working Claude subscription or API-key",
+		"CCR uses provider-only local gateway auth",
+		"CCR never chooses a provider implicitly",
+		"--auth-mode provider-only",
 		"retries the same buffered request",
 		"connection stay open",
 		"forwards Anthropic's original limit response",
@@ -441,25 +443,6 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	}
 }
 
-func TestLaunchGatewayTokenAuthModeRequiresCCRStartupModel(t *testing.T) {
-	t.Parallel()
-
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	launcher := &fakeLauncher{pid: os.Getpid()}
-	_, _, err := runCommandWithDeps(t, Dependencies{
-		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--auth-mode", "gateway-token")
-	if err == nil {
-		t.Fatalf("launch unexpectedly succeeded")
-	}
-	if !strings.Contains(err.Error(), "--auth-mode gateway-token requires --model") {
-		t.Fatalf("launch error = %v", err)
-	}
-	if launcher.starts != 0 {
-		t.Fatalf("launcher starts = %d, want 0", launcher.starts)
-	}
-}
-
 func TestLaunchInvalidAuthModeFailsBeforeDatabaseOpen(t *testing.T) {
 	t.Parallel()
 
@@ -593,11 +576,12 @@ func TestLaunchPreservesFileWritersForClaudeProcess(t *testing.T) {
 
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	cmd := NewRootCommand(context.Background(), Dependencies{
-		In:       strings.NewReader(""),
-		Out:      stdoutFile,
-		Err:      stderrFile,
-		Secrets:  &fakeSecrets{},
-		Launcher: launcher,
+		In:               strings.NewReader(""),
+		Out:              stdoutFile,
+		Err:              stderrFile,
+		Secrets:          &fakeSecrets{},
+		Launcher:         launcher,
+		DetectClaudeAuth: func(context.Context) (bool, error) { return true, nil },
 	})
 	cmd.SetArgs([]string{"--db", dbPath, "launch"})
 	if err := cmd.Execute(); err != nil {

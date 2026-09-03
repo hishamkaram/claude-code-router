@@ -121,7 +121,7 @@ return result
 
 func runConfiguredProviderProbe(t *testing.T, ctx context.Context, prompt string, claudeArgs ...string) (string, string, string) {
 	t.Helper()
-	return runConfiguredProviderProbeWithAuthMode(t, ctx, "gateway-token", prompt, claudeArgs...)
+	return runConfiguredProviderProbeWithAuthMode(t, ctx, launchAuthModeProviderOnly, prompt, claudeArgs...)
 }
 
 func runConfiguredProviderProbeWithAuthMode(t *testing.T, ctx context.Context, authMode, prompt string, claudeArgs ...string) (string, string, string) {
@@ -134,7 +134,7 @@ func runConfiguredProviderProbeWithAuthMode(t *testing.T, ctx context.Context, a
 		modelAlias = "glm-5-2"
 	}
 	if authMode == "" {
-		authMode = "gateway-token"
+		authMode = launchAuthModeProviderOnly
 	}
 	args := []string{"launch", "--model", modelAlias, "--print", "--auth-mode", authMode, "--permission-mode", "auto"}
 	args = append(args, claudeArgs...)
@@ -150,7 +150,7 @@ func runConfiguredProviderProbeWithAuthMode(t *testing.T, ctx context.Context, a
 
 func assertConfiguredProviderProbe(t *testing.T, out, errOut, modelAlias string, sentinels ...string) {
 	t.Helper()
-	assertConfiguredProviderProbeWithAuthMode(t, out, errOut, modelAlias, "gateway-token", sentinels...)
+	assertConfiguredProviderProbeWithAuthMode(t, out, errOut, modelAlias, launchAuthModeProviderOnly, sentinels...)
 }
 
 func assertConfiguredProviderProbeWithAuthMode(t *testing.T, out, errOut, modelAlias, authMode string, sentinels ...string) {
@@ -170,7 +170,7 @@ func assertConfiguredProviderProbeWithAuthMode(t *testing.T, out, errOut, modelA
 		`Selected ccr model alias "` + modelAlias + `"`,
 	}
 	wants = append(wants, configuredProviderAuthDiagnostics(authMode)...)
-	if authMode != launchAuthModeGatewayToken {
+	if !providerOnlyLaunchAuthMode(authMode) {
 		wants = append(wants, "Registered ccr models are available in Claude Code's /model picker")
 	}
 	for _, want := range wants {
@@ -186,6 +186,11 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 		return []string{
 			"Gateway accepts the generated local X-CCR-Session-Token",
 			"Original Anthropic subscription login and Anthropic API-key auth are preserved",
+		}
+	case launchAuthModeProviderOnly:
+		return []string{
+			"Provider-only auth is active for this launch",
+			"Original Anthropic subscription login and Anthropic API-key auth are not active in provider-only mode",
 		}
 	case launchAuthModeSubscriptionPool:
 		return []string{
@@ -204,6 +209,7 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 func TestConfiguredProviderAuthDiagnosticsMatchLaunchSummary(t *testing.T) {
 	for _, authMode := range []string{
 		launchAuthModePreserve,
+		launchAuthModeProviderOnly,
 		launchAuthModeGatewayToken,
 		launchAuthModeSubscriptionPool,
 	} {

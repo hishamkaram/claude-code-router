@@ -54,16 +54,33 @@ func (s *liveSubscriptionPTYStart) WaitReady(t *testing.T, ctx context.Context, 
 	t.Helper()
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
-	for s.Transcript.String() == "" {
+	const quietPeriod = time.Second
+	var lastTranscript string
+	var unchangedSince time.Time
+	for {
+		transcript := s.Transcript.String()
+		if transcript != "" && transcript != lastTranscript {
+			lastTranscript = transcript
+			unchangedSince = time.Now()
+		} else if transcript != "" && time.Since(unchangedSince) >= quietPeriod {
+			return
+		}
 		select {
 		case err := <-commandDone:
-			t.Fatalf("real Claude process exited before its PTY became ready: %v", err)
+			t.Fatalf(
+				"real Claude process exited before its PTY became ready: %v\ntranscript:\n%s",
+				err,
+				redactLiveSubscriptionOutput(transcript),
+			)
 		case <-ctx.Done():
-			t.Fatalf("waiting for real Claude PTY readiness: %v", ctx.Err())
+			t.Fatalf(
+				"waiting for real Claude PTY readiness: %v\ntranscript:\n%s",
+				ctx.Err(),
+				redactLiveSubscriptionOutput(transcript),
+			)
 		case <-ticker.C:
 		}
 	}
-	time.Sleep(250 * time.Millisecond)
 }
 
 func (l *liveSubscriptionPTYLauncher) Start(
