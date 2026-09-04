@@ -210,6 +210,9 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 	var gotContent string
 	var gotUser string
 	var gotReasoningEffort string
+	var gotStream bool
+	var gotIncludeUsage bool
+	var gotAccept string
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("provider path = %q, want /v1/chat/completions", r.URL.Path)
@@ -218,7 +221,11 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 			Model           string `json:"model"`
 			User            string `json:"user"`
 			ReasoningEffort string `json:"reasoning_effort"`
-			Messages        []struct {
+			Stream          bool   `json:"stream"`
+			StreamOptions   *struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
 			} `json:"messages"`
@@ -229,6 +236,9 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 		gotModel = payload.Model
 		gotUser = payload.User
 		gotReasoningEffort = payload.ReasoningEffort
+		gotStream = payload.Stream
+		gotIncludeUsage = payload.StreamOptions != nil && payload.StreamOptions.IncludeUsage
+		gotAccept = r.Header.Get("Accept")
 		if len(payload.Messages) > 0 {
 			gotSystem = payload.Messages[0].Content
 			gotContent = payload.Messages[len(payload.Messages)-1].Content
@@ -286,8 +296,11 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 			t.Fatalf("stream missing %q:\n%s", want, stream)
 		}
 	}
-	if gotModel != "gpt-5" || gotSystem != "system one\nsystem two" || gotContent != "hello\nworld" || gotUser != "test" || gotReasoningEffort != "high" {
-		t.Fatalf("provider received model=%q system=%q content=%q user=%q effort=%q", gotModel, gotSystem, gotContent, gotUser, gotReasoningEffort)
+	if gotModel != "gpt-5" || gotSystem != "system one\nsystem two" || gotContent != "hello\nworld" || gotUser != "test" || gotReasoningEffort != "high" || !gotStream || !gotIncludeUsage {
+		t.Fatalf("provider received model=%q system=%q content=%q user=%q effort=%q stream=%t include_usage=%t", gotModel, gotSystem, gotContent, gotUser, gotReasoningEffort, gotStream, gotIncludeUsage)
+	}
+	if !strings.Contains(gotAccept, "text/event-stream") || !strings.Contains(gotAccept, "application/json") {
+		t.Fatalf("provider Accept = %q, want SSE and JSON", gotAccept)
 	}
 }
 

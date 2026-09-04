@@ -46,7 +46,7 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 
 	run.waitForText(t, ctx, "Detected a custom API key")
 	run.write(t, "\x1b[A\r", "accepting isolated placeholder API key")
-	run.waitForText(t, ctx, "Welcome back!")
+	run.waitForText(t, ctx, "Claude Code v")
 	run.write(t, "/model\r", "opening /model picker")
 	run.waitForText(t, ctx,
 		"Select model",
@@ -372,20 +372,10 @@ func waitForLivePickerText(t *testing.T, ctx context.Context, transcript *synchr
 	defer ticker.Stop()
 	for {
 		plain := ansi.Strip(transcript.String())
-		compact := strings.Map(func(r rune) rune {
-			if unicode.IsSpace(r) {
-				return -1
-			}
-			return r
-		}, plain)
+		compact := normalizeLiveClaudeText(plain)
 		foundAll := true
 		for _, want := range wants {
-			compactWant := strings.Map(func(r rune) rune {
-				if unicode.IsSpace(r) {
-					return -1
-				}
-				return r
-			}, want)
+			compactWant := normalizeLiveClaudeText(want)
 			if !strings.Contains(plain, want) && !strings.Contains(compact, compactWant) {
 				foundAll = false
 				break
@@ -402,4 +392,13 @@ func waitForLivePickerText(t *testing.T, ctx context.Context, transcript *synchr
 		case <-ticker.C:
 		}
 	}
+}
+
+func normalizeLiveClaudeText(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) || r == '`' {
+			return -1
+		}
+		return r
+	}, ansi.Strip(value))
 }
