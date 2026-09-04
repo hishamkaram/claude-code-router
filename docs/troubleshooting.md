@@ -294,13 +294,38 @@ rejection before running the executor. This prevents silent
 `acknowledged_safety_checks` until those checks can be displayed in the approval
 flow.
 
-## `/compact` Does Not Reduce Context on an OpenAI-Compatible Alias
+## `/compact` or Automatic Compaction Fails on an OpenAI-Compatible Alias
 
-Claude Code compaction uses Anthropic `context_management` edits. CCR rejects
-compaction edits on OpenAI-compatible routes instead of silently forwarding the
-pre-compact transcript, because that would make the selected provider keep
-seeing stale context. Use a first-party or Anthropic-compatible route for
-sessions where `/compact` must work.
+Current Claude Code performs manual and automatic session compaction with a
+normal streamed model request. CCR preserves that stream through OpenAI Chat
+Completions, including terminal token usage, and then returns the summary to
+Claude Code. The next request should contain the compacted history and remain on
+the selected provider.
+
+An error containing `Post ".../v1/chat/completions": unexpected EOF` means the
+provider or an HTTP proxy closed the connection before returning response
+headers. Upgrade to CCR v0.4.9 or later first; older versions changed the
+upstream request to non-streaming and could hit a remote idle timeout while a
+large summary was generated. Then verify the provider and model metadata:
+
+```bash
+ccr version
+ccr model show <alias> --json
+ccr conformance run <alias>
+```
+
+The effective context window must not exceed the model's real input limit. The
+provider must either implement OpenAI-compatible SSE and
+`stream_options.include_usage`, or return one complete JSON response with usage
+when streaming is requested. CCR does not retry a submitted completion or
+switch providers after an ambiguous transport failure because either action
+could duplicate cost or silently change routing.
+
+This support is separate from Anthropic API server-side context management.
+CCR still rejects an explicit `compact_20260112` `context_management` edit on
+an OpenAI-compatible route instead of forwarding stale pre-compaction history.
+Use a first-party or Anthropic-compatible route when an application directly
+requires that Anthropic beta API feature.
 
 ## `501 unsupported assistant text block: citations`
 
@@ -349,10 +374,8 @@ the image. For example:
 ccr model update <alias> --input-modalities text,image --vision true
 ```
 
-Use a first-party or Anthropic-compatible alias as a temporary workaround if
-CCR cannot be upgraded. This issue is separate from explicit `/compact`
-context-management edits, which remain unsupported on OpenAI-compatible
-routes.
+Use a first-party or Anthropic-compatible alias if CCR cannot be upgraded. This
+image-history issue is unrelated to session compaction.
 
 ## First-Party Subscription Authentication Fails
 

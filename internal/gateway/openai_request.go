@@ -85,7 +85,8 @@ func toOpenAIChatRequestWithResolver(ctx context.Context, req anthropicRequest, 
 		MaxTokens:       req.MaxTokens,
 		Temperature:     req.Temperature,
 		Stop:            req.StopSequences,
-		Stream:          false,
+		Stream:          req.Stream,
+		StreamOptions:   openAIStreamOptionsForRequest(req.Stream),
 		User:            options.user,
 		ReasoningEffort: options.reasoningEffort,
 		ResponseFormat:  options.responseFormat,
@@ -93,6 +94,13 @@ func toOpenAIChatRequestWithResolver(ctx context.Context, req anthropicRequest, 
 		ToolChoice:      toolChoice,
 		ParallelTools:   parallelTools,
 	}, messageConversion.ignoredFields, nil
+}
+
+func openAIStreamOptionsForRequest(stream bool) *openAIStreamOptions {
+	if !stream {
+		return nil
+	}
+	return &openAIStreamOptions{IncludeUsage: true}
 }
 
 func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicRequest, route openAIModelRoute, resolver imageSourceResolver) (openAIMessageConversion, error) {

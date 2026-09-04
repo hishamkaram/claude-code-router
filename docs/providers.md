@@ -309,6 +309,14 @@ forced tools, thinking, token counting, cancellation, and sanitized errors.
 Capability-disabled checks are reported as not applicable. A failed declared
 capability does not silently change the model's compatibility setting.
 
+For OpenAI Chat Completions routes, a streamed Claude request stays streamed to
+the provider. CCR consumes bounded OpenAI SSE, preserves fragmented text and
+tool calls, records terminal usage, and emits Anthropic-compatible output.
+Providers that ignore `stream: true` and return one JSON response remain
+compatible. This upstream streaming path is also used by Claude Code's manual
+and automatic compaction summary requests so long generations do not depend on
+a buffered remote HTTP response.
+
 `ccr conformance run --all` runs every non-blocked routable alias with bounded
 provider concurrency, continues after individual failures, and returns nonzero
 when any required alias fails. Provider control aliases and Responses-only

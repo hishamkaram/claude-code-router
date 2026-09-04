@@ -33,12 +33,17 @@ type openAIChatRequest struct {
 	Temperature     *float64              `json:"temperature,omitempty"`
 	Stop            []string              `json:"stop,omitempty"`
 	Stream          bool                  `json:"stream"`
+	StreamOptions   *openAIStreamOptions  `json:"stream_options,omitempty"`
 	User            string                `json:"user,omitempty"`
 	ReasoningEffort string                `json:"reasoning_effort,omitempty"`
 	ResponseFormat  *openAIResponseFormat `json:"response_format,omitempty"`
 	Tools           []openAITool          `json:"tools,omitempty"`
 	ToolChoice      any                   `json:"tool_choice,omitempty"`
 	ParallelTools   *bool                 `json:"parallel_tool_calls,omitempty"`
+}
+
+type openAIStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type openAIResponseFormat struct {
@@ -90,6 +95,16 @@ type openAIChatResponseMessage struct {
 	FunctionCall *openAIFunctionCall `json:"function_call"`
 }
 
+type openAIChatChoice struct {
+	Message      openAIChatResponseMessage `json:"message"`
+	FinishReason string                    `json:"finish_reason"`
+}
+
+type openAIChatUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}
+
 func (m openAIChatResponseMessage) textContent() string {
 	if m.Content == nil {
 		return ""
@@ -98,16 +113,10 @@ func (m openAIChatResponseMessage) textContent() string {
 }
 
 type openAIChatResponse struct {
-	ID      string `json:"id"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Message      openAIChatResponseMessage `json:"message"`
-		FinishReason string                    `json:"finish_reason"`
-	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
+	ID            string             `json:"id"`
+	Model         string             `json:"model"`
+	Choices       []openAIChatChoice `json:"choices"`
+	Usage         openAIChatUsage    `json:"usage"`
 	usageObserved bool
 }
 

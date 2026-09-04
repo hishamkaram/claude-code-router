@@ -42,7 +42,11 @@ func (h *handler) callOpenAICompatible(ctx context.Context, provider store.Provi
 	if err != nil {
 		return openAIChatResponse{}, fmt.Errorf("creating OpenAI-compatible request: %w", err)
 	}
-	req.Header.Set("Accept", "application/json")
+	if payload.Stream {
+		req.Header.Set("Accept", "text/event-stream, application/json")
+	} else {
+		req.Header.Set("Accept", "application/json")
+	}
 	req.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -57,9 +61,9 @@ func (h *handler) callOpenAICompatible(ctx context.Context, provider store.Provi
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, providerErrorDetailReadLimit(apiKey)))
 		return openAIChatResponse{}, newOpenAIProviderStatusError(provider.Name, resp.StatusCode, sanitizeProviderErrorDetail(raw, apiKey))
 	}
-	var decoded openAIChatResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&decoded); err != nil {
-		return openAIChatResponse{}, fmt.Errorf("decoding OpenAI-compatible provider response: %w", err)
+	decoded, err := decodeOpenAIChatProviderResponse(resp, payload.Stream, apiKey)
+	if err != nil {
+		return openAIChatResponse{}, err
 	}
 	if len(decoded.Choices) == 0 {
 		return openAIChatResponse{}, fmt.Errorf("OpenAI-compatible provider %q returned no choices", provider.Name)

@@ -192,7 +192,7 @@ func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
 		}
 		t.Fatalf("fake OpenAI-compatible chat endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
-	if !strings.Contains(out, "Set model to anthropic.ccr.gpt") {
+	if !strings.Contains(normalizeLiveClaudeText(out), normalizeLiveClaudeText("Set model to anthropic.ccr.gpt")) {
 		t.Fatalf("launch output missing model switch confirmation:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(errOut, "No ccr startup model selected") {
@@ -430,12 +430,15 @@ type liveOpenAIChatMessage struct {
 }
 
 type liveOpenAIChatPayload struct {
-	Model       string   `json:"model"`
-	MaxTokens   int      `json:"max_tokens"`
-	Temperature *float64 `json:"temperature"`
-	Stop        []string `json:"stop"`
-	Stream      bool     `json:"stream"`
-	Tools       []struct {
+	Model         string   `json:"model"`
+	MaxTokens     int      `json:"max_tokens"`
+	Temperature   *float64 `json:"temperature"`
+	Stop          []string `json:"stop"`
+	Stream        bool     `json:"stream"`
+	StreamOptions *struct {
+		IncludeUsage bool `json:"include_usage"`
+	} `json:"stream_options"`
+	Tools []struct {
 		Function struct {
 			Name string `json:"name"`
 		} `json:"function"`
