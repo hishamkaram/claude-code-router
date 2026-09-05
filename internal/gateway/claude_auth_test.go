@@ -160,6 +160,44 @@ func TestGatewayFirstPartyForbiddenReturnsSanitizedAuthenticationError(t *testin
 	}
 }
 
+func TestGatewayFirstPartyStreamAuthFailureRecordsNeedsRelogin(t *testing.T) {
+	ctx := context.Background()
+	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"upstream-private-secret"}}`)
+	}))
+	defer anthropic.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:1", SecretRef: ""},
+		store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"},
+	)
+	launchID, err := s.CreateLaunch(ctx, "coder", "running", "running")
+	if err != nil {
+		t.Fatalf("CreateLaunch() error = %v", err)
+	}
+	recorder := observability.NewRecorder(ctx, observability.Config{Store: s, LaunchID: launchID, Enabled: true})
+	server := startGatewayWithConfig(t, ctx, Config{
+		Store: s, Token: "local-token", AnthropicBaseURL: anthropic.URL, Recorder: recorder,
+	})
+	defer shutdownGateway(t, ctx, server)
+
+	resp := postGatewayStreamingModel(t, ctx, server, "sonnet")
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("reading streaming first-party error: %v", readErr)
+	}
+	if resp.StatusCode != http.StatusUnauthorized ||
+		!strings.Contains(string(body), `"authentication_error"`) ||
+		strings.Contains(string(body), "upstream-private-secret") {
+		t.Fatalf("streaming first-party response = %d %s", resp.StatusCode, body)
+	}
+
+	assertClaudeAuthLifecycle(t, ctx, s, launchID, claudeAuthNeedsRelogin)
+}
+
 func TestClaudeAuthStatePersistsAfterRequestCancellation(t *testing.T) {
 	ctx := context.Background()
 	s := newGatewayStore(t,
@@ -176,21 +214,21 @@ func TestClaudeAuthStatePersistsAfterRequestCancellation(t *testing.T) {
 	cancel()
 
 	h.recordClaudeAuthState(canceled, claudeAuthNeedsRelogin, "upstream_authentication_rejected")
-	events, err := s.ListTraceEvents(ctx, store.TraceFilter{
-		LaunchID: launchID, Kind: "lifecycle", Name: claudeAuthLifecycleName, Limit: 1,
-	})
-	if err != nil {
-		t.Fatalf("auth lifecycle events error = %v", err)
-	}
-	if len(events) != 1 || events[0].Lifecycle.Status != string(claudeAuthNeedsRelogin) {
-		t.Fatalf("auth lifecycle events = %#v, want persisted canceled-request transition", events)
-	}
+	assertClaudeAuthLifecycle(t, ctx, s, launchID, claudeAuthNeedsRelogin)
 }
 
 func postGatewayModel(t *testing.T, ctx context.Context, server *Server, model string) *http.Response {
+	return postGatewayModelWithStream(t, ctx, server, model, false)
+}
+
+func postGatewayStreamingModel(t *testing.T, ctx context.Context, server *Server, model string) *http.Response {
+	return postGatewayModelWithStream(t, ctx, server, model, true)
+}
+
+func postGatewayModelWithStream(t *testing.T, ctx context.Context, server *Server, model string, stream bool) *http.Response {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(fmt.Sprintf(
-		`{"model":%q,"messages":[{"role":"user","content":"hello"}]}`, model,
+		`{"model":%q,"messages":[{"role":"user","content":"hello"}],"stream":%t}`, model, stream,
 	)))
 	if err != nil {
 		t.Fatalf("message request = %v", err)
@@ -198,6 +236,20 @@ func postGatewayModel(t *testing.T, ctx context.Context, server *Server, model s
 	req.Header.Set("X-CCR-Session-Token", "local-token")
 	resp, err := http.DefaultClient.Do(req)
 	return mustHTTPResponse(t, resp, err)
+}
+
+func assertClaudeAuthLifecycle(t *testing.T, ctx context.Context, s *store.Store, launchID int64, want claudeAuthState) {
+	t.Helper()
+	events, err := s.ListTraceEvents(ctx, store.TraceFilter{
+		LaunchID: launchID, Kind: "lifecycle", Name: claudeAuthLifecycleName, Limit: 1,
+	})
+	if err != nil {
+		t.Fatalf("auth lifecycle events error = %v", err)
+	}
+	if len(events) != 1 || events[0].Lifecycle.Status != string(want) ||
+		events[0].Lifecycle.Reason != "upstream_authentication_rejected" {
+		t.Fatalf("auth lifecycle events = %#v, want %q", events, want)
+	}
 }
 
 func mustHTTPResponse(t *testing.T, resp *http.Response, err error) *http.Response {

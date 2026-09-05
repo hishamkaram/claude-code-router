@@ -225,14 +225,14 @@ func (f *liveImageToolFixture) handleOpenAI(t *testing.T, w http.ResponseWriter,
 	f.mu.Unlock()
 
 	if toolSearchCall {
-		writeLiveImageToolSearchCall(w, payload.Model, toolSearchName)
+		writeLiveImageToolSearchCall(w, classifierPayload, toolSearchName)
 		return
 	}
 
 	if !toolCallSeen {
 		if toolName == "" {
 			if len(payload.Tools) == 0 {
-				writeLiveImageTextResponse(w, payload.Model)
+				writeLiveImageTextResponse(w, classifierPayload)
 				return
 			}
 			f.setError(fmt.Sprintf("OpenAI request did not expose the fixture image MCP tool: %#v", payload.Tools))
@@ -242,7 +242,7 @@ func (f *liveImageToolFixture) handleOpenAI(t *testing.T, w http.ResponseWriter,
 		f.mu.Lock()
 		f.toolCallSeen = true
 		f.mu.Unlock()
-		writeLiveImageToolCall(w, payload.Model, toolName)
+		writeLiveImageToolCall(w, classifierPayload, toolName)
 		return
 	}
 
@@ -254,8 +254,7 @@ func (f *liveImageToolFixture) handleOpenAI(t *testing.T, w http.ResponseWriter,
 	f.mu.Lock()
 	f.imageResultSeen = true
 	f.mu.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"chatcmpl_live_image","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}`, liveImageToolResult)
+	writeLiveOpenAITextFixture(w, classifierPayload, "chatcmpl_live_image", liveImageToolResult, 9, 3)
 }
 
 func (f *liveImageToolFixture) setError(message string) {
@@ -299,12 +298,13 @@ type liveImageOpenAIMessage struct {
 
 type liveImageOpenAIRequest struct {
 	Model    string                   `json:"model"`
+	Stream   bool                     `json:"stream"`
 	Tools    []liveImageOpenAITool    `json:"tools"`
 	Messages []liveImageOpenAIMessage `json:"messages"`
 }
 
 func liveImageClassifierPayload(payload liveImageOpenAIRequest) liveOpenAIChatPayload {
-	classifier := liveOpenAIChatPayload{Model: payload.Model}
+	classifier := liveOpenAIChatPayload{Model: payload.Model, Stream: payload.Stream}
 	for _, message := range payload.Messages {
 		var content string
 		if err := json.Unmarshal(message.Content, &content); err != nil {
@@ -357,51 +357,16 @@ func liveOpenAIImageToolResultConverted(messages []liveImageOpenAIMessage) bool 
 	return toolIndex >= 0 && imageIndex > toolIndex
 }
 
-func writeLiveImageToolCall(w http.ResponseWriter, model, name string) {
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id": "chatcmpl_live_image_tool",
-		"choices": []map[string]any{{
-			"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{{
-					"id":   "toolu_live_image",
-					"type": "function",
-					"function": map[string]string{
-						"name":      name,
-						"arguments": "{}",
-					},
-				}},
-			},
-			"finish_reason": "tool_calls",
-		}},
-		"model": model,
-	})
+func writeLiveImageToolCall(w http.ResponseWriter, payload liveOpenAIChatPayload, name string) {
+	writeLiveOpenAIToolFixture(w, payload, "chatcmpl_live_image_tool", "toolu_live_image", name, map[string]any{})
 }
 
-func writeLiveImageTextResponse(w http.ResponseWriter, model string) {
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"chatcmpl_live_image_text","choices":[{"message":{"content":"model-switch-live-ok"},"finish_reason":"stop"}],"model":%q}`, model)
+func writeLiveImageTextResponse(w http.ResponseWriter, payload liveOpenAIChatPayload) {
+	writeLiveOpenAITextFixture(w, payload, "chatcmpl_live_image_text", "model-switch-live-ok", 4, 2)
 }
 
-func writeLiveImageToolSearchCall(w http.ResponseWriter, model, name string) {
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id": "chatcmpl_live_tool_search",
-		"choices": []map[string]any{{
-			"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{{
-					"id":   "toolu_live_tool_search",
-					"type": "function",
-					"function": map[string]string{
-						"name":      name,
-						"arguments": `{"query":"fixture image"}`,
-					},
-				}},
-			},
-			"finish_reason": "tool_calls",
-		}},
-		"model": model,
-	})
+func writeLiveImageToolSearchCall(w http.ResponseWriter, payload liveOpenAIChatPayload, name string) {
+	writeLiveOpenAIToolFixture(w, payload, "chatcmpl_live_tool_search", "toolu_live_tool_search", name, map[string]string{"query": "fixture image"})
 }
 
 func writeLiveImageMCPConfig(t *testing.T) string {

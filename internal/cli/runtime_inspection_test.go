@@ -288,7 +288,7 @@ func seedRuntimeInspectionStore(t *testing.T) (string, int64, int64) {
 		t.Fatalf("ResolveRouteEvent() error = %v", err)
 	}
 	if err := s.CompleteRouteEvent(ctx, eventID, "succeeded", 200, "", 10*time.Millisecond,
-		store.TokenUsage{Observed: true, InputTokens: 5, OutputTokens: 2}); err != nil {
+		store.TokenUsage{Observed: true, InputTokens: 5, OutputTokens: 2}, nil); err != nil {
 		t.Fatalf("CompleteRouteEvent() error = %v", err)
 	}
 	if _, err := s.RecordLifecycleEvent(ctx, store.LifecycleEvent{

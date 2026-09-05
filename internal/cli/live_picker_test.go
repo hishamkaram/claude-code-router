@@ -90,9 +90,7 @@ func newLivePickerProvider(t *testing.T) (chan string, *httptest.Server) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"},{"id":"third-party-sonnet"},{"id":"third-party-opus"},{"id":"third-party-haiku"}]}`)
 		case "/v1/chat/completions":
-			var payload struct {
-				Model string `json:"model"`
-			}
+			var payload liveOpenAIChatPayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Errorf("provider decode error = %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
@@ -102,8 +100,7 @@ func newLivePickerProvider(t *testing.T) (chan string, *httptest.Server) {
 			case routedModel <- payload.Model:
 			default:
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"chatcmpl-picker","choices":[{"message":{"content":"picker-route-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+			writeLiveOpenAITextFixture(w, payload, "chatcmpl-picker", "picker-route-ok", 4, 2)
 		default:
 			http.NotFound(w, r)
 		}

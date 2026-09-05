@@ -5,6 +5,19 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.10
+
+- Stream OpenAI Chat Completions, OpenAI Responses, Anthropic-compatible, and
+  managed computer-use provider responses incrementally through CCR instead of
+  buffering a completed upstream body before emitting Anthropic SSE.
+- Preserve Claude Code compaction accounting with a bounded pre-stream input
+  estimate and a unique gateway message ID for every translated response.
+- Keep SSE protocol behavior reliable across CRLF framing, delayed native
+  `message_start` events, terminal usage chunks, tool-call arguments, and
+  in-band provider failures.
+- Record stream lifecycle, terminal phase, and token telemetry without logging
+  provider secrets or silently falling back to Claude.
+
 ## v0.4.8
 
 - Let `ccr launch --model <alias>` use configured providers when Claude

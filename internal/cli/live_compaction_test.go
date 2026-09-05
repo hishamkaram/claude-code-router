@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,20 +30,18 @@ func TestLiveClaudeManualCompactThroughOpenAIProvider(t *testing.T) {
 	ctx := liveCompactionContext(t)
 	fixture := newLiveCompactionFixture(t)
 	dbPath := configureLiveCompactionModel(t, ctx, fixture.URL())
-	launchTurn := liveCompactionLauncher(t, ctx, dbPath, "4ad59989-45ea-4e90-a133-78f15b1ce47f")
-
-	seedLiveCompactionHistory(t, launchTurn, 8)
-	compactOut, compactErrOut, err := launchTurn("/compact", false)
-	if err != nil {
-		t.Fatalf("manual compact launch error = %v\nstdout:\n%s\nstderr:\n%s", err, compactOut, compactErrOut)
+	run := startLiveCompactionRun(t, ctx, dbPath, "4ad59989-45ea-4e90-a133-78f15b1ce47f")
+	for _, message := range liveCompactionHistoryMessages(16, "manual-compaction") {
+		run.sendAndWaitNext(t, ctx, fixture, message)
 	}
-	if strings.Contains(compactOut, `"compact_result":"failed"`) {
-		t.Fatalf("manual compact failed\nstdout:\n%s\nstderr:\n%s", compactOut, compactErrOut)
-	}
-
-	out, errOut, err := launchTurn("Reply with the configured response after compacting.", false)
+	run.sendAndWaitForCompaction(t, ctx, fixture, "/compact")
+	run.sendAndWaitNext(t, ctx, fixture, "Reply with the configured response after compacting.")
+	out, errOut, err := run.finish(ctx)
 	if err != nil {
-		t.Fatalf("post-compact continuation launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+		t.Fatalf("manual compact launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if strings.Contains(out, `"compact_result":"failed"`) {
+		t.Fatalf("manual compact failed\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(out, liveCompactionAfter) {
 		t.Fatalf("output missing post-compact response\nstdout:\n%s\nstderr:\n%s", out, errOut)
@@ -54,30 +53,22 @@ func TestLiveClaudeAutoCompactThroughOpenAIProvider(t *testing.T) {
 	ctx := liveCompactionContext(t)
 	fixture := newLiveCompactionFixture(t)
 	dbPath := configureLiveCompactionModel(t, ctx, fixture.URL())
-	launchTurn := liveCompactionLauncher(
-		t, ctx, dbPath, "8b814572-96c7-45bf-a9fb-da2345fc4d25", "--autocompact", "100k",
-	)
-
-	historyBlock := strings.Repeat("bounded synthetic automatic compact history detail ", 1500)
-	var lastOut, lastErrOut string
-	for index := 0; index < 12 && fixture.compactionCount() == 0; index++ {
-		prompt := fmt.Sprintf("Retain the session marker %s and automatic-compaction decision %d. %s", liveCompactionMarker, index+1, historyBlock)
-		var err error
-		lastOut, lastErrOut, err = launchTurn(prompt, index == 0)
-		if err != nil {
-			t.Fatalf("auto-compact history turn %d error = %v\nstdout:\n%s\nstderr:\n%s", index+1, err, lastOut, lastErrOut)
-		}
-		if strings.Contains(lastOut, "automatic compaction failed") || strings.Contains(lastOut, `"compact_result":"failed"`) {
-			t.Fatalf("automatic compaction failed on turn %d\nstdout:\n%s\nstderr:\n%s", index+1, lastOut, lastErrOut)
-		}
+	run := startLiveCompactionRun(t, ctx, dbPath, "8b814572-96c7-45bf-a9fb-da2345fc4d25", "--autocompact", "100k")
+	for _, message := range liveCompactionHistoryMessages(4, "automatic-compaction") {
+		run.sendAndWaitNext(t, ctx, fixture, message)
+	}
+	run.sendAndWaitNext(t, ctx, fixture, "Prepare automatic compaction using the retained session marker.")
+	run.waitForCompletedCompaction(t, ctx, fixture, 1)
+	run.sendAndWaitNext(t, ctx, fixture, "Continue after automatic compaction using the retained session marker.")
+	out, errOut, err := run.finish(ctx)
+	if err != nil {
+		t.Fatalf("automatic compaction launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if strings.Contains(out, "automatic compaction failed") || strings.Contains(out, `"compact_result":"failed"`) {
+		t.Fatalf("automatic compaction failed\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if fixture.compactionCount() == 0 {
-		t.Fatalf("Claude Code did not issue an automatic compaction request\nstdout:\n%s\nstderr:\n%s", lastOut, lastErrOut)
-	}
-
-	out, errOut, err := launchTurn("Continue after automatic compaction using the retained session marker.", false)
-	if err != nil {
-		t.Fatalf("post-auto-compact continuation error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+		t.Fatalf("Claude Code did not issue an automatic compaction request\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(out, liveCompactionAfter) {
 		t.Fatalf("auto-compact continuation missing configured response\nstdout:\n%s\nstderr:\n%s", out, errOut)
@@ -119,43 +110,171 @@ func configureLiveCompactionModel(t *testing.T, ctx context.Context, baseURL str
 	return dbPath
 }
 
-type liveCompactionLaunch func(input string, first bool) (string, string, error)
+type liveCompactionRun struct {
+	input  *io.PipeWriter
+	out    *synchronizedBuffer
+	errOut *synchronizedBuffer
+	cancel context.CancelFunc
+	done   chan struct{}
+	err    error
+}
 
-func liveCompactionLauncher(t *testing.T, ctx context.Context, dbPath, sessionID string, claudeArgs ...string) liveCompactionLaunch {
+func startLiveCompactionRun(t *testing.T, ctx context.Context, dbPath, sessionID string, claudeArgs ...string) *liveCompactionRun {
 	t.Helper()
-	return func(input string, first bool) (string, string, error) {
-		args := []string{
-			"--db", dbPath, "launch", "--model", "compact-fixture", "--print",
-			"--auth-mode", "gateway-token",
-			"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+	runCtx, cancel := context.WithCancel(ctx)
+	reader, writer := io.Pipe()
+	run := &liveCompactionRun{
+		input:  writer,
+		out:    &synchronizedBuffer{},
+		errOut: &synchronizedBuffer{},
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	args := []string{
+		"--db", dbPath, "launch", "--model", "compact-fixture", "--print",
+		"--auth-mode", "gateway-token",
+		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--session-id", sessionID,
+	}
+	args = append(args, claudeArgs...)
+	go func() {
+		cmd := NewRootCommand(runCtx, Dependencies{In: reader, Out: run.out, Err: run.errOut})
+		cmd.SetArgs(args)
+		run.err = cmd.Execute()
+		close(run.done)
+	}()
+	t.Cleanup(run.abort)
+	return run
+}
+
+func (r *liveCompactionRun) sendAndWait(t *testing.T, ctx context.Context, fixture *liveCompactionFixture, message string, wantResponses int) {
+	t.Helper()
+	wantResults := r.resultCount() + 1
+	r.send(t, message)
+	r.waitForResponses(t, ctx, fixture, wantResponses)
+	r.waitForResults(t, ctx, wantResults)
+}
+
+func (r *liveCompactionRun) sendAndWaitNext(t *testing.T, ctx context.Context, fixture *liveCompactionFixture, message string) {
+	t.Helper()
+	r.sendAndWait(t, ctx, fixture, message, fixture.responseCount()+1)
+}
+
+func (r *liveCompactionRun) sendAndWaitForCompaction(t *testing.T, ctx context.Context, fixture *liveCompactionFixture, message string) {
+	t.Helper()
+	wantCompactions := fixture.completedCompactionCount() + 1
+	r.send(t, message)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if fixture.completedCompactionCount() >= wantCompactions {
+			return
 		}
-		if first {
-			args = append(args, "--session-id", sessionID)
-		} else {
-			args = append(args, "--resume", sessionID)
+		out := r.out.String()
+		if strings.Contains(out, `"compact_result":"failed"`) {
+			t.Fatalf("Claude Code rejected compaction before contacting the provider\nstdout:\n%s\nstderr:\n%s", out, r.errOut.String())
 		}
-		args = append(args, claudeArgs...)
-		return runLiveCommand(ctx, Dependencies{In: strings.NewReader(liveStreamInput(t, input))}, args...)
+		select {
+		case <-r.done:
+			t.Fatalf("Claude Code exited before completing compaction: %v\nstdout:\n%s\nstderr:\n%s", r.err, out, r.errOut.String())
+		case <-ctx.Done():
+			t.Fatalf("waiting for completed compaction response: %v\nstdout:\n%s\nstderr:\n%s", ctx.Err(), out, r.errOut.String())
+		case <-ticker.C:
+		}
 	}
 }
 
-func seedLiveCompactionHistory(t *testing.T, launchTurn liveCompactionLaunch, turns int) {
+func (r *liveCompactionRun) send(t *testing.T, message string) {
 	t.Helper()
-	historyBlock := strings.Repeat("bounded synthetic manual compact history detail ", 1500)
-	for index := 0; index < turns; index++ {
-		prompt := fmt.Sprintf("Retain the session marker %s and manual-compaction decision %d. %s", liveCompactionMarker, index+1, historyBlock)
-		out, errOut, err := launchTurn(prompt, index == 0)
-		if err != nil {
-			t.Fatalf("compact history turn %d error = %v\nstdout:\n%s\nstderr:\n%s", index+1, err, out, errOut)
+	if _, err := io.WriteString(r.input, liveStreamInput(t, message)); err != nil {
+		t.Fatalf("writing live compaction input: %v\nstdout:\n%s\nstderr:\n%s", err, r.out.String(), r.errOut.String())
+	}
+}
+
+func (r *liveCompactionRun) waitForResponses(t *testing.T, ctx context.Context, fixture *liveCompactionFixture, want int) {
+	t.Helper()
+	r.waitFor(t, ctx, fmt.Sprintf("%d provider responses", want), func() bool {
+		return fixture.responseCount() >= want
+	})
+}
+
+func (r *liveCompactionRun) waitForCompletedCompaction(t *testing.T, ctx context.Context, fixture *liveCompactionFixture, want int) {
+	t.Helper()
+	r.waitFor(t, ctx, fmt.Sprintf("%d completed compaction responses", want), func() bool {
+		return fixture.completedCompactionCount() >= want
+	})
+}
+
+func (r *liveCompactionRun) waitForResults(t *testing.T, ctx context.Context, want int) {
+	t.Helper()
+	r.waitFor(t, ctx, fmt.Sprintf("%d Claude Code results", want), func() bool {
+		return r.resultCount() >= want
+	})
+}
+
+func (r *liveCompactionRun) waitFor(t *testing.T, ctx context.Context, want string, ready func() bool) {
+	t.Helper()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if ready() {
+			return
+		}
+		select {
+		case <-r.done:
+			t.Fatalf("Claude Code exited before %s: %v\nstdout:\n%s\nstderr:\n%s", want, r.err, r.out.String(), r.errOut.String())
+		case <-ctx.Done():
+			t.Fatalf("waiting for %s: %v\nstdout:\n%s\nstderr:\n%s", want, ctx.Err(), r.out.String(), r.errOut.String())
+		case <-ticker.C:
 		}
 	}
+}
+
+func (r *liveCompactionRun) resultCount() int {
+	out := r.out.String()
+	return strings.Count(out, `"type":"result"`) + strings.Count(out, `"type": "result"`)
+}
+
+func (r *liveCompactionRun) finish(ctx context.Context) (string, string, error) {
+	_ = r.input.Close()
+	select {
+	case <-r.done:
+		r.cancel()
+		return r.out.String(), r.errOut.String(), r.err
+	case <-ctx.Done():
+		r.abort()
+		return r.out.String(), r.errOut.String(), ctx.Err()
+	}
+}
+
+func (r *liveCompactionRun) abort() {
+	_ = r.input.Close()
+	r.cancel()
+	select {
+	case <-r.done:
+	case <-time.After(10 * time.Second):
+	}
+}
+
+func liveCompactionHistoryMessages(turns int, mode string) []string {
+	historyBlock := strings.Repeat("bounded synthetic "+mode+" history detail ", 1500)
+	messages := make([]string, 0, turns)
+	for index := 0; index < turns; index++ {
+		messages = append(messages, fmt.Sprintf(
+			"Retain the session marker %s and %s decision %d. %s",
+			liveCompactionMarker, mode, index+1, historyBlock,
+		))
+	}
+	return messages
 }
 
 type liveCompactionFixture struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	reqs   []liveOpenAIChatPayload
-	count  int
+	server               *httptest.Server
+	mu                   sync.Mutex
+	reqs                 []liveOpenAIChatPayload
+	count                int
+	responses            int
+	completedCompactions int
 }
 
 func newLiveCompactionFixture(t *testing.T) *liveCompactionFixture {
@@ -218,6 +337,12 @@ func (f *liveCompactionFixture) handleChat(t *testing.T, w http.ResponseWriter, 
 		promptTokens = 1
 	}
 	writeLiveOpenAIChatStream(w, call, response, promptTokens)
+	f.mu.Lock()
+	f.responses++
+	if isCompaction {
+		f.completedCompactions++
+	}
+	f.mu.Unlock()
 }
 
 func closeLiveProviderConnection(t *testing.T, w http.ResponseWriter) {
@@ -270,6 +395,18 @@ func (f *liveCompactionFixture) compactionCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.count
+}
+
+func (f *liveCompactionFixture) responseCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.responses
+}
+
+func (f *liveCompactionFixture) completedCompactionCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.completedCompactions
 }
 
 func assertLiveCompactionTraffic(t *testing.T, requests []liveOpenAIChatPayload) {

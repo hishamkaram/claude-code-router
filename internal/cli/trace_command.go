@@ -22,23 +22,33 @@ type traceUsageView struct {
 	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 }
 
+type traceStreamView struct {
+	UpstreamHeadersMS      int64  `json:"upstream_headers_ms"`
+	FirstUpstreamEventMS   int64  `json:"first_upstream_event_ms"`
+	FirstDownstreamEventMS int64  `json:"first_downstream_event_ms"`
+	UpstreamEventCount     int64  `json:"upstream_event_count"`
+	EarlyStreamCommit      bool   `json:"early_stream_commit"`
+	TerminalPhase          string `json:"terminal_phase"`
+}
+
 type traceRouteView struct {
-	RequestID      string         `json:"request_id"`
-	Operation      string         `json:"operation"`
-	RequestedModel string         `json:"requested_model"`
-	RouteKind      string         `json:"route_kind,omitempty"`
-	ModelAlias     string         `json:"model_alias,omitempty"`
-	ProviderName   string         `json:"provider_name,omitempty"`
-	ProviderModel  string         `json:"provider_model,omitempty"`
-	Protocol       string         `json:"protocol,omitempty"`
-	Streaming      bool           `json:"streaming"`
-	Tools          bool           `json:"tools"`
-	Thinking       bool           `json:"thinking"`
-	Status         string         `json:"status"`
-	HTTPStatus     int            `json:"http_status,omitempty"`
-	ErrorClass     string         `json:"error_class,omitempty"`
-	LatencyMS      int64          `json:"latency_ms"`
-	Usage          traceUsageView `json:"usage"`
+	RequestID      string           `json:"request_id"`
+	Operation      string           `json:"operation"`
+	RequestedModel string           `json:"requested_model"`
+	RouteKind      string           `json:"route_kind,omitempty"`
+	ModelAlias     string           `json:"model_alias,omitempty"`
+	ProviderName   string           `json:"provider_name,omitempty"`
+	ProviderModel  string           `json:"provider_model,omitempty"`
+	Protocol       string           `json:"protocol,omitempty"`
+	Streaming      bool             `json:"streaming"`
+	Tools          bool             `json:"tools"`
+	Thinking       bool             `json:"thinking"`
+	Status         string           `json:"status"`
+	HTTPStatus     int              `json:"http_status,omitempty"`
+	ErrorClass     string           `json:"error_class,omitempty"`
+	LatencyMS      int64            `json:"latency_ms"`
+	Usage          traceUsageView   `json:"usage"`
+	Stream         *traceStreamView `json:"stream,omitempty"`
 }
 
 type traceLifecycleView struct {
@@ -294,7 +304,7 @@ func newTraceEventView(event store.TraceEvent) traceEventView {
 }
 
 func newTraceRouteView(route store.RouteEvent) traceRouteView {
-	return traceRouteView{
+	view := traceRouteView{
 		RequestID: route.RequestID, Operation: route.Operation,
 		RequestedModel: route.RequestedModel, RouteKind: route.RouteKind,
 		ModelAlias: route.ModelAlias, ProviderName: route.ProviderName,
@@ -308,6 +318,17 @@ func newTraceRouteView(route store.RouteEvent) traceRouteView {
 			CacheWriteTokens: route.Usage.CacheWriteTokens,
 		},
 	}
+	if route.Stream.Observed {
+		view.Stream = &traceStreamView{
+			UpstreamHeadersMS:      route.Stream.UpstreamHeadersMS,
+			FirstUpstreamEventMS:   route.Stream.FirstUpstreamEventMS,
+			FirstDownstreamEventMS: route.Stream.FirstDownstreamEventMS,
+			UpstreamEventCount:     route.Stream.UpstreamEventCount,
+			EarlyStreamCommit:      route.Stream.EarlyStreamCommit,
+			TerminalPhase:          route.Stream.TerminalPhase,
+		}
+	}
+	return view
 }
 
 func writeHumanTrace(cmd *cobra.Command, events []traceEventView) {
@@ -329,9 +350,16 @@ func writeHumanTraceEvent(cmd *cobra.Command, event traceEventView) {
 				route.Usage.InputTokens, route.Usage.OutputTokens,
 				route.Usage.CacheReadTokens, route.Usage.CacheWriteTokens)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%d\t%s\troute\t%s\t%s/%s\tstatus=%s http=%d latency=%dms %s\n",
+		stream := ""
+		if route.Stream != nil {
+			stream = fmt.Sprintf(" stream=headers:%dms first-upstream:%dms first-downstream:%dms events:%d early:%t terminal:%s",
+				route.Stream.UpstreamHeadersMS, route.Stream.FirstUpstreamEventMS,
+				route.Stream.FirstDownstreamEventMS, route.Stream.UpstreamEventCount,
+				route.Stream.EarlyStreamCommit, route.Stream.TerminalPhase)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%d\t%s\troute\t%s\t%s/%s\tstatus=%s http=%d latency=%dms %s%s\n",
 			event.ID, event.OccurredAt, route.ModelAlias, route.ProviderName,
-			route.ProviderModel, route.Status, route.HTTPStatus, route.LatencyMS, usage)
+			route.ProviderModel, route.Status, route.HTTPStatus, route.LatencyMS, usage, stream)
 		return
 	}
 	if event.Lifecycle != nil {

@@ -281,32 +281,31 @@ func (f *liveClaudeConformanceFixture) handleOpenAI(t *testing.T, w http.Respons
 		waitForFixtureCancellation(r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case liveToolsContain(payload.Tools, "ccr_probe"):
-		writeOpenAIToolCall(w, "ccr_probe", "toolu_conformance", map[string]any{})
+		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-conformance", "toolu_conformance", "ccr_probe", map[string]any{})
 	case !f.workflowStarted() && strings.Contains(latest, claudeConformanceWorkflowParent):
 		f.markWorkflow()
-		writeOpenAIToolCall(w, "Workflow", "toolu_workflow_conformance", map[string]any{"script": conformanceWorkflowScript()})
+		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-conformance-workflow", "toolu_workflow_conformance", "Workflow", map[string]any{"script": conformanceWorkflowScript()})
 	case f.workflowStarted() && openAIMessagesContain(payload.Messages, "<task-notification>"):
-		f.writeOpenAIText(w, claudeConformanceWorkflowParent)
+		f.writeOpenAIText(w, payload, claudeConformanceWorkflowParent)
 	case f.workflowStarted() && openAIMessagesContain(payload.Messages, "Workflow launched in background"):
-		f.writeOpenAIText(w, claudeConformanceWorkflowParent)
+		f.writeOpenAIText(w, payload, claudeConformanceWorkflowParent)
 	case f.workflowStarted() && strings.Contains(latest, "subagent spawned by a workflow orchestration script") && strings.Contains(latest, claudeConformanceWorkflowChild):
-		f.writeOpenAIText(w, claudeConformanceWorkflowChild)
+		f.writeOpenAIText(w, payload, claudeConformanceWorkflowChild)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") &&
 		(strings.Contains(latest, "tool_result") || strings.HasPrefix(latest, "tool ")):
-		f.writeOpenAIText(w, claudeConformanceAgentParent)
+		f.writeOpenAIText(w, payload, claudeConformanceAgentParent)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && !strings.Contains(latest, claudeConformanceAgentParent):
-		f.writeOpenAIText(w, "CCR_CONFORMANCE_AGENT_CHILD_OK")
+		f.writeOpenAIText(w, payload, "CCR_CONFORMANCE_AGENT_CHILD_OK")
 	case strings.Contains(latest, claudeConformanceAgentParent):
 		f.markAgentTool()
-		writeOpenAIToolCall(w, "Agent", "toolu_agent_conformance", map[string]any{
+		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-conformance-agent", "toolu_agent_conformance", "Agent", map[string]any{
 			"description": "return conformance sentinel", "prompt": "Return exactly CCR_CONFORMANCE_AGENT_CHILD_OK.",
 			"subagent_type": "general-purpose", "run_in_background": false,
 		})
 	default:
-		f.writeOpenAIText(w, latestConformanceSentinel(latest))
+		f.writeOpenAIText(w, payload, latestConformanceSentinel(latest))
 	}
 }
 
@@ -326,7 +325,7 @@ func (f *liveClaudeConformanceFixture) handleResponses(t *testing.T, w http.Resp
 	f.recordAlias(payload.Model)
 	if isLiveResponsesAutoClassifierRequest(payload) {
 		f.recordSelectedClassifier(false)
-		writeLiveResponsesText(w, payload.Model, liveClassifierAllowResponse(payload.Instructions))
+		writeLiveResponsesTextFixture(w, payload, "resp_conformance_classifier", liveClassifierAllowResponse(payload.Instructions), 9, 3)
 		return
 	}
 	latest := latestResponsesInput(payload.Input)
@@ -337,29 +336,29 @@ func (f *liveClaudeConformanceFixture) handleResponses(t *testing.T, w http.Resp
 	}
 	switch {
 	case liveResponsesToolsContain(payload.Tools, "ccr_probe"):
-		writeLiveResponsesFunctionCall(w, payload.Model, "ccr_probe", "toolu_conformance", map[string]any{})
+		writeLiveResponsesToolFixture(w, payload, "resp_conformance", "toolu_conformance", "ccr_probe", map[string]any{})
 	case !f.workflowStarted() && strings.Contains(latest, claudeConformanceWorkflowParent):
 		f.markWorkflow()
-		writeLiveResponsesFunctionCall(w, payload.Model, "Workflow", "toolu_workflow_conformance", map[string]any{"script": conformanceWorkflowScript()})
+		writeLiveResponsesToolFixture(w, payload, "resp_conformance_workflow", "toolu_workflow_conformance", "Workflow", map[string]any{"script": conformanceWorkflowScript()})
 	case f.workflowStarted() && responsesInputContains(payload.Input, "<task-notification>"):
-		writeLiveResponsesText(w, payload.Model, claudeConformanceWorkflowParent)
+		writeLiveResponsesTextFixture(w, payload, "resp_conformance", claudeConformanceWorkflowParent, 4, 2)
 	case f.workflowStarted() && responsesInputContains(payload.Input, "Workflow launched in background"):
-		writeLiveResponsesText(w, payload.Model, claudeConformanceWorkflowParent)
+		writeLiveResponsesTextFixture(w, payload, "resp_conformance", claudeConformanceWorkflowParent, 4, 2)
 	case f.workflowStarted() && strings.Contains(payload.Instructions, "subagent spawned by a workflow orchestration script") &&
 		strings.Contains(latest, claudeConformanceWorkflowChild):
-		writeLiveResponsesText(w, payload.Model, claudeConformanceWorkflowChild)
+		writeLiveResponsesTextFixture(w, payload, "resp_conformance", claudeConformanceWorkflowChild, 4, 2)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && responsesInputHasToolOutput(payload.Input):
-		writeLiveResponsesText(w, payload.Model, claudeConformanceAgentParent)
+		writeLiveResponsesTextFixture(w, payload, "resp_conformance", claudeConformanceAgentParent, 4, 2)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && !strings.Contains(latest, claudeConformanceAgentParent):
-		writeLiveResponsesText(w, payload.Model, "CCR_CONFORMANCE_AGENT_CHILD_OK")
+		writeLiveResponsesTextFixture(w, payload, "resp_conformance", "CCR_CONFORMANCE_AGENT_CHILD_OK", 4, 2)
 	case strings.Contains(latest, claudeConformanceAgentParent):
 		f.markAgentTool()
-		writeLiveResponsesFunctionCall(w, payload.Model, "Agent", "toolu_agent_conformance", map[string]any{
+		writeLiveResponsesToolFixture(w, payload, "resp_conformance_agent", "toolu_agent_conformance", "Agent", map[string]any{
 			"description": "return conformance sentinel", "prompt": "Return exactly CCR_CONFORMANCE_AGENT_CHILD_OK.",
 			"subagent_type": "general-purpose", "run_in_background": false,
 		})
 	default:
-		writeLiveResponsesText(w, payload.Model, latestConformanceSentinel(latest))
+		writeLiveResponsesTextFixture(w, payload, "resp_conformance", latestConformanceSentinel(latest), 4, 2)
 	}
 }
 
@@ -568,19 +567,8 @@ func waitForFixtureCancellation(r *http.Request) {
 	}
 }
 
-func writeOpenAIToolCall(w http.ResponseWriter, name, id string, input map[string]any) {
-	arguments, _ := json.Marshal(input)
-	_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"content":"","tool_calls":[{"id":%q,"type":"function","function":{"name":%q,"arguments":%q}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, id, name, string(arguments))
-}
-
-func writeLiveResponsesFunctionCall(w http.ResponseWriter, model, name, id string, input map[string]any) {
-	arguments, _ := json.Marshal(input)
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"resp_conformance","model":%q,"output":[{"type":"function_call","call_id":%q,"name":%q,"arguments":%q}],"usage":{"input_tokens":4,"output_tokens":2}}`, model, id, name, string(arguments))
-}
-
-func (f *liveClaudeConformanceFixture) writeOpenAIText(w http.ResponseWriter, text string) {
-	_, _ = fmt.Fprintf(w, `{"choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, text)
+func (f *liveClaudeConformanceFixture) writeOpenAIText(w http.ResponseWriter, payload liveOpenAIChatPayload, text string) {
+	writeLiveOpenAITextFixture(w, payload, "chatcmpl-conformance", text, 4, 2)
 }
 
 func writeAnthropicFixtureToolCall(w http.ResponseWriter, payload liveAnthropicMessagePayload, name, id string, input map[string]any) {

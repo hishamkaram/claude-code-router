@@ -46,8 +46,7 @@ func TestLiveLaunchOpenAIProviderReceivesCurrentRouteIdentity(t *testing.T) {
 				http.Error(w, "missing route identity", http.StatusBadRequest)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"chatcmpl-live-identity","choices":[{"message":{"content":"CCR_LIVE_ROUTE_IDENTITY_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+			writeLiveOpenAITextFixture(w, payload, "chatcmpl-live-identity", "CCR_LIVE_ROUTE_IDENTITY_OK", 4, 2)
 		default:
 			http.NotFound(w, r)
 		}

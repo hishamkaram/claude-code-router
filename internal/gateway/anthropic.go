@@ -16,7 +16,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string, firstParty bool) observability.TokenUsage {
+func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string, firstParty, stream bool, completion *routeCompletionState) observability.TokenUsage {
 	body, status, message := readAnthropicPassThroughBody(r, body)
 	if status != 0 {
 		writeAnthropicError(w, status, message)
@@ -41,6 +41,22 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 			writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(provider.SecretRef)))
 			return observability.TokenUsage{}
 		}
+	}
+	if stream {
+		usage, result := h.handleAnthropicPassThroughStream(
+			w,
+			r,
+			body,
+			endpoint,
+			provider,
+			authMode,
+			resource,
+			providerSecret,
+			responseModel,
+			firstParty,
+		)
+		recordStreamCompletion(completion, result)
+		return usage
 	}
 	resp, err := h.executeAnthropicPassThrough(r, body, endpoint, provider, authMode, resource, providerSecret)
 	if err != nil {

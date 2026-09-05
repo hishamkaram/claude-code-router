@@ -107,6 +107,15 @@ func TestAnthropicResponseFromResponsesJSONIncludesEmptyTextField(t *testing.T) 
 	}
 }
 
+func TestAnthropicResponseFromResponsesRejectsMissingResponseID(t *testing.T) {
+	t.Parallel()
+
+	_, err := AnthropicResponseFromResponsesJSON([]byte(`{"model":"gpt","output":[]}`))
+	if !errors.Is(err, ErrMalformedProviderOutput) || !strings.Contains(err.Error(), "missing an id") {
+		t.Fatalf("AnthropicResponseFromResponsesJSON() error = %v, want missing id error", err)
+	}
+}
+
 func TestOutputItemNormalizesSingularComputerAction(t *testing.T) {
 	t.Parallel()
 

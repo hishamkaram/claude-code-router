@@ -176,8 +176,7 @@ func (f *liveCitationFixture) handleOpenAI(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unexpected model", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"chatcmpl_live_citations","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`, liveCitationSuccess)
+	writeLiveOpenAITextFixture(w, payload, "chatcmpl_live_citations", liveCitationSuccess, 7, 3)
 }
 
 func (f *liveCitationFixture) setError(message string) {

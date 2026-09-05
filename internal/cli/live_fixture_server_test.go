@@ -127,8 +127,208 @@ func liveClassifierAllowResponse(system string) string {
 
 func writeLiveOpenAIClassifierResponse(w http.ResponseWriter, payload liveOpenAIChatPayload) {
 	text := liveClassifierAllowResponse(openAIMessagesText(payload.Messages))
+	writeLiveOpenAITextFixture(w, payload, "chatcmpl-live-classifier", text, 9, 3)
+}
+
+func writeLiveOpenAITextFixture(
+	w http.ResponseWriter,
+	payload liveOpenAIChatPayload,
+	id, content string,
+	promptTokens, completionTokens int,
+) {
+	if payload.Stream {
+		writeLiveOpenAIStreamFrames(w, []any{
+			map[string]any{
+				"id": id,
+				"choices": []any{map[string]any{
+					"index": 0,
+					"delta": map[string]any{"content": content},
+				}},
+			},
+			map[string]any{
+				"id": id,
+				"choices": []any{map[string]any{
+					"index":         0,
+					"delta":         map[string]any{},
+					"finish_reason": "stop",
+				}},
+			},
+			map[string]any{
+				"id":      id,
+				"choices": []any{},
+				"usage":   map[string]int{"prompt_tokens": promptTokens, "completion_tokens": completionTokens},
+			},
+		})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-live-classifier","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":3}}`, text)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": id,
+		"choices": []any{map[string]any{
+			"message":       map[string]string{"content": content},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]int{"prompt_tokens": promptTokens, "completion_tokens": completionTokens},
+	})
+}
+
+func writeLiveOpenAIToolFixture(
+	w http.ResponseWriter,
+	payload liveOpenAIChatPayload,
+	id, callID, name string,
+	input any,
+) {
+	arguments, err := json.Marshal(input)
+	if err != nil {
+		http.Error(w, "fixture tool arguments could not be encoded", http.StatusInternalServerError)
+		return
+	}
+	if payload.Stream {
+		writeLiveOpenAIStreamFrames(w, []any{
+			map[string]any{
+				"id": id,
+				"choices": []any{map[string]any{
+					"index": 0,
+					"delta": map[string]any{"tool_calls": []any{map[string]any{
+						"index": 0,
+						"id":    callID,
+						"type":  "function",
+						"function": map[string]string{
+							"name":      name,
+							"arguments": string(arguments),
+						},
+					}}},
+				}},
+			},
+			map[string]any{
+				"id": id,
+				"choices": []any{map[string]any{
+					"index":         0,
+					"delta":         map[string]any{},
+					"finish_reason": "tool_calls",
+				}},
+			},
+			map[string]any{
+				"id":      id,
+				"choices": []any{},
+				"usage":   map[string]int{"prompt_tokens": 4, "completion_tokens": 3},
+			},
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id": id,
+		"choices": []any{map[string]any{
+			"message": map[string]any{
+				"content": "",
+				"tool_calls": []any{map[string]any{
+					"id":       callID,
+					"type":     "function",
+					"function": map[string]string{"name": name, "arguments": string(arguments)},
+				}},
+			},
+			"finish_reason": "tool_calls",
+		}},
+		"usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 3},
+	})
+}
+
+func writeLiveOpenAIStreamFrames(w http.ResponseWriter, frames []any) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	flusher, _ := w.(http.Flusher)
+	for _, frame := range frames {
+		encoded, err := json.Marshal(frame)
+		if err != nil {
+			http.Error(w, "fixture stream frame could not be encoded", http.StatusInternalServerError)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+func writeLiveResponsesTextFixture(
+	w http.ResponseWriter,
+	payload openairesponses.Request,
+	id, text string,
+	promptTokens, completionTokens int,
+) {
+	writeLiveResponsesFixtureResponse(w, payload, map[string]any{
+		"id":     id,
+		"model":  payload.Model,
+		"status": "completed",
+		"output": []any{map[string]any{
+			"type": "message",
+			"role": "assistant",
+			"content": []any{map[string]string{
+				"type": "output_text",
+				"text": text,
+			}},
+		}},
+		"usage": map[string]int{"input_tokens": promptTokens, "output_tokens": completionTokens},
+	})
+}
+
+func writeLiveResponsesToolFixture(
+	w http.ResponseWriter,
+	payload openairesponses.Request,
+	id, callID, name string,
+	input any,
+) {
+	arguments, err := json.Marshal(input)
+	if err != nil {
+		http.Error(w, "fixture tool arguments could not be encoded", http.StatusInternalServerError)
+		return
+	}
+	writeLiveResponsesFixtureResponse(w, payload, map[string]any{
+		"id":     id,
+		"model":  payload.Model,
+		"status": "completed",
+		"output": []any{map[string]string{
+			"type":      "function_call",
+			"call_id":   callID,
+			"name":      name,
+			"arguments": string(arguments),
+		}},
+		"usage": map[string]int{"input_tokens": 4, "output_tokens": 2},
+	})
+}
+
+func writeLiveResponsesFixtureResponse(w http.ResponseWriter, payload openairesponses.Request, response map[string]any) {
+	if !payload.Stream {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(response)
+		return
+	}
+	writeLiveResponsesStreamFrames(w, []any{map[string]any{
+		"type":     "response.completed",
+		"response": response,
+	}})
+}
+
+func writeLiveResponsesStreamFrames(w http.ResponseWriter, frames []any) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	flusher, _ := w.(http.Flusher)
+	for _, frame := range frames {
+		encoded, err := json.Marshal(frame)
+		if err != nil {
+			http.Error(w, "fixture stream frame could not be encoded", http.StatusInternalServerError)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", encoded)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 }
 
 func writeLiveAnthropicClassifierResponse(w http.ResponseWriter, payload liveAnthropicMessagePayload) {
@@ -215,7 +415,7 @@ func (f *liveMatrixFixture) handleOpenAI(t *testing.T, w http.ResponseWriter, r 
 		return
 	}
 	f.recordAliasCall(payload.Model, len(payload.Tools) > 0)
-	f.writeOpenAIText(w, payload.Model)
+	f.writeOpenAIText(w, payload, payload.Model)
 }
 
 func (f *liveMatrixFixture) handleResponses(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -232,7 +432,7 @@ func (f *liveMatrixFixture) handleResponses(t *testing.T, w http.ResponseWriter,
 		return
 	}
 	f.recordAliasCall(payload.Model, len(payload.Tools) > 0)
-	writeLiveResponsesText(w, payload.Model, f.responseText(payload.Model))
+	writeLiveResponsesTextFixture(w, payload, "resp_fixture", f.responseText(payload.Model), 7, 3)
 }
 
 func (f *liveMatrixFixture) handleAnthropic(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -278,14 +478,8 @@ func (f *liveMatrixFixture) recordAliasCall(model string, tools bool) {
 	f.requestIncludedTool[model] = f.requestIncludedTool[model] || tools
 }
 
-func (f *liveMatrixFixture) writeOpenAIText(w http.ResponseWriter, model string) {
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-fixture","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3}}`, f.responseText(model))
-}
-
-func writeLiveResponsesText(w http.ResponseWriter, model, text string) {
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"id":"resp_fixture","model":%q,"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":%q}]}],"usage":{"input_tokens":7,"output_tokens":3}}`, model, text)
+func (f *liveMatrixFixture) writeOpenAIText(w http.ResponseWriter, payload liveOpenAIChatPayload, model string) {
+	writeLiveOpenAITextFixture(w, payload, "chatcmpl-fixture", f.responseText(model), 7, 3)
 }
 
 func (f *liveMatrixFixture) responseText(model string) string {

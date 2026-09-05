@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -231,6 +232,64 @@ func TestGatewayTraceFollowsModelSwitchAndCapturesUsage(t *testing.T) {
 	}
 	if snapshot := tracker.Snapshot(); snapshot.Route.ModelAlias != "reviewer" || snapshot.CurrentSession.ID == 0 {
 		t.Fatalf("tracker Snapshot() = %#v", snapshot)
+	}
+}
+
+func TestGatewayTraceRecordsCommittedStreamFailure(t *testing.T) {
+	ctx := context.Background()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = fmt.Fprint(w, "data: {not-json}\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	t.Cleanup(provider.Close)
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "fixture", Type: "openai-compatible", BaseURL: provider.URL, SupportsStreaming: true},
+		store.Model{Alias: "coder", ProviderName: "fixture", ProviderModel: "model-v1", Status: "degraded"},
+	)
+	launchID, err := s.CreateLaunch(ctx, "coder", "pending", "pending")
+	if err != nil {
+		t.Fatalf("CreateLaunch() error = %v", err)
+	}
+	recorder := observability.NewRecorder(ctx, observability.Config{Store: s, LaunchID: launchID, Enabled: true})
+	server := startGatewayWithConfig(t, ctx, Config{
+		Store: s, Secrets: fakeGatewaySecrets{}, Token: "model-token", Recorder: recorder,
+	})
+	t.Cleanup(func() { _ = server.Shutdown(context.Background()) })
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"coder","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set(ccrSessionTokenHeader, "model-token")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	body, readErr := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if readErr != nil {
+		t.Fatalf("reading gateway stream: %v", readErr)
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "event: error") {
+		t.Fatalf("gateway status/body = %d %q", response.StatusCode, body)
+	}
+
+	traces, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launchID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListTraceEvents() error = %v", err)
+	}
+	if len(traces) != 1 || traces[0].Kind != "route" {
+		t.Fatalf("trace events = %#v", traces)
+	}
+	route := traces[0].Route
+	if route.Status != "failed" || route.HTTPStatus != http.StatusOK || route.ErrorClass != "provider_protocol" ||
+		!route.Stream.Observed || route.Stream.UpstreamEventCount != 2 ||
+		route.Stream.TerminalPhase != "failed" {
+		t.Fatalf("stream failure trace = %#v", route)
 	}
 }
 

@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 8
+const CurrentSchemaVersion = 9
 
 type Store struct {
 	db *sql.DB
@@ -187,6 +187,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return s.migrateFromV6(ctx)
 	case 7:
 		return s.migrateFromV7(ctx)
+	case 8:
+		return s.migrateFromV8(ctx)
 	case CurrentSchemaVersion:
 		return s.ensureCurrentSchema(ctx)
 	default:
@@ -216,6 +218,9 @@ func (s *Store) migrateFromV1(ctx context.Context) error {
 	if err := s.migrateV7ToV8(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 8: %w", err)
 	}
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 9: %w", err)
+	}
 	return nil
 }
 
@@ -238,6 +243,9 @@ func (s *Store) migrateFromV2(ctx context.Context) error {
 	if err := s.migrateV7ToV8(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 8: %w", err)
 	}
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 9: %w", err)
+	}
 	return nil
 }
 
@@ -257,6 +265,9 @@ func (s *Store) migrateFromV3(ctx context.Context) error {
 	if err := s.migrateV7ToV8(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 8: %w", err)
 	}
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 9: %w", err)
+	}
 	return nil
 }
 
@@ -273,6 +284,9 @@ func (s *Store) migrateFromV4(ctx context.Context) error {
 	if err := s.migrateV7ToV8(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 4 to 8: %w", err)
 	}
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 4 to 9: %w", err)
+	}
 	return nil
 }
 
@@ -286,6 +300,9 @@ func (s *Store) migrateFromV5(ctx context.Context) error {
 	if err := s.migrateV7ToV8(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 5 to 8: %w", err)
 	}
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 5 to 9: %w", err)
+	}
 	return nil
 }
 
@@ -296,12 +313,25 @@ func (s *Store) migrateFromV6(ctx context.Context) error {
 	if err := s.migrateV7ToV8(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 6 to 8: %w", err)
 	}
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 6 to 9: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) migrateFromV7(ctx context.Context) error {
 	if err := s.migrateV7ToV8(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 7 to 8: %w", err)
+	}
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 7 to 9: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateFromV8(ctx context.Context) error {
+	if err := s.migrateV8ToV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 8 to 9: %w", err)
 	}
 	return nil
 }

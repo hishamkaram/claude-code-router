@@ -20,6 +20,7 @@ type Request struct {
 	Metadata           map[string]string `json:"metadata,omitempty"`
 	Reasoning          *Reasoning        `json:"reasoning,omitempty"`
 	Text               *Text             `json:"text,omitempty"`
+	Stream             bool              `json:"stream,omitempty"`
 }
 
 // Reasoning configures the Responses reasoning effort when the provider

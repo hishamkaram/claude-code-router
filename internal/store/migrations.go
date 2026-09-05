@@ -269,6 +269,38 @@ WHERE last_error = 'rate_limited'
 	return nil
 }
 
+func (s *Store) migrateV8ToV9(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v8 to v9 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	if _, err := tx.ExecContext(ctx, currentSchemaSQL); err != nil {
+		return fmt.Errorf("ensuring runtime trace tables for v9: %w", err)
+	}
+	columns := [...]migrationColumn{
+		{name: "stream_observed", definition: "stream_observed INTEGER NOT NULL DEFAULT 0"},
+		{name: "upstream_headers_ms", definition: "upstream_headers_ms INTEGER NOT NULL DEFAULT 0"},
+		{name: "first_upstream_event_ms", definition: "first_upstream_event_ms INTEGER NOT NULL DEFAULT 0"},
+		{name: "first_downstream_event_ms", definition: "first_downstream_event_ms INTEGER NOT NULL DEFAULT 0"},
+		{name: "upstream_event_count", definition: "upstream_event_count INTEGER NOT NULL DEFAULT 0"},
+		{name: "early_stream_commit", definition: "early_stream_commit INTEGER NOT NULL DEFAULT 0"},
+		{name: "stream_terminal_phase", definition: "stream_terminal_phase TEXT NOT NULL DEFAULT ''"},
+	}
+	if err := addMigrationColumnsIfMissing(ctx, tx, "route_events", columns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 9 WHERE id = 1 AND version = 8`); err != nil {
+		return fmt.Errorf("updating schema version to 9: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v8 to v9 migration: %w", err)
+	}
+	return nil
+}
+
 func tableColumnExists(ctx context.Context, tx *sql.Tx, table, name string) (bool, error) {
 	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {

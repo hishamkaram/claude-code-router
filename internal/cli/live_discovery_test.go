@@ -35,8 +35,11 @@ func TestLiveGatewayTokenLaunchDiscoversConfiguredAlias(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
 		case "/v1/chat/completions":
 			chatCalled = true
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"chatcmpl-discovery","choices":[{"message":{"content":"gateway-discovery-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+			payload, ok := decodeLiveOpenAIChatPayload(t, w, r)
+			if !ok {
+				return
+			}
+			writeLiveOpenAITextFixture(w, payload, "chatcmpl-discovery", "gateway-discovery-ok", 4, 2)
 		default:
 			http.NotFound(w, r)
 		}
@@ -79,8 +82,11 @@ func TestLiveAutoNoClaudeAuthLaunchesProviderOnlyConfiguredAlias(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
 		case "/v1/chat/completions":
 			chatCalled.Store(true)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"chatcmpl-auto-provider-only","choices":[{"message":{"content":"auto-provider-only-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+			payload, ok := decodeLiveOpenAIChatPayload(t, w, r)
+			if !ok {
+				return
+			}
+			writeLiveOpenAITextFixture(w, payload, "chatcmpl-auto-provider-only", "auto-provider-only-ok", 4, 2)
 		default:
 			http.NotFound(w, r)
 		}

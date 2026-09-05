@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/cua"
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
@@ -98,6 +100,122 @@ func TestGatewayManagedCUAExecutesSingularResponsesActionAndReturnsScreenshot(t 
 	}
 	if !strings.Contains(string(encoded), `"detail":"original"`) {
 		t.Fatalf("managed follow-up screenshot detail = %s, want original", encoded)
+	}
+}
+
+func TestGatewayStreamsManagedCUAResponseBeforeFinalProviderCompletion(t *testing.T) {
+	ctx := context.Background()
+	firstText := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseProvider := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseProvider()
+
+	var (
+		requestsMu sync.Mutex
+		requests   []openairesponses.Request
+	)
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request openairesponses.Request
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode Responses request: %v", err)
+		}
+		requestsMu.Lock()
+		requests = append(requests, request)
+		requestNumber := len(requests)
+		requestsMu.Unlock()
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch requestNumber {
+		case 1:
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"computer_call\",\"call_id\":\"call_1\",\"action\":{\"type\":\"screenshot\"}}}\n\n")
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"computer_call\",\"call_id\":\"call_1\",\"action\":{\"type\":\"screenshot\"}}}\n\n")
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cua_1\",\"status\":\"completed\",\"output\":[{\"type\":\"computer_call\",\"call_id\":\"call_1\",\"action\":{\"type\":\"screenshot\"}}],\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}}\n\n")
+			w.(http.Flusher).Flush()
+		case 2:
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n")
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n")
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"managed first text\"}\n\n")
+			w.(http.Flusher).Flush()
+			close(firstText)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"managed first text complete\"}]}}\n\n")
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cua_2\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"managed first text complete\"}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}}\n\n")
+			w.(http.Flusher).Flush()
+		default:
+			http.Error(w, "unexpected Responses request", http.StatusBadRequest)
+		}
+	}))
+	defer provider.Close()
+
+	executor := &gatewayManagedExecutor{observation: cua.Observation{Screenshot: []byte("png"), ContentType: "image/png"}}
+	runtime := newGatewayManagedRuntime(t, executor, cua.DecisionApprove)
+	s := newGatewayStore(t,
+		store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: provider.URL, SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
+		store.Model{Alias: "cua", ProviderName: "openai", ProviderModel: "computer-model", Status: "degraded", CapabilityOverrides: modelcap.Values{
+			Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true), SupportsComputerUse: modelcap.Bool(true),
+		}},
+	)
+	server := startGatewayWithConfig(t, ctx, Config{
+		Store: s, Secrets: fakeGatewaySecrets{}, Token: "local-token", ManagedCUA: runtime, ManagedCUAProject: "fixture-project",
+	})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	requestContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestContext, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(strings.Replace(managedCUARequestBody("cua"), `"max_tokens"`, `"stream":true,"max_tokens"`, 1)))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway stream request error = %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("gateway status = %d, want 200: %s", response.StatusCode, body)
+	}
+	select {
+	case <-firstText:
+	case <-requestContext.Done():
+		t.Fatalf("managed Responses provider did not send its first text chunk: %v", requestContext.Err())
+	}
+
+	reader := bufio.NewReader(response.Body)
+	var initial strings.Builder
+	for !strings.Contains(initial.String(), "managed first text") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("reading managed stream before provider completion: %v; got %q", readErr, initial.String())
+		}
+		initial.WriteString(line)
+	}
+	if !strings.Contains(initial.String(), "event: message_start") || strings.Contains(initial.String(), "event: error") {
+		t.Fatalf("managed initial stream = %q", initial.String())
+	}
+
+	releaseProvider()
+	remainder, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatalf("reading completed managed stream: %v", readErr)
+	}
+	stream := initial.String() + string(remainder)
+	if strings.Contains(stream, "computer_call") || !strings.Contains(stream, "event: message_stop") || !strings.Contains(stream, `"output_tokens":5`) {
+		t.Fatalf("managed stream = %q", stream)
+	}
+	if executor.CallCount() != 1 {
+		t.Fatalf("executor calls=%d, want 1", executor.CallCount())
+	}
+	requestsMu.Lock()
+	defer requestsMu.Unlock()
+	if len(requests) != 2 || !requests[0].Stream || !requests[1].Stream || requests[1].PreviousResponseID != "resp_cua_1" {
+		t.Fatalf("managed provider requests = %#v", requests)
 	}
 }
 

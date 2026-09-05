@@ -14,7 +14,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 )
 
-func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute) observability.TokenUsage {
+func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute, completion *routeCompletionState) observability.TokenUsage {
 	var usage observability.TokenUsage
 	if validationErr := validateResponsesMessageRequest(&req); validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
@@ -45,6 +45,14 @@ func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, 
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("creating OpenAI Responses client for provider %q: %v", route.provider.Name, err))
 		return usage
 	}
+	messageID, err := newGatewayMessageID()
+	if err != nil {
+		writeAnthropicError(w, http.StatusInternalServerError, "creating response message identifier")
+		return usage
+	}
+	if req.Stream {
+		return h.streamOpenAIResponses(w, r, route, completion, client, providerRequest, usesComputer, messageID)
+	}
 	providerResponse, err := h.createResponses(r.Context(), client, providerRequest, usesComputer)
 	if err != nil {
 		var managedErr *managedCUAError
@@ -60,6 +68,7 @@ func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, 
 		writeAnthropicError(w, status, fmt.Sprintf("OpenAI Responses provider %q: %v", route.provider.Name, err))
 		return usage
 	}
+	providerResponse.ID = messageID
 	usage = tokenUsageFromResponses(providerResponse)
 	antResponse, err := openairesponses.AnthropicResponseFromResponses(providerResponse)
 	if err != nil {
@@ -67,12 +76,36 @@ func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, 
 		return usage
 	}
 	antResponse.Model = route.responseModel
-	if req.Stream {
-		writeAnthropicResponsesStream(w, antResponse)
-		return usage
-	}
 	writeJSON(w, http.StatusOK, antResponse)
 	return usage
+}
+
+func (h *handler) streamOpenAIResponses(
+	w http.ResponseWriter,
+	r *http.Request,
+	route messageRoute,
+	completion *routeCompletionState,
+	client *openairesponses.Client,
+	providerRequest *openairesponses.Request,
+	usesComputer bool,
+	messageID string,
+) observability.TokenUsage {
+	adapter := newResponsesStreamAdapter(route.responseModel, messageID)
+	adapter.inputTokens = estimateTranslatedInputTokens(providerRequest)
+	producer := func(ctx context.Context, events chan<- upstreamStreamEvent) {
+		produceResponsesStream(ctx, client, route.provider.Name, providerRequest, events)
+	}
+	if usesComputer {
+		producer = func(ctx context.Context, events chan<- upstreamStreamEvent) {
+			h.produceManagedResponsesStream(ctx, client, route.provider.Name, providerRequest, events)
+		}
+	}
+	result := runTranslatedProviderStream(r.Context(), w, producer, adapter)
+	recordStreamCompletion(completion, result)
+	if !result.Committed {
+		writeOpenAIResponsesStreamFailure(w, result)
+	}
+	return result.Usage
 }
 
 func tokenUsageFromResponses(response *openairesponses.Response) observability.TokenUsage {
@@ -156,71 +189,4 @@ func appendResponsesInstructions(existing, addition string) string {
 	default:
 		return existing + "\n\n" + addition
 	}
-}
-
-func writeAnthropicResponsesStream(w http.ResponseWriter, response *openairesponses.AnthropicResponse) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
-	blocks := anthropicBlocksFromResponses(response.Content)
-	writeSSEEvent(w, flusher, "message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":            firstNonEmpty(response.ID, "msg_ccr_responses"),
-			"type":          "message",
-			"role":          "assistant",
-			"model":         response.Model,
-			"content":       []any{},
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]int{
-				"input_tokens":  response.Usage.InputTokens,
-				"output_tokens": 0,
-			},
-		},
-	})
-	for index, block := range blocks {
-		writeSSEEvent(w, flusher, "content_block_start", map[string]any{
-			"type":          "content_block_start",
-			"index":         index,
-			"content_block": streamStartBlock(block),
-		})
-		if delta, ok := streamBlockDelta(block); ok {
-			writeSSEEvent(w, flusher, "content_block_delta", map[string]any{
-				"type":  "content_block_delta",
-				"index": index,
-				"delta": delta,
-			})
-		}
-		writeSSEEvent(w, flusher, "content_block_stop", map[string]any{
-			"type": "content_block_stop", "index": index,
-		})
-	}
-	writeSSEEvent(w, flusher, "message_delta", map[string]any{
-		"type": "message_delta",
-		"delta": map[string]any{
-			"stop_reason": response.StopReason, "stop_sequence": response.StopSequence,
-		},
-		"usage": map[string]int{"output_tokens": response.Usage.OutputTokens},
-	})
-	writeSSEEvent(w, flusher, "message_stop", map[string]string{"type": "message_stop"})
-}
-
-func anthropicBlocksFromResponses(content []openairesponses.AnthropicContentBlock) []map[string]any {
-	blocks := make([]map[string]any, 0, len(content))
-	for _, block := range content {
-		converted := map[string]any{"type": block.Type}
-		switch block.Type {
-		case "text":
-			converted["text"] = block.Text
-		case "tool_use":
-			converted["id"] = block.ID
-			converted["name"] = block.Name
-			converted["input"] = block.Input
-		}
-		blocks = append(blocks, converted)
-	}
-	return blocks
 }

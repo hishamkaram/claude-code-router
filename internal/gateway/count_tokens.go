@@ -42,7 +42,7 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	span := h.beginRoute(w, r, operation, req)
 	var usage observability.TokenUsage
 	defer func(ctx context.Context) {
-		completeRoute(span, ctx, observedWriter.Status(), usage)
+		completeRoute(span, ctx, observedWriter.Status(), usage, routeCompletionState{})
 	}(r.Context())
 	route, validationErr := h.selectRouteForRequest(r.Context(), claudeCodeSessionID(r), req)
 	if validationErr != nil {
@@ -74,7 +74,7 @@ func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	w.Header().Set(ccrTokenCountModeHeader, tokenCountModeProvider)
-	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic)
+	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, false, nil)
 }
 
 func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) observability.TokenUsage {
