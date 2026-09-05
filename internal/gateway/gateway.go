@@ -204,8 +204,9 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	span := h.beginRoute(w, r, operation, req)
 	var usage observability.TokenUsage
+	var completion routeCompletionState
 	defer func(ctx context.Context) {
-		completeRoute(span, ctx, observedWriter.Status(), usage)
+		completeRoute(span, ctx, observedWriter.Status(), usage, completion)
 	}(r.Context())
 	route, validationErr := h.selectMessageRouteForRequest(r.Context(), claudeCodeSessionID(r), req)
 	if validationErr != nil {
@@ -230,13 +231,13 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 			writeAnthropicError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic)
+		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, req.Stream, &completion)
 		return
 	case routeOpenAIResponses:
-		usage = h.handleOpenAIResponses(w, r, req, route)
+		usage = h.handleOpenAIResponses(w, r, req, route, &completion)
 		return
 	case routeOpenAI:
-		usage = h.handleOpenAIChat(w, r, req, route)
+		usage = h.handleOpenAIChat(w, r, req, route, &completion)
 		return
 	default:
 		writeAnthropicError(w, http.StatusInternalServerError, "gateway selected an unknown route")
@@ -244,7 +245,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute) observability.TokenUsage {
+func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute, completion *routeCompletionState) observability.TokenUsage {
 	var usage observability.TokenUsage
 	if err := h.validateOpenAIMessageRequest(&req); err != nil {
 		writeAnthropicError(w, err.status, err.message)
@@ -271,6 +272,36 @@ func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req a
 	}
 	ignoredFields = append(ignoredOpenAIAnthropicFields(req.Fields), ignoredFields...)
 	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredFields)
+	messageID, err := newGatewayMessageID()
+	if err != nil {
+		writeAnthropicError(w, http.StatusInternalServerError, "creating response message identifier")
+		return usage
+	}
+	if req.Stream {
+		adapter := newOpenAIChatStreamAdapter(route.responseModel, apiKey, messageID)
+		adapter.inputTokens = estimateTranslatedInputTokens(openAIReq)
+		result := runTranslatedProviderStream(
+			r.Context(),
+			w,
+			func(ctx context.Context, events chan<- upstreamStreamEvent) {
+				h.produceOpenAIChatStream(ctx, route.provider, apiKey, openAIReq, events)
+			},
+			adapter,
+		)
+		recordStreamCompletion(completion, result)
+		if !result.Committed {
+			status := result.HTTPStatus
+			if status < http.StatusBadRequest || status > 599 {
+				status = http.StatusBadGateway
+			}
+			message := result.Message
+			if message == "" {
+				message = "OpenAI-compatible provider stream failed"
+			}
+			writeAnthropicError(w, status, message)
+		}
+		return result.Usage
+	}
 	resp, err := h.callOpenAICompatible(r.Context(), route.provider, apiKey, openAIReq)
 	if err != nil {
 		var statusErr *openAIProviderStatusError
@@ -281,17 +312,14 @@ func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req a
 		writeAnthropicError(w, status, err.Error())
 		return usage
 	}
+	resp.ID = messageID
 	usage = tokenUsageFromOpenAI(resp)
 	finishReason, err := anthropicStopReasonFromOpenAI(resp)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())
 		return usage
 	}
-	if req.Stream {
-		writeAnthropicStream(w, route.responseModel, resp, finishReason)
-		return usage
-	}
-	writeJSON(w, http.StatusOK, toAnthropicResponse(route.responseModel, resp, finishReason))
+	writeJSON(w, http.StatusOK, toAnthropicResponse(route.responseModel, messageID, resp, finishReason))
 	return usage
 }
 

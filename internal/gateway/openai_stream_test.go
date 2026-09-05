@@ -131,6 +131,50 @@ func TestDecodeOpenAIChatStreamAcceptsFinishWithoutDoneSentinel(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatStreamEOFCompletion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		events []string
+		want   bool
+	}{
+		{
+			name:   "single completed choice",
+			events: []string{`{"choices":[{"index":0,"finish_reason":"stop"}]}`},
+			want:   true,
+		},
+		{
+			name:   "unfinished choice",
+			events: []string{`{"choices":[{"index":0}]}`},
+			want:   false,
+		},
+		{
+			name:   "partially finished choices",
+			events: []string{`{"choices":[{"index":0,"finish_reason":"stop"},{"index":1}]}`},
+			want:   false,
+		},
+		{
+			name: "all choices finish in separate events",
+			events: []string{
+				`{"choices":[{"index":0,"finish_reason":"stop"}]}`,
+				`{"choices":[{"index":1,"finish_reason":"length"}]}`,
+			},
+			want: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			completion := newOpenAIChatStreamEOFCompletion()
+			for _, event := range test.events {
+				completion.observe([]byte(event))
+			}
+			if got := completion.complete(); got != test.want {
+				t.Fatalf("complete() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDecodeOpenAIChatStreamRejectsIncompleteMalformedAndOversizedStreams(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -180,7 +224,7 @@ func TestDecodeOpenAIChatStreamPropagatesReadError(t *testing.T) {
 	}
 }
 
-func TestGatewayRequestsUpstreamStreamInsteadOfEOFProneBufferedResponse(t *testing.T) {
+func TestGatewayRequestsUpstreamStreamAndCompletesWithoutDoneSentinel(t *testing.T) {
 	ctx := context.Background()
 	var sawStream atomic.Bool
 	var sawUsageOption atomic.Bool
@@ -209,7 +253,6 @@ func TestGatewayRequestsUpstreamStreamInsteadOfEOFProneBufferedResponse(t *testi
 		sawUsageOption.Store(payload.StreamOptions != nil && payload.StreamOptions.IncludeUsage)
 		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-eof-proof\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"stream survived\"},\"finish_reason\":\"stop\"}]}\n\n")
-		_, _ = fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
 	}))
 	defer provider.Close()
 
@@ -238,7 +281,7 @@ func TestGatewayRequestsUpstreamStreamInsteadOfEOFProneBufferedResponse(t *testi
 	if err != nil {
 		t.Fatalf("read gateway response: %v", err)
 	}
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "stream survived") {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), "stream survived") || !strings.Contains(string(raw), "event: message_stop") || strings.Contains(string(raw), "event: error") {
 		t.Fatalf("gateway status/body = %d %s", resp.StatusCode, raw)
 	}
 	if !sawStream.Load() || !sawUsageOption.Load() {

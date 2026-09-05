@@ -127,7 +127,7 @@ func (s *openAISSEScanner) next() (data []byte, ok bool, err error) {
 		return nil, false, nil
 	}
 	for s.scanner.Scan() {
-		line := s.scanner.Bytes()
+		line := trimSSELineTerminator(s.scanner.Bytes())
 		if len(line) > 0 {
 			s.appendDataLine(line)
 			continue
@@ -144,6 +144,10 @@ func (s *openAISSEScanner) next() (data []byte, ok bool, err error) {
 		return data, true, nil
 	}
 	return nil, false, nil
+}
+
+func trimSSELineTerminator(line []byte) []byte {
+	return bytes.TrimSuffix(line, []byte("\r"))
 }
 
 func (s *openAISSEScanner) appendDataLine(line []byte) {

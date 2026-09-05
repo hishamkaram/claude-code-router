@@ -147,16 +147,20 @@ func (s *liveAgentToolProviderState) handleChat(t *testing.T, w http.ResponseWri
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++
-	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case s.chatCalls == 1:
 		s.firstRequestHadAgentTool = liveToolsContainAgent(payload.Tools)
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-tool","choices":[{"message":{"content":"","tool_calls":[{"id":"toolu_agent_live","type":"function","function":{"name":"Agent","arguments":"{\"description\":\"return child sentinel\",\"prompt\":\"Return exactly CCR_LIVE_CHILD_OK and nothing else.\",\"subagent_type\":\"general-purpose\",\"run_in_background\":false}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":3}}`)
+		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-agent-tool", "toolu_agent_live", "Agent", map[string]any{
+			"description":       "return child sentinel",
+			"prompt":            "Return exactly CCR_LIVE_CHILD_OK and nothing else.",
+			"subagent_type":     "general-purpose",
+			"run_in_background": false,
+		})
 	case s.chatCalls == 2:
-		s.handleChildRequest(t, w, payload.Messages)
+		s.handleChildRequest(t, w, payload)
 	case openAIMessagesContainToolRole(payload.Messages, "CCR_LIVE_CHILD_OK"):
 		s.parentToolResultSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-parent","choices":[{"message":{"content":"CCR_LIVE_PARENT_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-agent-parent", "CCR_LIVE_PARENT_OK", 4, 2)
 	default:
 		t.Errorf("unexpected provider request after Agent tool call: %#v", payload.Messages)
 		http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -172,22 +176,21 @@ func (s *liveWorkflowProviderState) handleChat(t *testing.T, w http.ResponseWrit
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++
-	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case isLiveAutoClassifierRequest(payload):
 		s.workflowClassifierSeen = true
 		writeLiveOpenAIClassifierResponse(w, payload)
 	case !s.firstRequestHadWorkflowTool:
 		s.firstRequestHadWorkflowTool = liveToolsContain(payload.Tools, "Workflow")
-		writeOpenAIWorkflowToolCall(w)
+		writeOpenAIWorkflowToolCall(w, payload)
 	case isWorkflowSubagentRequest(payload.Messages):
 		s.workflowChildPromptSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-child","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-workflow-child", "CCR_LIVE_WORKFLOW_CHILD_OK", 4, 2)
 	case openAIMessagesContainToolRole(payload.Messages, "Workflow launched in background"):
 		s.workflowLaunchResultSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-started","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_LAUNCHED_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-workflow-started", "CCR_LIVE_WORKFLOW_LAUNCHED_OK", 4, 2)
 	case openAIMessagesContain(payload.Messages, "<task-notification>"):
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-workflow-parent","choices":[{"message":{"content":"CCR_LIVE_WORKFLOW_PARENT_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-workflow-parent", "CCR_LIVE_WORKFLOW_PARENT_OK", 4, 2)
 	default:
 		t.Errorf("unexpected provider request in Workflow live route: %#v", payload.Messages)
 		http.Error(w, "unexpected request", http.StatusBadRequest)
@@ -210,27 +213,9 @@ func decodeLiveOpenAIChatPayload(t *testing.T, w http.ResponseWriter, r *http.Re
 	return payload, true
 }
 
-func writeOpenAIWorkflowToolCall(w http.ResponseWriter) {
+func writeOpenAIWorkflowToolCall(w http.ResponseWriter, payload liveOpenAIChatPayload) {
 	arguments, _ := json.Marshal(map[string]string{"script": liveWorkflowScript()})
-	response := map[string]any{
-		"id": "chatcmpl-workflow-tool",
-		"choices": []map[string]any{{
-			"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{{
-					"id":   "toolu_workflow_live",
-					"type": "function",
-					"function": map[string]string{
-						"name":      "Workflow",
-						"arguments": string(arguments),
-					},
-				}},
-			},
-			"finish_reason": "tool_calls",
-		}},
-		"usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 3},
-	}
-	_ = json.NewEncoder(w).Encode(response)
+	writeLiveOpenAIToolFixture(w, payload, "chatcmpl-workflow-tool", "toolu_workflow_live", "Workflow", json.RawMessage(arguments))
 }
 
 func liveWorkflowScript() string {
@@ -250,15 +235,15 @@ func isWorkflowSubagentRequest(messages []liveOpenAIChatMessage) bool {
 		openAIMessagesContain(messages, "Find latest ChatGPT news")
 }
 
-func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.ResponseWriter, messages []liveOpenAIChatMessage) {
+func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.ResponseWriter, payload liveOpenAIChatPayload) {
 	t.Helper()
-	if openAIMessagesContainToolRole(messages, "") || !openAIMessagesContain(messages, "Return exactly CCR_LIVE_CHILD_OK") {
-		t.Errorf("second provider request is not the child request: %#v", messages)
+	if openAIMessagesContainToolRole(payload.Messages, "") || !openAIMessagesContain(payload.Messages, "Return exactly CCR_LIVE_CHILD_OK") {
+		t.Errorf("second provider request is not the child request: %#v", payload.Messages)
 		http.Error(w, "bad child request", http.StatusBadRequest)
 		return
 	}
 	s.childPromptSeen = true
-	_, _ = fmt.Fprint(w, `{"id":"chatcmpl-agent-child","choices":[{"message":{"content":"CCR_LIVE_CHILD_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+	writeLiveOpenAITextFixture(w, payload, "chatcmpl-agent-child", "CCR_LIVE_CHILD_OK", 4, 2)
 }
 
 func (s *liveWorkflowProviderState) assertComplete(t *testing.T, out, errOut string) {

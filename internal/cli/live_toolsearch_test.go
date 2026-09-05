@@ -4,7 +4,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,61 +94,38 @@ func (s *liveToolSearchAgentState) handleChat(t *testing.T, w http.ResponseWrite
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++
-	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case isLiveAutoClassifierRequest(payload):
 		s.classifierRequestSeen = true
 		writeLiveOpenAIClassifierResponse(w, payload)
 	case s.chatCalls == 1:
 		s.firstRequestHadToolSearch = liveToolsContain(payload.Tools, "ToolSearch")
-		writeLiveToolSearchCall(w)
+		writeLiveToolSearchCall(w, payload)
 	case !s.toolReferenceResultSeen && openAIMessagesContainToolRole(payload.Messages, "[Loaded tool: Agent]"):
 		s.toolReferenceResultSeen = true
-		writeLiveResearchAgentCall(w)
+		writeLiveResearchAgentCall(w, payload)
 	case !s.childPromptSeen && openAIMessagesContain(payload.Messages, "Find latest ChatGPT news"):
 		s.childPromptSeen = true
-		_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-toolsearch-child","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, liveToolSearchAgentResult)
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-child", liveToolSearchAgentResult, 4, 2)
 	case openAIMessagesContainToolRole(payload.Messages, liveToolSearchAgentResult):
 		s.callerAgentResultSeen = true
-		_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-toolsearch-caller","choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`, liveToolSearchAgentResult)
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-caller", liveToolSearchAgentResult, 4, 2)
 	default:
 		t.Errorf("unexpected provider request in research Agent live route: %#v", payload.Messages)
 		http.Error(w, "unexpected request", http.StatusBadRequest)
 	}
 }
 
-func writeLiveToolSearchCall(w http.ResponseWriter) {
-	writeLiveToolCall(w, "chatcmpl-toolsearch", "toolu_toolsearch_live", "ToolSearch", map[string]string{"query": "Agent"})
+func writeLiveToolSearchCall(w http.ResponseWriter, payload liveOpenAIChatPayload) {
+	writeLiveOpenAIToolFixture(w, payload, "chatcmpl-toolsearch", "toolu_toolsearch_live", "ToolSearch", map[string]string{"query": "Agent"})
 }
 
-func writeLiveResearchAgentCall(w http.ResponseWriter) {
-	writeLiveToolCall(w, "chatcmpl-toolsearch-agent", "toolu_agent_after_toolsearch", "Agent", map[string]any{
+func writeLiveResearchAgentCall(w http.ResponseWriter, payload liveOpenAIChatPayload) {
+	writeLiveOpenAIToolFixture(w, payload, "chatcmpl-toolsearch-agent", "toolu_agent_after_toolsearch", "Agent", map[string]any{
 		"description":       "research latest ChatGPT news",
 		"prompt":            "Find latest ChatGPT news using web research and return concise findings.",
 		"subagent_type":     "ccr-live-plugin:investigating-researcher",
 		"run_in_background": false,
-	})
-}
-
-func writeLiveToolCall(w http.ResponseWriter, id, toolID, name string, args any) {
-	arguments, _ := json.Marshal(args)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"id": id,
-		"choices": []map[string]any{{
-			"message": map[string]any{
-				"content": "",
-				"tool_calls": []map[string]any{{
-					"id":   toolID,
-					"type": "function",
-					"function": map[string]string{
-						"name":      name,
-						"arguments": string(arguments),
-					},
-				}},
-			},
-			"finish_reason": "tool_calls",
-		}},
-		"usage": map[string]int{"prompt_tokens": 4, "completion_tokens": 3},
 	})
 }
 

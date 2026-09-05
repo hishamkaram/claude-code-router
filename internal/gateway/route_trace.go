@@ -70,14 +70,41 @@ func sessionRoute(route messageRoute) session.Route {
 	}
 }
 
-func completeRoute(span *observability.RouteSpan, requestContext context.Context, status int, usage observability.TokenUsage) {
+type routeCompletionState struct {
+	stream *translatedStreamResult
+}
+
+func recordStreamCompletion(completion *routeCompletionState, result translatedStreamResult) {
+	if completion == nil {
+		return
+	}
+	completion.stream = &result
+}
+
+func completeRoute(span *observability.RouteSpan, requestContext context.Context, status int, usage observability.TokenUsage, completion routeCompletionState) {
 	if span == nil {
 		return
 	}
 	result := observability.RouteResult{HTTPStatus: status, Usage: usage}
+	if completion.stream != nil {
+		stream := observability.StreamMetrics{
+			Observed:               true,
+			UpstreamHeadersMS:      completion.stream.UpstreamHeadersMS,
+			FirstUpstreamEventMS:   completion.stream.FirstUpstreamEventMS,
+			FirstDownstreamEventMS: completion.stream.FirstDownstreamEventMS,
+			UpstreamEventCount:     completion.stream.UpstreamEventCount,
+			EarlyStreamCommit:      completion.stream.EarlyStreamCommit,
+			TerminalPhase:          completion.stream.TerminalPhase,
+		}
+		result.Stream = &stream
+	}
 	switch {
 	case requestContext.Err() != nil:
 		result.Status, result.ErrorClass = "canceled", "canceled"
+	case completion.stream != nil && completion.stream.ErrorClass == "canceled":
+		result.Status, result.ErrorClass = "canceled", "canceled"
+	case completion.stream != nil && completion.stream.ErrorClass != "":
+		result.Status, result.ErrorClass = "failed", completion.stream.ErrorClass
 	case status >= http.StatusOK && status < http.StatusBadRequest:
 		result.Status = "succeeded"
 	case status >= http.StatusBadRequest && status < http.StatusInternalServerError:

@@ -135,7 +135,14 @@ CREATE TABLE route_events (
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_write_tokens INTEGER NOT NULL DEFAULT 0
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  stream_observed INTEGER NOT NULL DEFAULT 0,
+  upstream_headers_ms INTEGER NOT NULL DEFAULT 0,
+  first_upstream_event_ms INTEGER NOT NULL DEFAULT 0,
+  first_downstream_event_ms INTEGER NOT NULL DEFAULT 0,
+  upstream_event_count INTEGER NOT NULL DEFAULT 0,
+  early_stream_commit INTEGER NOT NULL DEFAULT 0,
+  stream_terminal_phase TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE lifecycle_events (
@@ -348,7 +355,14 @@ CREATE TABLE IF NOT EXISTS route_events (
   input_tokens INTEGER NOT NULL DEFAULT 0,
   output_tokens INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-  cache_write_tokens INTEGER NOT NULL DEFAULT 0
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  stream_observed INTEGER NOT NULL DEFAULT 0,
+  upstream_headers_ms INTEGER NOT NULL DEFAULT 0,
+  first_upstream_event_ms INTEGER NOT NULL DEFAULT 0,
+  first_downstream_event_ms INTEGER NOT NULL DEFAULT 0,
+  upstream_event_count INTEGER NOT NULL DEFAULT 0,
+  early_stream_commit INTEGER NOT NULL DEFAULT 0,
+  stream_terminal_phase TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS lifecycle_events (

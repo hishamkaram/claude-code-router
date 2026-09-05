@@ -77,11 +77,7 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
 		case "/v1/chat/completions":
 			chatCalled = true
-			var payload struct {
-				Model    string                  `json:"model"`
-				Tools    []any                   `json:"tools"`
-				Messages []liveOpenAIChatMessage `json:"messages"`
-			}
+			var payload liveOpenAIChatPayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Errorf("provider decode error = %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
@@ -94,8 +90,7 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 			}
 			toolsSeen = len(payload.Tools) > 0
 			promptSeen = openAIMessagesContain(payload.Messages, "--dangerously-skip-permissions explain this option")
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"chatcmpl-live-smoke","choices":[{"message":{"content":"live-smoke-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+			writeLiveOpenAITextFixture(w, payload, "chatcmpl-live-smoke", "live-smoke-ok", 4, 2)
 		default:
 			http.NotFound(w, r)
 		}
@@ -148,9 +143,7 @@ func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
 		case "/v1/chat/completions":
 			chatCalled = true
-			var payload struct {
-				Model string `json:"model"`
-			}
+			var payload liveOpenAIChatPayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 				t.Errorf("provider decode error = %v", err)
 				http.Error(w, "bad request", http.StatusBadRequest)
@@ -161,8 +154,7 @@ func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
 				http.Error(w, "bad model", http.StatusBadRequest)
 				return
 			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"id":"chatcmpl-no-startup","choices":[{"message":{"content":"no-startup-selection-ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+			writeLiveOpenAITextFixture(w, payload, "chatcmpl-no-startup", "no-startup-selection-ok", 4, 2)
 		default:
 			http.NotFound(w, r)
 		}

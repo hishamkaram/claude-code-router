@@ -191,6 +191,7 @@ func newOpenAIConformanceFixture(t *testing.T, breakStream bool) *httptest.Serve
 		case "/v1/chat/completions":
 			call := chatCalls.Add(1)
 			var payload struct {
+				Stream   bool `json:"stream"`
 				Messages []struct {
 					Content string `json:"content"`
 				} `json:"messages"`
@@ -212,6 +213,11 @@ func newOpenAIConformanceFixture(t *testing.T, breakStream bool) *httptest.Serve
 			w.Header().Set("Content-Type", "application/json")
 			if breakStream && call == 2 {
 				http.Error(w, "stream unavailable", http.StatusBadGateway)
+				return
+			}
+			if payload.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, "data: {\"id\":\"stream\",\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"stream\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
 				return
 			}
 			if len(payload.Tools) > 0 {

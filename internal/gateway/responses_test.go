@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	openairesponses "github.com/hishamkaram/claude-code-router/internal/responses"
@@ -71,6 +73,235 @@ func TestGatewayRoutesResponsesModelWithoutChatFallback(t *testing.T) {
 	}
 	if payload.Model != "responses" || len(payload.Content) != 1 || payload.Content[0].Text != "responses-routed" {
 		t.Fatalf("gateway response = %#v", payload)
+	}
+}
+
+func TestGatewayStreamsResponsesTextBeforeProviderCompletion(t *testing.T) {
+	ctx := context.Background()
+	firstChunk := make(chan struct{})
+	release := make(chan struct{})
+	var providerRequest openairesponses.Request
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&providerRequest); err != nil {
+			t.Fatalf("decode Responses request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_stream\",\"status\":\"in_progress\",\"output\":[]}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_stream\",\"role\":\"assistant\",\"content\":[]}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"first response\"}\n\n")
+		w.(http.Flusher).Flush()
+		close(firstChunk)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\" after completion\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_stream\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"first response after completion\"}]}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"id\":\"msg_stream\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"first response after completion\"}]}],\"usage\":{\"input_tokens\":4,\"output_tokens\":3}}}\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: provider.URL, SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
+		store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
+			Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true),
+		}},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	requestContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestContext, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"responses","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway stream request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("gateway status = %d body=%s", resp.StatusCode, body)
+	}
+	select {
+	case <-firstChunk:
+	case <-requestContext.Done():
+		t.Fatalf("provider did not send first response chunk: %v", requestContext.Err())
+	}
+	reader := bufio.NewReader(resp.Body)
+	var initial strings.Builder
+	for !strings.Contains(initial.String(), "first response") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("reading first stream event: %v; got %q", readErr, initial.String())
+		}
+		initial.WriteString(line)
+	}
+	if !strings.Contains(initial.String(), "event: message_start") {
+		t.Fatalf("stream did not start before Responses completion: %q", initial.String())
+	}
+	if strings.Contains(initial.String(), `"input_tokens":0`) {
+		t.Fatalf("Responses stream emitted zero input usage before provider completion: %q", initial.String())
+	}
+	if id := anthropicMessageStartID(t, initial.String()); !strings.HasPrefix(id, "msg_ccr_") {
+		t.Fatalf("Responses stream message id = %q, want a generated gateway id", id)
+	}
+	close(release)
+	remainder, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("reading completed stream: %v", err)
+	}
+	stream := initial.String() + string(remainder)
+	if !strings.Contains(stream, "after completion") || !strings.Contains(stream, "event: message_stop") {
+		t.Fatalf("completed stream = %q", stream)
+	}
+	if !providerRequest.Stream {
+		t.Fatal("Responses provider did not receive stream=true")
+	}
+}
+
+func TestGatewayStreamsResponsesFunctionCall(t *testing.T) {
+	ctx := context.Background()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tool\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}]}}\n\n")
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: provider.URL, SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
+		store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
+			Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true),
+		}},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	response := postGatewayMessage(t, ctx, server.URL(), `{"model":"responses","stream":true,"tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"run pwd"}]}`)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading gateway stream: %v", err)
+	}
+	stream := string(body)
+	for _, want := range []string{`"type":"tool_use"`, `"name":"bash"`, `"partial_json":"{\"cmd\":\"pwd\"}"`, `"stop_reason":"tool_use"`, "event: message_stop"} {
+		if response.StatusCode != http.StatusOK || !strings.Contains(stream, want) {
+			t.Fatalf("gateway status/body=%d %q, missing %q", response.StatusCode, stream, want)
+		}
+	}
+}
+
+func TestGatewayRejectsMalformedStreamedResponsesFunctionCall(t *testing.T) {
+	ctx := context.Background()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_bad\",\"name\":\"bash\",\"arguments\":\"not-json\"}}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_bad\",\"name\":\"bash\",\"arguments\":\"not-json\"}]}}\n\n")
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: provider.URL, SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
+		store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
+			Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true),
+		}},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	response := postGatewayMessage(t, ctx, server.URL(), `{"model":"responses","stream":true,"tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"run pwd"}]}`)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading gateway stream: %v", err)
+	}
+	stream := string(body)
+	if response.StatusCode != http.StatusOK || !strings.Contains(stream, "event: error") ||
+		!strings.Contains(stream, "arguments are not valid JSON") || strings.Contains(stream, `"type":"tool_use"`) {
+		t.Fatalf("gateway status/body=%d %q", response.StatusCode, stream)
+	}
+}
+
+func TestValidateResponsesStreamTool(t *testing.T) {
+	tests := []struct {
+		name    string
+		tool    openAIToolCall
+		wantErr string
+	}{
+		{
+			name:    "missing call ID",
+			tool:    openAIToolCall{Function: openAIFunctionCall{Name: "bash", Arguments: `{}`}},
+			wantErr: "missing call_id or name",
+		},
+		{
+			name:    "missing name",
+			tool:    openAIToolCall{ID: "call_1", Function: openAIFunctionCall{Arguments: `{}`}},
+			wantErr: "missing call_id or name",
+		},
+		{
+			name:    "invalid arguments",
+			tool:    openAIToolCall{ID: "call_1", Function: openAIFunctionCall{Name: "bash", Arguments: `not-json`}},
+			wantErr: "arguments are not valid JSON",
+		},
+		{
+			name: "valid scalar arguments",
+			tool: openAIToolCall{ID: "call_1", Function: openAIFunctionCall{
+				Name:      "bash",
+				Arguments: `"pwd"`,
+			}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateResponsesStreamTool(test.tool)
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateResponsesStreamTool() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("validateResponsesStreamTool() error = %v, want %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestGatewayRejectsBufferedResponsesProviderForStreamRequest(t *testing.T) {
+	ctx := context.Background()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"resp_buffered","status":"completed","output":[]}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: provider.URL, SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
+		store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
+			Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true),
+		}},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	response := postGatewayMessage(t, ctx, server.URL(), `{"model":"responses","stream":true,"messages":[{"role":"user","content":"hello"}]}`)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("reading gateway error: %v", err)
+	}
+	if response.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "did not honor the streaming request") {
+		t.Fatalf("gateway status/body = %d %q", response.StatusCode, body)
 	}
 }
 

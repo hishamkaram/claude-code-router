@@ -243,8 +243,9 @@ func TestGatewayRoutesOpenAICompatibleClaudeCodeStreamingShape(t *testing.T) {
 			gotSystem = payload.Messages[0].Content
 			gotContent = payload.Messages[len(payload.Messages)-1].Content
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","choices":[{"message":{"content":"streamed route"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"streamed route\"},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
 	}))
 	defer provider.Close()
 
@@ -465,6 +466,11 @@ func TestGatewayRejectsUnsupportedProviderFinishReason(t *testing.T) {
 		stream := stream
 		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprint(w, "data: {\"id\":\"chatcmpl-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"filtered\"},\"finish_reason\":\"content_filter\"}]}\n\ndata: [DONE]\n\n")
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = fmt.Fprint(w, `{"id":"chatcmpl-test","choices":[{"message":{"content":"filtered"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 			}))
@@ -489,14 +495,18 @@ func TestGatewayRejectsUnsupportedProviderFinishReason(t *testing.T) {
 				t.Fatalf("gateway request error = %v", err)
 			}
 			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusBadGateway {
-				t.Fatalf("gateway status = %d, want 502", resp.StatusCode)
-			}
 			raw, err := io.ReadAll(resp.Body)
 			if err != nil {
 				t.Fatalf("reading error body: %v", err)
 			}
 			errorBody := string(raw)
+			if stream {
+				if resp.StatusCode != http.StatusOK || !strings.Contains(errorBody, "event: error") {
+					t.Fatalf("gateway streaming status/body = %d %q, want in-band error", resp.StatusCode, raw)
+				}
+			} else if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("gateway status = %d, want 502", resp.StatusCode)
+			}
 			if !strings.Contains(errorBody, "unsupported finish_reason") || !strings.Contains(errorBody, "content_filter") {
 				t.Fatalf("gateway error body = %q", raw)
 			}

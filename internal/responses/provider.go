@@ -8,8 +8,6 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/agentinput"
 )
 
-const fallbackMessageID = "msg_ccr_responses"
-
 // AnthropicResponseFromResponsesJSON decodes a non-stream Responses payload and
 // converts supported output items to an Anthropic-compatible message.
 func AnthropicResponseFromResponsesJSON(raw []byte) (*AnthropicResponse, error) {
@@ -25,6 +23,9 @@ func AnthropicResponseFromResponsesJSON(raw []byte) (*AnthropicResponse, error) 
 func AnthropicResponseFromResponses(resp *Response) (*AnthropicResponse, error) {
 	if err := ValidateStatus(resp); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(resp.ID) == "" {
+		return nil, fmt.Errorf("%w: Responses payload is missing an id", ErrMalformedProviderOutput)
 	}
 	blocks := make([]AnthropicContentBlock, 0, len(resp.Output))
 	hasToolUse := false
@@ -45,7 +46,7 @@ func AnthropicResponseFromResponses(resp *Response) (*AnthropicResponse, error) 
 		blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: ""})
 	}
 	return &AnthropicResponse{
-		ID:           firstNonEmpty(resp.ID, fallbackMessageID),
+		ID:           resp.ID,
 		Type:         "message",
 		Role:         "assistant",
 		Model:        resp.Model,
@@ -185,13 +186,4 @@ func invalidAgentToolInputMessage(input map[string]any) string {
 func trimmedStringField(input map[string]any, key string) string {
 	value, _ := input[key].(string)
 	return strings.TrimSpace(value)
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

@@ -35,7 +35,12 @@ func TestRouteAndLifecycleEventRoundTrip(t *testing.T) {
 		t.Fatalf("ResolveRouteEvent() error = %v", resolveErr)
 	}
 	usage := TokenUsage{Observed: true, InputTokens: 12, OutputTokens: 7}
-	if completeErr := s.CompleteRouteEvent(ctx, eventID, "succeeded", 200, "", 25*time.Millisecond, usage); completeErr != nil {
+	stream := &StreamMetrics{
+		Observed: true, UpstreamHeadersMS: 3, FirstUpstreamEventMS: 4,
+		FirstDownstreamEventMS: 5, UpstreamEventCount: 7,
+		EarlyStreamCommit: true, TerminalPhase: "completed",
+	}
+	if completeErr := s.CompleteRouteEvent(ctx, eventID, "succeeded", 200, "", 25*time.Millisecond, usage, stream); completeErr != nil {
 		t.Fatalf("CompleteRouteEvent() error = %v", completeErr)
 	}
 	if _, recordErr := s.RecordLifecycleEvent(ctx, LifecycleEvent{
@@ -54,7 +59,9 @@ func TestRouteAndLifecycleEventRoundTrip(t *testing.T) {
 	}
 	route := events[1].Route
 	if route.ModelAlias != "coder" || route.ProviderModel != "model-v1" ||
-		route.HTTPStatus != 200 || !route.Usage.Observed || route.Usage.OutputTokens != 7 {
+		route.HTTPStatus != 200 || !route.Usage.Observed || route.Usage.OutputTokens != 7 ||
+		!route.Stream.Observed || route.Stream.UpstreamEventCount != 7 ||
+		!route.Stream.EarlyStreamCommit || route.Stream.TerminalPhase != "completed" {
 		t.Fatalf("route event = %#v", route)
 	}
 	if events[0].Lifecycle.ExternalID != "agent-1" {

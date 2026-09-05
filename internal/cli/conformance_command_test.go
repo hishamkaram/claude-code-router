@@ -267,6 +267,7 @@ func newCLIConformanceOpenAIModelsServer(t *testing.T, models []string) *httptes
 			_, _ = fmt.Fprint(w, `{"input_tokens":9}`)
 		case "/v1/chat/completions":
 			var payload struct {
+				Stream   bool `json:"stream"`
 				Messages []struct {
 					Content string `json:"content"`
 				} `json:"messages"`
@@ -284,6 +285,11 @@ func newCLIConformanceOpenAIModelsServer(t *testing.T, models []string) *httptes
 					case <-time.After(100 * time.Millisecond):
 					}
 				}
+			}
+			if payload.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, "data: {\"id\":\"stream\",\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"stream\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n")
+				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			if len(payload.Tools) > 0 {

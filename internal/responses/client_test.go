@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -175,5 +176,62 @@ func TestClientCreateBoundsSuccessfulResponseBody(t *testing.T) {
 	_, err = client.Create(context.Background(), &Request{Model: "gpt"})
 	if !errors.Is(err, ErrMalformedProviderOutput) || !strings.Contains(err.Error(), "exceeds the 32 byte limit") {
 		t.Fatalf("Create() error = %v, want bounded malformed-provider-output error", err)
+	}
+}
+
+func TestClientStartStreamPostsStreamingRequestAndReadsEvents(t *testing.T) {
+	t.Parallel()
+
+	var gotRequest Request
+	var gotAccept string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		if err := json.NewDecoder(r.Body).Decode(&gotRequest); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\r\n\r\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[]}}\r\n\r\n")
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientOptions{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	stream, err := client.StartStream(context.Background(), &Request{Model: "gpt"})
+	if err != nil {
+		t.Fatalf("StartStream() error = %v", err)
+	}
+	defer stream.Close()
+	for _, want := range []string{"response.created", "response.completed"} {
+		data, ok, nextErr := stream.Next()
+		if nextErr != nil || !ok || !strings.Contains(string(data), want) {
+			t.Fatalf("Next() = data %q ok=%t err=%v, want %q", data, ok, nextErr, want)
+		}
+	}
+	if _, ok, nextErr := stream.Next(); nextErr != nil || ok {
+		t.Fatalf("terminal Next() = ok=%t err=%v", ok, nextErr)
+	}
+	if !gotRequest.Stream || gotAccept != "text/event-stream" {
+		t.Fatalf("stream request=%#v Accept=%q", gotRequest, gotAccept)
+	}
+}
+
+func TestClientStartStreamRejectsJSONResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_buffered","output":[]}`)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(ClientOptions{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	_, err = client.StartStream(context.Background(), &Request{Model: "gpt"})
+	if !errors.Is(err, ErrMalformedProviderOutput) || !strings.Contains(err.Error(), "did not honor the streaming request") {
+		t.Fatalf("StartStream() error = %v", err)
 	}
 }

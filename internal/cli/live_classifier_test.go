@@ -120,20 +120,19 @@ func (s *liveAutoClassifierState) handleChat(t *testing.T, w http.ResponseWriter
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++
-	w.Header().Set("Content-Type", "application/json")
 	switch {
 	case isLiveAutoClassifierRequest(payload):
 		s.classifierRequestSeen = true
 		writeLiveOpenAIClassifierResponse(w, payload)
 	case s.chatCalls == 1:
 		s.firstRequestHadWrite = liveToolsContain(payload.Tools, "Write")
-		writeLiveToolCall(w, "chatcmpl-classifier-write", "toolu_classifier_write", "Write", map[string]string{
+		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-classifier-write", "toolu_classifier_write", "Write", map[string]string{
 			"file_path": s.writePath,
 			"content":   "{\"ccrLiveTest\":true}\n",
 		})
 	case openAIMessagesContainToolRole(payload.Messages, ""):
 		s.writeToolResultSeen = true
-		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-classifier-parent","choices":[{"message":{"content":"CCR_LIVE_CLASSIFIER_OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}`)
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-classifier-parent", "CCR_LIVE_CLASSIFIER_OK", 4, 2)
 	default:
 		t.Errorf("unexpected provider request in classifier live route: %#v", payload.Messages)
 		http.Error(w, "unexpected request", http.StatusBadRequest)

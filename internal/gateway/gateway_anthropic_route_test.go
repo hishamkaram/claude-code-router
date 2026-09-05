@@ -207,6 +207,124 @@ func TestGatewayAnthropicPassThroughFlushesEventStream(t *testing.T) {
 	}
 }
 
+func TestGatewayAnthropicPassThroughRedactsProviderStreamError(t *testing.T) {
+	ctx := context.Background()
+	anthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "event: error\n")
+		_, _ = fmt.Fprint(w, `data: {"type":"error","error":{"type":"rate_limit_error","message":"provider-secret"}}`+"\n\n")
+	}))
+	defer anthropic.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "anthropic", Type: "anthropic", BaseURL: anthropic.URL}, store.Model{Alias: "claude", ProviderName: "anthropic", ProviderModel: "claude-opus", Status: "full"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"claude","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway stream request error = %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading stream response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if strings.Contains(string(body), "provider-secret") {
+		t.Fatalf("stream leaked provider error: %q", body)
+	}
+	if !strings.Contains(string(body), "Anthropic provider stream failed") {
+		t.Fatalf("stream response = %q, want generic error", body)
+	}
+	if !strings.Contains(string(body), `"type":"rate_limit_error"`) {
+		t.Fatalf("stream response = %q, want preserved rate_limit_error", body)
+	}
+}
+
+func TestAnthropicStreamErrorType(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "preserves overloaded error",
+			data: `{"type":"error","error":{"type":"overloaded_error","message":"secret"}}`,
+			want: "overloaded_error",
+		},
+		{
+			name: "rejects arbitrary type",
+			data: `{"type":"error","error":{"type":"provider-secret","message":"secret"}}`,
+			want: "api_error",
+		},
+		{
+			name: "rejects malformed event",
+			data: `{"type":`,
+			want: "api_error",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := anthropicStreamErrorType([]byte(test.data)); got != test.want {
+				t.Fatalf("anthropicStreamErrorType() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestAnthropicSSEScannerRetainsNativeErrorPayload(t *testing.T) {
+	scanner := newAnthropicSSEScanner(strings.NewReader("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"provider-secret\"}}\n\n"), maxAnthropicStreamBytes)
+
+	frame, ok, err := scanner.next()
+	if err != nil {
+		t.Fatalf("scanner.next() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("scanner.next() returned no frame")
+	}
+	if frame.event != "error" {
+		t.Fatalf("frame.event = %q, want error", frame.event)
+	}
+	if got := anthropicStreamErrorType(frame.data); got != "rate_limit_error" {
+		t.Fatalf("anthropicStreamErrorType(frame.data) = %q, want rate_limit_error", got)
+	}
+}
+
+func TestAnthropicSSEScannerSeparatesCRLFFrames(t *testing.T) {
+	scanner := newAnthropicSSEScanner(strings.NewReader("event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n"), maxAnthropicStreamBytes)
+
+	for _, want := range []anthropicSSEFrame{
+		{event: "message_start", data: []byte("{\"type\":\"message_start\"}")},
+		{event: "message_stop", data: []byte("{\"type\":\"message_stop\"}")},
+	} {
+		frame, ok, err := scanner.next()
+		if err != nil {
+			t.Fatalf("scanner.next() error = %v", err)
+		}
+		if !ok {
+			t.Fatalf("scanner.next() returned no frame, want %#v", want)
+		}
+		if frame.event != want.event || string(frame.data) != string(want.data) {
+			t.Fatalf("scanner frame = %#v, want %#v", frame, want)
+		}
+	}
+	if _, ok, err := scanner.next(); err != nil || ok {
+		t.Fatalf("terminal scanner.next() = ok=%t err=%v", ok, err)
+	}
+}
+
 func TestGatewayCountTokensUsesAnthropicAliasProviderModel(t *testing.T) {
 	ctx := context.Background()
 	var gotBody string

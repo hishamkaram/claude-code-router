@@ -51,9 +51,12 @@ type RouteResult struct {
 	HTTPStatus int
 	ErrorClass string
 	Usage      TokenUsage
+	Stream     *StreamMetrics
 }
 
 type TokenUsage = store.TokenUsage
+
+type StreamMetrics = store.StreamMetrics
 
 type LifecycleEvent = store.LifecycleEvent
 
@@ -240,7 +243,7 @@ func (s *RouteSpan) Complete(ctx context.Context, result RouteResult) {
 		return
 	}
 	err := s.recorder.store.CompleteRouteEvent(ctx, s.eventID, result.Status,
-		result.HTTPStatus, result.ErrorClass, time.Since(s.startedAt), result.Usage)
+		result.HTTPStatus, result.ErrorClass, time.Since(s.startedAt), result.Usage, result.Stream)
 	if err != nil {
 		s.recorder.recordFailure("complete route", err)
 		return
