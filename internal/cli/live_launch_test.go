@@ -107,7 +107,7 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 		}
 	}
 
-	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--", "--dangerously-skip-permissions explain this option")
+	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--", "--", "--dangerously-skip-permissions explain this option")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}

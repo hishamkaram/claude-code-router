@@ -163,7 +163,7 @@ func TestLaunchPreservesClaudeOptionTerminator(t *testing.T) {
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	_, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--model", "gpt", "--add-dir", "/tmp/extra", "--", "review this change")
+	}, "--db", dbPath, "launch", "--model", "gpt", "--add-dir", "/tmp/extra", "--", "--", "review this change")
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
@@ -173,15 +173,15 @@ func TestLaunchPreservesClaudeOptionTerminator(t *testing.T) {
 	}
 }
 
-func TestParseLaunchInvocationForwardsLeadingTerminator(t *testing.T) {
+func TestParseLaunchInvocationConsumesLeadingTerminator(t *testing.T) {
 	t.Parallel()
 
 	invocation, err := parseLaunchInvocation([]string{"--", "--help"})
 	if err != nil {
 		t.Fatalf("parseLaunchInvocation() error = %v", err)
 	}
-	if !slices.Equal(invocation.claudeArgs, []string{"--", "--help"}) {
-		t.Fatalf("claude args = %#v, want [-- --help]", invocation.claudeArgs)
+	if !slices.Equal(invocation.claudeArgs, []string{"--help"}) {
+		t.Fatalf("claude args = %#v, want [--help]", invocation.claudeArgs)
 	}
 }
 
@@ -239,7 +239,7 @@ func TestLaunchPreservesReservedLookingPromptAfterLeadingTerminator(t *testing.T
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	_, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--", "--dangerously-skip-permissions", "explain this option")
+	}, "--db", dbPath, "launch", "--", "--", "--dangerously-skip-permissions", "explain this option")
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}

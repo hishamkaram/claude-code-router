@@ -85,7 +85,7 @@ func TestParseLaunchInvocationForwardsCUAFlagsAfterTerminator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseLaunchInvocation() error = %v", err)
 	}
-	want := []string{"--", "--ccr-cua-mode", "managed", "--ccr-cua-timeout=5s"}
+	want := []string{"--ccr-cua-mode", "managed", "--ccr-cua-timeout=5s"}
 	if !slices.Equal(invocation.claudeArgs, want) {
 		t.Fatalf("claude args = %#v, want %#v", invocation.claudeArgs, want)
 	}
