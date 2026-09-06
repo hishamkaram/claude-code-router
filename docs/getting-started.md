@@ -126,6 +126,17 @@ help, or `ccr launch -- --help` for underlying Claude Code help without starting
 CCR. CCR rejects options that would override its selected model, generated model
 allowlist, or tool-safety restrictions.
 
+For machine-readable output, keep CCR options before `--`:
+
+```bash
+ccr launch --model coding-model -p -- --output-format stream-json --verbose
+```
+
+CCR consumes the first separator and validates the remaining Claude Code options.
+CCR-owned `--no-history`, `--no-lifecycle`, `--no-statusline`, and `--ccr-cua-*`
+options also belong before it. A second `--` is passed to Claude Code to mark
+literal prompt text, for example `ccr launch -p -- -- --literal-prompt`.
+
 ## Scripted Alternatives
 
 For automation, add a provider and import all discoverable models without

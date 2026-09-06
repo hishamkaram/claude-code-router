@@ -44,9 +44,6 @@ func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
 		return nil, false
 	}
 	args := invocation.claudeArgs
-	if len(args) == 2 && args[0] == "--" {
-		args = args[1:]
-	}
 	if len(args) != 1 {
 		return nil, false
 	}
@@ -68,7 +65,8 @@ func parseLaunchInvocation(args []string) (launchInvocation, error) {
 	for index := 0; index < len(args); index++ {
 		arg := args[index]
 		if arg == "--" {
-			invocation.claudeArgs = append(invocation.claudeArgs, args[index:]...)
+			// Consume CCR's separator; a subsequent separator belongs to Claude Code.
+			invocation.claudeArgs = append(invocation.claudeArgs, args[index+1:]...)
 			break
 		}
 		if arg == "--help" || arg == "-h" {
@@ -441,6 +439,15 @@ func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, pe
 }
 
 func validateLaunchPassthroughArgs(args []string) error {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		option, _, _ := strings.Cut(arg, "=")
+		if isLaunchCUAOption(option) {
+			return fmt.Errorf("%s is managed by ccr launch; pass it before --", option)
+		}
+	}
 	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline"); option != "" {
 		return fmt.Errorf("%s is managed by ccr launch; pass its CCR value before other Claude Code options", option)
 	}

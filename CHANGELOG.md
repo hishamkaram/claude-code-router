@@ -5,6 +5,15 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.11
+
+- Consume the CCR separator in `ccr launch -- <Claude Code options>` so JSON,
+  stream-json, and other Claude Code options take effect. Apply launch safety
+  validation to these options, including CCR-owned computer-use flags.
+- Keep CCR-owned options before the separator. Use a second `--` when passing
+  literal prompt text beginning with a dash; help and version use the same
+  argument normalization as regular launches.
+
 ## v0.4.10
 
 - Stream OpenAI Chat Completions, OpenAI Responses, Anthropic-compatible, and

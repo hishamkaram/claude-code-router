@@ -26,6 +26,13 @@ unchanged unless they would override CCR's selected model, generated model
 allowlist, or tool-safety restrictions. For example ccr launch --chrome starts
 Claude Code with its Chrome integration.
 
+Use -- to end CCR option parsing and pass Claude Code options, for example:
+  ccr launch --model <alias> -p -- --output-format stream-json --verbose
+CCR consumes this separator and validates the forwarded options. CCR-owned
+options, including --no-history, --no-lifecycle, --no-statusline and --ccr-cua-*
+options, must precede it. A second -- is forwarded as Claude Code's literal
+prompt boundary: ccr launch -p -- -- --prompt-starting-with-a-dash
+
 Fallback and detached background modes are rejected because they cannot preserve
 CCR's selected route and local gateway ownership.
 
