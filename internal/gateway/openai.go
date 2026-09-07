@@ -143,6 +143,10 @@ func anthropicStopReasonFromOpenAI(resp openAIChatResponse) (string, error) {
 	}
 	switch finishReason := resp.Choices[0].FinishReason; finishReason {
 	case "", "stop":
+		message := resp.Choices[0].Message
+		if message.textContent() == "" && len(message.ToolCalls) == 0 && message.FunctionCall == nil {
+			return "", fmt.Errorf("provider ended the turn without text or tool calls")
+		}
 		return "end_turn", nil
 	case "length":
 		return "max_tokens", nil

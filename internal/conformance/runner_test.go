@@ -267,7 +267,7 @@ func newAnthropicConformanceFixture(t *testing.T) *httptest.Server {
 			}
 			if payload.Stream {
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"model-v1\",\"usage\":{\"input_tokens\":5}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+				_, _ = fmt.Fprint(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"model-v1\",\"usage\":{\"input_tokens\":5}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"OK\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")

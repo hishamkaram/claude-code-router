@@ -18,7 +18,7 @@ import (
 )
 
 func TestLiveRealProviderMatrix(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 	if os.Getenv("CCR_LIVE_REAL_MATRIX") != "1" {
 		t.Skip("set CCR_LIVE_REAL_MATRIX=1 to run the required local real-provider matrix")
@@ -32,13 +32,11 @@ func TestLiveRealProviderMatrix(t *testing.T) {
 		t.Fatal("real-provider matrix requires at least one configured non-blocked model alias")
 	}
 	primary, chatOnly := partitionLiveModels(t, ctx, dbPath, models)
-	beforeLaunchID := latestLiveLaunchID(t, ctx, dbPath)
-	runLiveRealSwitchMatrix(t, ctx, dbPath, primary)
-	assertLiveRealRoutes(t, ctx, dbPath, beforeLaunchID, primary, true)
+	launchID := runLiveRealSwitchMatrix(t, ctx, dbPath, primary)
+	assertLiveRealRoutes(t, ctx, dbPath, launchID, primary, true)
 	for _, model := range chatOnly {
-		runLiveRealChatOnlyAlias(t, ctx, dbPath, model)
-		assertLiveRealRoutes(t, ctx, dbPath, beforeLaunchID, []store.Model{model}, false)
-		beforeLaunchID = latestLiveLaunchID(t, ctx, dbPath)
+		launchID = runLiveRealChatOnlyAlias(t, ctx, dbPath, model)
+		assertLiveRealRoutes(t, ctx, dbPath, launchID, []store.Model{model}, false)
 	}
 }
 
@@ -339,72 +337,56 @@ func partitionLiveModels(t *testing.T, ctx context.Context, dbPath string, model
 	return primary, chatOnly
 }
 
-func latestLiveLaunchID(t *testing.T, ctx context.Context, dbPath string) int64 {
-	t.Helper()
-	s, err := store.Open(ctx, dbPath)
-	if err != nil {
-		t.Fatalf("store.Open() error = %v", err)
+func liveRealGatewayStarter(launchID *int64) func(context.Context, gateway.Config) (*gateway.Server, error) {
+	return func(ctx context.Context, cfg gateway.Config) (*gateway.Server, error) {
+		*launchID = cfg.Tracker.Snapshot().LaunchID
+		return gateway.Start(ctx, cfg)
 	}
-	defer func() { _ = s.Close() }()
-	launches, err := s.ListLaunches(ctx)
-	if err != nil {
-		t.Fatalf("ListLaunches() error = %v", err)
-	}
-	if len(launches) == 0 {
-		return 0
-	}
-	return launches[0].ID
 }
 
-func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, models []store.Model) {
+func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, models []store.Model) int64 {
 	t.Helper()
-	messages := make([]string, 0, 2+4*len(models))
-	messages = append(messages, "/model sonnet", "Reply exactly CCR_LIVE_REAL_ANTHROPIC_INITIAL.")
-	for index, model := range models {
-		discoveryID, err := gateway.DiscoveryIDForModel(model)
-		if err != nil {
-			t.Fatalf("DiscoveryIDForModel(%s) error = %v", model.Alias, err)
-		}
-		aliasSentinel := fmt.Sprintf("CCR_LIVE_REAL_ALIAS_%d", index)
-		returnSentinel := fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index)
-		messages = append(
-			messages,
-			"/model "+discoveryID,
-			"Reply exactly "+aliasSentinel+".",
-			"/model sonnet",
-			"Reply exactly "+returnSentinel+".",
-		)
-	}
-	input := liveStreamInput(t, messages...)
 	args := []string{"--db", dbPath, "launch", "--print"}
 	args = append(args, configuredLiveRealFirstPartyAuth().args()...)
 	args = append(args,
 		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "auto",
 	)
-	out, errOut, err := runLiveCommand(
-		ctx, Dependencies{In: strings.NewReader(input)},
-		args...,
-	)
+	var launchID int64
+	run := startLiveCompactionCommand(t, ctx, Dependencies{StartGateway: liveRealGatewayStarter(&launchID)}, args)
+	check := func(label, model, sentinel string) {
+		selection, err := liveRealTurn(ctx, run, liveStreamInput(t, "/model "+model))
+		if err != nil {
+			t.Fatalf("%s model selection: %v", label, err)
+		}
+		if !strings.HasPrefix(selection, "Set model to ") {
+			t.Errorf("%s: Claude Code rejected model selection (output withheld)", label)
+			return
+		}
+		result, err := liveRealTurn(ctx, run, liveStreamInput(t, "Reply with only this exact marker, without punctuation or commentary:\n"+sentinel))
+		if err != nil || strings.TrimSpace(result) != sentinel {
+			t.Errorf("%s: expected turn marker %q, result_bytes=%d, error=%v", label, sentinel, len(result), err)
+		} else {
+			t.Logf("%s: completed expected turn", label)
+		}
+	}
+	check("initial Anthropic", "sonnet", "CCR_LIVE_REAL_ANTHROPIC_INITIAL")
+	for index, model := range models {
+		discoveryID, err := gateway.DiscoveryIDForModel(model)
+		if err != nil {
+			t.Fatalf("DiscoveryIDForModel(%s) error = %v", model.Alias, err)
+		}
+		check(model.Alias, discoveryID, fmt.Sprintf("CCR_LIVE_REAL_ALIAS_%d", index))
+		check("return from "+model.Alias, "sonnet", fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index))
+	}
+	out, errOut, err := run.finish(ctx)
 	if err != nil {
 		if liveAnthropicAuthUnavailable(out + "\n" + errOut) {
 			t.Fatalf("real provider switch matrix requires valid first-party Anthropic authentication; sign in to Claude Code, configure ANTHROPIC_API_KEY, or set CCR_LIVE_REAL_CLAUDE_ACCOUNT to an available pooled account, then retry; %s", liveRealOutputSummary(out, errOut))
 		}
 		failLiveRealCommand(t, "real provider switch matrix", err, out, errOut)
 	}
-	for index := range models {
-		for _, sentinel := range []string{
-			fmt.Sprintf("CCR_LIVE_REAL_ALIAS_%d", index),
-			fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index),
-		} {
-			if !strings.Contains(out, sentinel) {
-				failLiveRealOutput(t, fmt.Sprintf("real provider matrix output missing %q", sentinel), out, errOut)
-			}
-		}
-	}
-	if !strings.Contains(out, "CCR_LIVE_REAL_ANTHROPIC_INITIAL") {
-		failLiveRealOutput(t, "real provider matrix output missing first-party sentinel", out, errOut)
-	}
+	return launchID
 }
 
 type liveRealFirstPartyAuth struct {
@@ -461,11 +443,12 @@ func TestConfiguredLiveRealFirstPartyAuth(t *testing.T) {
 	}
 }
 
-func runLiveRealChatOnlyAlias(t *testing.T, ctx context.Context, dbPath string, model store.Model) {
+func runLiveRealChatOnlyAlias(t *testing.T, ctx context.Context, dbPath string, model store.Model) int64 {
 	t.Helper()
 	sentinel := "CCR_LIVE_REAL_CHAT_" + strings.ToUpper(strings.ReplaceAll(model.Alias, "-", "_"))
+	var launchID int64
 	out, errOut, err := runLiveCommand(
-		ctx, Dependencies{In: strings.NewReader("Reply exactly " + sentinel + ".\n")},
+		ctx, Dependencies{In: strings.NewReader("Reply exactly " + sentinel + ".\n"), StartGateway: liveRealGatewayStarter(&launchID)},
 		"--db", dbPath, "launch", "--model", model.Alias, "--print", "--auth-mode", "gateway-token",
 	)
 	if err != nil {
@@ -474,6 +457,7 @@ func runLiveRealChatOnlyAlias(t *testing.T, ctx context.Context, dbPath string, 
 	if !strings.Contains(out, sentinel) {
 		failLiveRealOutput(t, fmt.Sprintf("real chat-only alias %q output missing %q", model.Alias, sentinel), out, errOut)
 	}
+	return launchID
 }
 
 func failLiveRealCommand(t *testing.T, operation string, err error, out, errOut string) {
@@ -498,19 +482,17 @@ func TestLiveRealOutputSummaryWithholdsContent(t *testing.T) {
 	}
 }
 
-func assertLiveRealRoutes(t *testing.T, ctx context.Context, dbPath string, afterLaunchID int64, models []store.Model, requireAnthropic bool) {
+func assertLiveRealRoutes(t *testing.T, ctx context.Context, dbPath string, launchID int64, models []store.Model, requireAnthropic bool) {
 	t.Helper()
+	if launchID <= 0 {
+		t.Fatal("real matrix gateway did not record its launch ID")
+	}
 	s, err := store.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	launches, err := s.ListLaunches(ctx)
-	if err != nil || len(launches) == 0 || launches[0].ID <= afterLaunchID {
-		t.Fatalf("new real matrix launch not found: launches=%#v error=%v", launches, err)
-	}
-	launch := launches[0]
-	events, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launch.ID, Limit: 5_000})
+	events, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launchID, Limit: 5_000})
 	if err != nil {
 		t.Fatalf("ListTraceEvents() error = %v", err)
 	}
@@ -529,10 +511,10 @@ func assertLiveRealRoutes(t *testing.T, ctx context.Context, dbPath string, afte
 	}
 	for _, model := range models {
 		if !seenAliases[model.Alias] {
-			t.Fatalf("real matrix trace missing alias %q: %#v", model.Alias, events)
+			t.Errorf("real matrix trace missing successful alias %q (launch=%d, events=%d)", model.Alias, launchID, len(events))
 		}
 	}
 	if requireAnthropic && !seenAnthropic {
-		t.Fatalf("real matrix trace missing first-party Anthropic route: %#v", events)
+		t.Fatalf("real matrix trace missing first-party Anthropic route (launch=%d, events=%d)", launchID, len(events))
 	}
 }

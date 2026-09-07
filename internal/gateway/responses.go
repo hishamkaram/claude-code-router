@@ -25,7 +25,7 @@ func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, 
 		writeAnthropicError(w, managedErr.status, managedErr.message)
 		return usage
 	}
-	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredOpenAIAnthropicFields(req.Fields))
+	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredOpenAIRequestFields(req))
 	apiKey, err := resolveProviderSecret(r.Context(), h.cfg.Secrets, route.provider.SecretRef)
 	if err != nil {
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(route.provider.SecretRef)))

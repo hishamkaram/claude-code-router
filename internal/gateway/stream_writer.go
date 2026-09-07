@@ -349,10 +349,10 @@ func (c *translatedStreamCoordinator) handleDone() (bool, *streamFailure) {
 		return false, failure
 	}
 	usage, err := c.adapter.Finish(c.writer)
+	c.result.Usage = usage
 	if err != nil {
 		return false, &streamFailure{errorClass: "provider_protocol", message: err.Error()}
 	}
-	c.result.Usage = usage
 	c.result.TerminalPhase = "completed"
 	return true, nil
 }

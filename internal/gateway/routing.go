@@ -41,7 +41,7 @@ type messageRoute struct {
 }
 
 func validateRouteMessageCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {
-	if validationErr := validateModelMessageCapabilities(route.model, route.modelCapabilities, req); validationErr != nil {
+	if validationErr := validateRouteModelCapabilities(route, req); validationErr != nil {
 		return validationErr
 	}
 	if req.Stream && !route.capabilities.SupportsStreaming {
@@ -71,6 +71,16 @@ func validateRouteMessageCapabilities(route messageRoute, req anthropicRequest) 
 		return &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider protocol %q for model %q does not support tools", route.capabilities.Protocol, req.Model)}
 	}
 	return nil
+}
+
+func validateRouteModelCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {
+	capabilities := route.modelCapabilities
+	// Translated requests omit Anthropic cache hints without dropping content.
+	// Validate only features that are actually sent to the selected provider.
+	if route.kind == routeOpenAI || route.kind == routeOpenAIResponses {
+		capabilities.SupportsPromptCaching = nil
+	}
+	return validateModelMessageCapabilities(route.model, capabilities, req)
 }
 
 func (h *handler) validateManagedRouteMessageCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {

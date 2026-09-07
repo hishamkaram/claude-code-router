@@ -304,7 +304,7 @@ func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req a
 		writeAnthropicError(w, err.status, err.message)
 		return usage
 	}
-	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredOpenAIAnthropicFields(req.Fields))
+	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredOpenAIRequestFields(req))
 
 	apiKey, err := resolveProviderSecret(r.Context(), h.cfg.Secrets, route.provider.SecretRef)
 	if err != nil {
@@ -323,7 +323,7 @@ func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req a
 		writeAnthropicError(w, http.StatusNotImplemented, err.Error())
 		return usage
 	}
-	ignoredFields = append(ignoredOpenAIAnthropicFields(req.Fields), ignoredFields...)
+	ignoredFields = append(ignoredOpenAIRequestFields(req), ignoredFields...)
 	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredFields)
 	messageID, err := newGatewayMessageID()
 	if err != nil {
@@ -459,6 +459,14 @@ func ignoredOpenAIAnthropicFields(fields map[string]json.RawMessage) []string {
 		return []string{"context_management"}
 	}
 	return nil
+}
+
+func ignoredOpenAIRequestFields(req anthropicRequest) []string {
+	fields := ignoredOpenAIAnthropicFields(req.Fields)
+	if requestUsesPromptCaching(req) {
+		fields = append(fields, "cache_control")
+	}
+	return fields
 }
 
 func addIgnoredAnthropicFieldsHeader(header http.Header, fields []string) {

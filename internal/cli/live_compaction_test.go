@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -51,9 +51,10 @@ func TestLiveClaudeManualCompactThroughOpenAIProvider(t *testing.T) {
 
 func TestLiveClaudeAutoCompactThroughOpenAIProvider(t *testing.T) {
 	ctx := liveCompactionContext(t)
+	t.Setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "100000")
 	fixture := newLiveCompactionFixture(t)
 	dbPath := configureLiveCompactionModel(t, ctx, fixture.URL())
-	run := startLiveCompactionRun(t, ctx, dbPath, "8b814572-96c7-45bf-a9fb-da2345fc4d25", "--autocompact", "100k")
+	run := startLiveCompactionRun(t, ctx, dbPath, "8b814572-96c7-45bf-a9fb-da2345fc4d25")
 	for _, message := range liveCompactionHistoryMessages(4, "automatic-compaction") {
 		run.sendAndWaitNext(t, ctx, fixture, message)
 	}
@@ -98,20 +99,26 @@ func liveCompactionContext(t *testing.T) context.Context {
 func configureLiveCompactionModel(t *testing.T, ctx context.Context, baseURL string) string {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	addLiveCompactionModel(t, ctx, dbPath, baseURL)
+	return dbPath
+}
+
+func addLiveCompactionModel(t *testing.T, ctx context.Context, dbPath, baseURL string) {
+	t.Helper()
 	for _, args := range [][]string{
 		{"--db", dbPath, "provider", "add", "compact-fixture", "--type", "litellm", "--base-url", baseURL, "--no-api-key", "--mode", "full"},
 		{"--db", dbPath, "model", "add", "compact-fixture", "--provider", "compact-fixture", "--model", "fixture-compact-model", "--compat", "full"},
 		{"--db", dbPath, "model", "update", "compact-fixture", "--context-window", "1000000"},
+		{"--db", dbPath, "model", "update", "compact-fixture", "--prompt-caching", "false"},
 	} {
 		if out, errOut, err := runLiveCommand(ctx, Dependencies{}, args...); err != nil {
 			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
 		}
 	}
-	return dbPath
 }
 
 type liveCompactionRun struct {
-	input  *io.PipeWriter
+	input  *os.File
 	out    *synchronizedBuffer
 	errOut *synchronizedBuffer
 	cancel context.CancelFunc
@@ -121,8 +128,23 @@ type liveCompactionRun struct {
 
 func startLiveCompactionRun(t *testing.T, ctx context.Context, dbPath, sessionID string, claudeArgs ...string) *liveCompactionRun {
 	t.Helper()
+	args := make([]string, 0, 15+len(claudeArgs))
+	args = append(args,
+		"--db", dbPath, "launch", "--model", "compact-fixture", "--print",
+		"--auth-mode", "gateway-token",
+		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--session-id", sessionID,
+	)
+	return startLiveCompactionCommand(t, ctx, Dependencies{}, append(args, claudeArgs...))
+}
+
+func startLiveCompactionCommand(t *testing.T, ctx context.Context, deps Dependencies, args []string) *liveCompactionRun {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("creating live command input: %v", err)
+	}
 	runCtx, cancel := context.WithCancel(ctx)
-	reader, writer := io.Pipe()
 	run := &liveCompactionRun{
 		input:  writer,
 		out:    &synchronizedBuffer{},
@@ -130,17 +152,12 @@ func startLiveCompactionRun(t *testing.T, ctx context.Context, dbPath, sessionID
 		cancel: cancel,
 		done:   make(chan struct{}),
 	}
-	args := []string{
-		"--db", dbPath, "launch", "--model", "compact-fixture", "--print",
-		"--auth-mode", "gateway-token",
-		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-		"--session-id", sessionID,
-	}
-	args = append(args, claudeArgs...)
+	deps.In, deps.Out, deps.Err = reader, run.out, run.errOut
 	go func() {
-		cmd := NewRootCommand(runCtx, Dependencies{In: reader, Out: run.out, Err: run.errOut})
+		cmd := NewRootCommand(runCtx, deps)
 		cmd.SetArgs(args)
 		run.err = cmd.Execute()
+		_ = reader.Close()
 		close(run.done)
 	}()
 	t.Cleanup(run.abort)
@@ -313,7 +330,8 @@ func (f *liveCompactionFixture) handleChat(t *testing.T, w http.ResponseWriter, 
 		return
 	}
 	if !payload.Stream {
-		closeLiveProviderConnection(t, w)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-validation","object":"chat.completion","model":"fixture-compact-model","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 		return
 	}
 	isCompaction := openAIMessagesContain(payload.Messages, liveCompactionPromptMarker)
@@ -343,27 +361,6 @@ func (f *liveCompactionFixture) handleChat(t *testing.T, w http.ResponseWriter, 
 		f.completedCompactions++
 	}
 	f.mu.Unlock()
-}
-
-func closeLiveProviderConnection(t *testing.T, w http.ResponseWriter) {
-	t.Helper()
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		t.Error("compact fixture response writer cannot hijack connection")
-		return
-	}
-	connection, _, err := hijacker.Hijack()
-	if err != nil {
-		t.Errorf("hijacking compact fixture connection: %v", err)
-		return
-	}
-	if err := connection.Close(); err != nil && !isClosedNetworkError(err) {
-		t.Errorf("closing compact fixture connection: %v", err)
-	}
-}
-
-func isClosedNetworkError(err error) bool {
-	return err == net.ErrClosed || strings.Contains(strings.ToLower(err.Error()), "closed network connection")
 }
 
 func writeLiveOpenAIChatStream(w http.ResponseWriter, call int, response string, promptTokens int) {
