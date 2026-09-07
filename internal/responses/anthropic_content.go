@@ -62,14 +62,18 @@ func toolResultInputItems(raw json.RawMessage, state *convertState) ([]InputItem
 	if block.ToolUseID == "" {
 		return nil, fmt.Errorf("tool_result block missing tool_use_id")
 	}
+	if !state.computerCallIDs[block.ToolUseID] {
+		output, err := functionToolResultOutput(block.Content)
+		if err != nil {
+			return nil, err
+		}
+		return []InputItem{{Type: "function_call_output", CallID: block.ToolUseID, Output: output}}, nil
+	}
 	output, isImage, err := toolResultOutput(block.Content)
 	if err != nil {
 		return nil, err
 	}
 	if isImage {
-		if !state.computerCallIDs[block.ToolUseID] {
-			return nil, fmt.Errorf("%w: image tool_result %q needs a computer tool", ErrNativeCUARequired, block.ToolUseID)
-		}
 		return []InputItem{{
 			Type:   "computer_call_output",
 			CallID: block.ToolUseID,

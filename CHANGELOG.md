@@ -5,6 +5,12 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.12
+
+- Preserve image results from ordinary tools on Responses routes as multimodal
+  function outputs instead of requiring a native computer tool. Mixed text and
+  multiple images retain their order and original tool-call association.
+
 ## v0.4.11
 
 - Consume the CCR separator in `ccr launch -- <Claude Code options>` so JSON,
