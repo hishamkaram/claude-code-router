@@ -201,15 +201,6 @@ func TestRequestFromAnthropicMessagesJSONErrors(t *testing.T) {
 			err: ErrUnsupportedAudio,
 		},
 		{
-			name: "tool result image without native CUA",
-			raw: `{"model":"claude","messages":[{"role":"user","content":[
-				{"type":"tool_result","tool_use_id":"toolu_1","content":[
-					{"type":"image","source":{"type":"base64","media_type":"image/png","data":"abc"}}
-				]}
-			]}]}`,
-			err: ErrNativeCUARequired,
-		},
-		{
 			name: "reject non HTTPS image URL",
 			raw: `{"model":"claude","messages":[{"role":"user","content":[
 				{"type":"image","source":{"type":"url","url":"http://example.com/image.png"}}
@@ -292,10 +283,10 @@ func TestResponsesComputerCallRequiresManagedExecutor(t *testing.T) {
 	}
 }
 
-func TestNativeComputerRejectsImageResultForFunctionCall(t *testing.T) {
+func TestNativeComputerPreservesImageResultForFunctionCall(t *testing.T) {
 	t.Parallel()
 
-	_, err := RequestFromAnthropicMessagesJSON([]byte(`{
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{
 		"model":"fixture",
 		"tools":[
 			{"type":"computer_20250124","name":"computer"},
@@ -308,9 +299,10 @@ func TestNativeComputerRejectsImageResultForFunctionCall(t *testing.T) {
 			]}]}
 		]
 	}`))
-	if !errors.Is(err, ErrNativeCUARequired) {
-		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v, want ErrNativeCUARequired", err)
+	if err != nil {
+		t.Fatal(err)
 	}
+	assertResponsesJSON(t, got.Input[1], `{"type":"function_call_output","call_id":"toolu_lookup","output":[{"type":"input_image","image_url":"data:image/png;base64,c2NyZWVu","detail":"auto"}]}`)
 }
 
 func assertJSONEqual(t *testing.T, got, want any) {
