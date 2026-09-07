@@ -132,7 +132,7 @@ func (r checkRunner) checkDiscovery(ctx context.Context) (string, error) {
 
 func (r checkRunner) checkText(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(32),
+		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(2048, 32),
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
 	if err != nil {
@@ -141,19 +141,15 @@ func (r checkRunner) checkText(ctx context.Context) (string, error) {
 	if err := requireSuccess(response); err != nil {
 		return "", err
 	}
-	var payload struct {
-		Type    string `json:"type"`
-		Content []any  `json:"content"`
-	}
-	if err := json.Unmarshal(response.Body, &payload); err != nil || len(payload.Content) == 0 {
-		return "", fmt.Errorf("invalid Anthropic message response")
+	if err := requireTextResponse(response.Body); err != nil {
+		return "", err
 	}
 	return "production gateway returned an Anthropic message", nil
 }
 
 func (r checkRunner) checkStream(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(32), "stream": true,
+		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(2048, 32), "stream": true,
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
 	if err != nil {
@@ -162,17 +158,18 @@ func (r checkRunner) checkStream(ctx context.Context) (string, error) {
 	if err := requireSuccess(response); err != nil {
 		return "", err
 	}
-	if !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") ||
-		!bytes.Contains(response.Body, []byte("message_start")) ||
-		!bytes.Contains(response.Body, []byte("message_stop")) {
+	if !strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
 		return "", fmt.Errorf("invalid Anthropic event stream")
+	}
+	if err := requireTextStream(response.Body); err != nil {
+		return "", err
 	}
 	return "production gateway returned a complete Anthropic event stream", nil
 }
 
 func (r checkRunner) checkForcedTool(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(128),
+		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(2048, 128),
 		"messages": []map[string]string{{"role": "user", "content": "Call the required probe tool."}},
 		"tools": []map[string]any{{
 			"name": "ccr_probe", "description": "Conformance probe",
@@ -188,15 +185,34 @@ func (r checkRunner) checkForcedTool(ctx context.Context) (string, error) {
 	if err := requireSuccess(response); err != nil {
 		return "", err
 	}
-	if !bytes.Contains(response.Body, []byte(`"tool_use"`)) {
+	var payload struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(response.Body, &payload); err != nil {
+		return "", fmt.Errorf("invalid Anthropic tool response")
+	}
+	found := false
+	for _, block := range payload.Content {
+		var input map[string]json.RawMessage
+		found = found || (block.Type == "tool_use" && block.ID != "" && block.Name == "ccr_probe" &&
+			json.Unmarshal(block.Input, &input) == nil && input != nil)
+	}
+	if !found {
 		return "", fmt.Errorf("forced tool response omitted tool_use")
 	}
 	return "forced tool choice produced an Anthropic tool_use block", nil
 }
 
 func (r checkRunner) checkThinking(ctx context.Context) (string, error) {
+	// Translated reasoning effort can reserve more tokens than Anthropic's
+	// requested thinking budget. Leave headroom without exceeding model limits.
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(1200),
+		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(32768, 1200),
 		"thinking": map[string]any{"type": "enabled", "budget_tokens": 1024},
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
@@ -206,7 +222,29 @@ func (r checkRunner) checkThinking(ctx context.Context) (string, error) {
 	if err := requireSuccess(response); err != nil {
 		return "", err
 	}
+	if err := requireTextResponse(response.Body); err != nil {
+		return "", err
+	}
 	return "declared thinking capability completed through the production gateway", nil
+}
+
+func requireTextResponse(body []byte) error {
+	var payload struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.Type != "message" {
+		return fmt.Errorf("invalid Anthropic message response")
+	}
+	for _, block := range payload.Content {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("anthropic message response omitted non-empty text")
 }
 
 func (r checkRunner) checkCountTokens(ctx context.Context) (string, error) {
@@ -392,4 +430,13 @@ func (r checkRunner) probeMaxTokens(preferred int) int {
 		return 1
 	}
 	return int(*r.target.modelCapabilities.MaxOutputTokens)
+}
+
+func (r checkRunner) probeOutputBudget(preferred, unknownLimit int) int {
+	// Raise diagnostic budgets only when discovery or an override gives us an
+	// output limit. Unknown metadata is not evidence of a large output window.
+	if r.target.modelCapabilities.MaxOutputTokens == nil {
+		return unknownLimit
+	}
+	return r.probeMaxTokens(preferred)
 }

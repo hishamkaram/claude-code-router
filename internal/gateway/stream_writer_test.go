@@ -309,15 +309,24 @@ func TestTranslatedProviderStreamSendsAnthropicPingDuringUpstreamIdle(t *testing
 }
 
 func TestTranslatedProviderStreamKeepsNativeAnthropicStreamAliveBeforeMessageStart(t *testing.T) {
-	recorder := &flushingResponseRecorder{ResponseRecorder: httptest.NewRecorder()}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	recorder := &heartbeatResponseRecorder{
+		flushingResponseRecorder: &flushingResponseRecorder{ResponseRecorder: httptest.NewRecorder()},
+		keepalive:                make(chan struct{}, 1), ping: make(chan struct{}, 1),
+	}
 	result := runTranslatedProviderStreamWithTiming(
-		context.Background(),
+		ctx,
 		recorder,
 		func(ctx context.Context, events chan<- upstreamStreamEvent) {
 			if !sendUpstreamStreamEvent(ctx, events, upstreamStreamEvent{kind: upstreamStreamReady, status: http.StatusOK}) {
 				return
 			}
-			time.Sleep(30 * time.Millisecond)
+			select {
+			case <-recorder.keepalive:
+			case <-ctx.Done():
+				return
+			}
 			if !sendUpstreamStreamEvent(ctx, events, upstreamStreamEvent{
 				kind:     upstreamStreamData,
 				sseEvent: "message_start",
@@ -325,7 +334,11 @@ func TestTranslatedProviderStreamKeepsNativeAnthropicStreamAliveBeforeMessageSta
 			}) {
 				return
 			}
-			time.Sleep(30 * time.Millisecond)
+			select {
+			case <-recorder.ping:
+			case <-ctx.Done():
+				return
+			}
 			if !sendUpstreamStreamEvent(ctx, events, upstreamStreamEvent{
 				kind:     upstreamStreamData,
 				sseEvent: "message_stop",
@@ -353,6 +366,28 @@ func TestTranslatedProviderStreamKeepsNativeAnthropicStreamAliveBeforeMessageSta
 	if !strings.Contains(body, "event: ping") || !strings.Contains(body, "event: message_stop") {
 		t.Fatalf("native idle stream did not resume protocol heartbeats: %q", body)
 	}
+}
+
+type heartbeatResponseRecorder struct {
+	*flushingResponseRecorder
+	keepalive chan struct{}
+	ping      chan struct{}
+}
+
+func (r *heartbeatResponseRecorder) Write(data []byte) (int, error) {
+	n, err := r.flushingResponseRecorder.Write(data)
+	var observed chan struct{}
+	switch {
+	case strings.Contains(string(data), ": ccr-keepalive"):
+		observed = r.keepalive
+	case strings.Contains(string(data), "event: ping"):
+		observed = r.ping
+	}
+	select {
+	case observed <- struct{}{}:
+	default:
+	}
+	return n, err
 }
 
 func TestTranslatedProviderStreamRejectsDataBeforeUpstreamReady(t *testing.T) {

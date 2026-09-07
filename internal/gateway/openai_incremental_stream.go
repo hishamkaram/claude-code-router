@@ -326,7 +326,7 @@ func (a *openAIChatStreamAdapter) Finish(writer *anthropicSSEWriter) (observabil
 		return a.finishInvalidAgentToolInput(writer, message)
 	}
 	if err := a.ensureVisibleContent(writer, tools); err != nil {
-		return observability.TokenUsage{}, err
+		return a.usage, err
 	}
 	if err := a.stopText(writer); err != nil {
 		return observability.TokenUsage{}, err
@@ -369,6 +369,9 @@ func (a *openAIChatStreamAdapter) finishInvalidAgentToolInput(writer *anthropicS
 func (a *openAIChatStreamAdapter) ensureVisibleContent(writer *anthropicSSEWriter, tools []openAIToolCall) error {
 	if a.textStarted || len(tools) != 0 {
 		return nil
+	}
+	if a.finishReason == "stop" {
+		return fmt.Errorf("provider ended the turn without text or tool calls")
 	}
 	return a.writeTextDelta(writer, "")
 }

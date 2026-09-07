@@ -5,6 +5,23 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.4.14
+
+- Allow Claude Code cache hints on translated Chat Completions and Responses
+  routes even when the selected model does not support prompt caching. Preserve
+  prompt content and report the omitted cache hints in the ignored-fields header;
+  keep Anthropic passthrough capability validation unchanged.
+- Cover manual and automatic compaction after switching from subscription-pool
+  to a provider in one Claude Code session, including non-caching models.
+- Synchronize the native-stream heartbeat regression test with observed events
+  instead of relying on fixed sleeps.
+- Report empty completed Chat Completions replies as provider errors instead of
+  successful blank answers; preserve tool-only and token-limited responses.
+- Give compatibility probes model-capped reasoning headroom and require real
+  text and named tool calls instead of accepting empty or nominal responses.
+- Sequence real-provider model-switch probes by completed turn, reject failed
+  model selections, and unblock test input when launch fails or is canceled.
+
 ## v0.4.12
 
 - Preserve image results from ordinary tools on Responses routes as multimodal
