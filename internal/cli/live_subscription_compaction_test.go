@@ -26,7 +26,7 @@ func TestLiveFixtureSubscriptionPoolCompactAfterProviderSwitch(t *testing.T) {
 			}
 			turns := 16
 			if mode == "automatic" {
-				args = append(args, "--autocompact", "100k")
+				t.Setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "100000")
 				turns = 4
 			}
 			run := startLiveCompactionCommand(t, ctx, Dependencies{

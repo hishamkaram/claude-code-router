@@ -51,9 +51,10 @@ func TestLiveClaudeManualCompactThroughOpenAIProvider(t *testing.T) {
 
 func TestLiveClaudeAutoCompactThroughOpenAIProvider(t *testing.T) {
 	ctx := liveCompactionContext(t)
+	t.Setenv("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "100000")
 	fixture := newLiveCompactionFixture(t)
 	dbPath := configureLiveCompactionModel(t, ctx, fixture.URL())
-	run := startLiveCompactionRun(t, ctx, dbPath, "8b814572-96c7-45bf-a9fb-da2345fc4d25", "--autocompact", "100k")
+	run := startLiveCompactionRun(t, ctx, dbPath, "8b814572-96c7-45bf-a9fb-da2345fc4d25")
 	for _, message := range liveCompactionHistoryMessages(4, "automatic-compaction") {
 		run.sendAndWaitNext(t, ctx, fixture, message)
 	}
