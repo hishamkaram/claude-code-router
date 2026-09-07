@@ -278,7 +278,7 @@ func TestGatewayTraceRecordsCommittedStreamFailure(t *testing.T) {
 		t.Fatalf("gateway status/body = %d %q", response.StatusCode, body)
 	}
 
-	traces, err := s.ListTraceEvents(ctx, store.TraceFilter{LaunchID: launchID, Limit: 10})
+	traces, err := s.ListTraceEvents(ctx, store.TraceFilter{Kind: "route", LaunchID: launchID, Limit: 10})
 	if err != nil {
 		t.Fatalf("ListTraceEvents() error = %v", err)
 	}

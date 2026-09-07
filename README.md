@@ -239,6 +239,28 @@ selected later through `/model`; it does not require a preserved Anthropic
 subscription. CCR's pinned/latest real-CLI fixture matrix verifies this request
 contract and rejects any classifier traffic that reaches first-party Anthropic.
 
+### Upstream connection liveness
+
+Each gateway owns a reusable upstream HTTP transport. On HTTP/2 connections it
+sends an idle ping after 20 seconds and waits up to 15 seconds for an ACK. This
+protects long requests against the reproduced idle disconnect; it does not extend
+request deadlines or prove that an individual generation is making progress.
+HTTP/1.1 remains supported, but does not receive HTTP/2 ping protection.
+
+`ccr trace` includes `upstream_transport_policy` and request-correlated
+`upstream_transport` lifecycle events. These distinguish HTTP/2 protection,
+HTTP/1.1, unknown negotiation, and externally managed clients. They contain no
+request bodies or credentials. Image fetching retains its separate restricted
+client. Caller-injected gateway HTTP clients retain their original ownership.
+
+CCR does not add an application retry for ambiguous EOFs or restart a committed
+response. A disconnected request may still be processing upstream. Provider-side
+fallback policies remain independent of connection liveness.
+
+Gateway shutdown drains active requests within its shutdown deadline, then
+cancels remaining gateway requests and closes owned connections if needed.
+Existing processes retain the behavior of the binary they launched.
+
 ## Common Commands
 
 ```bash
@@ -383,6 +405,52 @@ Anthropic CUA, OpenAI Responses CUA, and executor
 coverage stay opt-in through the individual `test-live-real-*` targets or the
 `test-live-real-full` aggregate; skipped real tests are not evidence of a
 verified runtime route.
+
+### HTTP/2 release acceptance
+
+Run `make test-live-http2-idle` for real Claude CLI sessions with a 90-second
+upstream silence and a 60-second idle cutoff. This uses a local TLS fixture and
+requires no real-provider credentials.
+
+Build a candidate separately, then run the executable-level real-provider gate:
+
+```bash
+make build BIN_DIR=/tmp/ccr-candidate
+CCR_LIVE_HTTP2_BINARY=/tmp/ccr-candidate/ccr \
+  CCR_LIVE_HTTP2_EVIDENCE_DIR=/tmp/ccr-http2-evidence \
+  CCR_LIVE_HTTP2_EXPECTED_DEPLOYMENTS=/tmp/expected-deployments.json \
+  make test-live-http2-binary
+```
+
+This contacts the configured `litellm-grok-4-6` and `litellm-gpt-5-6-terra` aliases
+and incurs provider usage. `CCR_LIVE_CONFIGURED_DB` can select the source registry;
+the gate reads it without migrating it and creates separate test databases with
+only the required definitions and secret references. It launches the candidate
+CCR executable and real Claude CLI with isolated Claude configuration and
+default permission mode and preapproval limited to the fixture MCP image tool
+or Agent tool. Agent sessions pin `CLAUDE_CODE_SUBAGENT_MODEL` to the requested
+CCR alias and set `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so generated Agent arguments
+cannot override that choice. They verify forwarded child output, two separate
+user turns, and deployment receipts. Classifier routing is exercised by the
+existing live suite; classifier fallbacks are separate from these model-specific
+acceptance sessions. The gate does not replace the installed CCR or stop existing
+sessions. Required failures are
+not skipped. Evidence contains process/route metadata and assertions, not prompts,
+credentials, or provider response bodies. The expected-deployments JSON must map
+each provider model name to its verified
+LiteLLM deployment ID, for example `{"grok-4.6":{"deployment_id":"<id>"},
+"gpt-5.6-terra":{"deployment_id":"<id>"}}`. Obtain these non-secret IDs from
+LiteLLM's model metadata before running the gate. Response deployment IDs must
+match; missing identity or a fallback fails model acceptance. The gate also
+cancels its own test Claude child while a separate session completes.
+
+Embedding callers with custom global TLS dial hooks must inject `Config.HTTPClient`;
+those callers retain transport lifecycle ownership. The normal standard transport
+preserves TLS verification, proxy discovery, and HTTP/1.1 negotiation.
+
+Transport observations admit only bounded LiteLLM call/deployment IDs and retry/
+fallback counters from documented response headers. Missing metadata remains
+unknown; differing observations are marked mixed. No response bodies are logged.
 
 ## Contributing and Security
 

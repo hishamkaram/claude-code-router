@@ -24,6 +24,7 @@ func (h *handler) beginRoute(w http.ResponseWriter, r *http.Request, operation s
 		Streaming: req.Stream, Tools: anthropicRequestUsesTools(req),
 		Thinking: rawJSONPresent(req.Thinking),
 	})
+	*r = *r.WithContext(context.WithValue(r.Context(), transportObservationKey{}, &transportObservation{sessionID: sessionID}))
 	if requestID := span.RequestID(); requestID != "" {
 		w.Header().Set(ccrRequestIDHeader, requestID)
 	}
@@ -41,6 +42,9 @@ func (h *handler) observeRoute(ctx context.Context, span *observability.RouteSpa
 	sessionID := int64(0)
 	if h.cfg.Tracker != nil {
 		sessionID = h.cfg.Tracker.CurrentSessionID()
+	}
+	if observation, ok := ctx.Value(transportObservationKey{}).(*transportObservation); ok {
+		observation.sessionID = sessionID
 	}
 	span.Resolve(ctx, observability.RouteResolution{
 		SessionID: sessionID, RouteKind: observed.Kind, ModelAlias: observed.ModelAlias,

@@ -43,6 +43,7 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	var usage observability.TokenUsage
 	defer func(ctx context.Context) {
 		completeRoute(span, ctx, observedWriter.Status(), usage, routeCompletionState{})
+		h.completeTransportObservation(ctx, span)
 	}(r.Context())
 	route, validationErr := h.selectRouteForRequest(r.Context(), claudeCodeSessionID(r), req)
 	if validationErr != nil {

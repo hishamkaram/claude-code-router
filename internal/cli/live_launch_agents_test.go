@@ -144,6 +144,11 @@ func (s *liveAgentToolProviderState) handleChat(t *testing.T, w http.ResponseWri
 	if !ok {
 		return
 	}
+	if isLiveAutoClassifierRequest(payload) {
+		writeLiveOpenAIClassifierResponse(w, payload)
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++

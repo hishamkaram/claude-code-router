@@ -371,6 +371,11 @@ func writeLiveImageToolSearchCall(w http.ResponseWriter, payload liveOpenAIChatP
 
 func writeLiveImageMCPConfig(t *testing.T) string {
 	t.Helper()
+	return writeLiveImageMCPConfigWithData(t, liveImagePNGData)
+}
+
+func writeLiveImageMCPConfigWithData(t *testing.T, data string) string {
+	t.Helper()
 	serverBinary, err := filepath.Abs(os.Args[0])
 	if err != nil {
 		t.Fatalf("resolve live test binary: %v", err)
@@ -385,6 +390,7 @@ func writeLiveImageMCPConfig(t *testing.T) string {
 		"mcpServers": map[string]any{
 			"fixture": map[string]any{
 				"command": serverScript,
+				"env":     map[string]string{"CCR_LIVE_IMAGE_MCP_DATA": data},
 			},
 		},
 	}
@@ -403,6 +409,10 @@ func TestLiveImageMCPServerProcess(t *testing.T) {
 		return
 	}
 
+	data := os.Getenv("CCR_LIVE_IMAGE_MCP_DATA")
+	if data == "" {
+		data = liveImagePNGData
+	}
 	decoder := json.NewDecoder(bufio.NewReader(os.Stdin))
 	encoder := json.NewEncoder(os.Stdout)
 	for {
@@ -452,7 +462,7 @@ func TestLiveImageMCPServerProcess(t *testing.T) {
 			if err := writeLiveMCPResponse(encoder, request.ID, map[string]any{
 				"content": []map[string]any{{
 					"type":     "image",
-					"data":     liveImagePNGData,
+					"data":     data,
 					"mimeType": "image/png",
 				}},
 				"isError": false,

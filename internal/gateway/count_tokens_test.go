@@ -347,7 +347,7 @@ func TestOpenAICountTokensCancellationDoesNotReturnFallback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	h := &handler{}
+	h := &handler{cfg: Config{HTTPClient: http.DefaultClient}}
 	_, fallback, ok := h.callOpenAICompatibleCountTokens(ctx, store.Provider{Name: "litellm", BaseURL: "http://127.0.0.1:1"}, "", []byte(`{"model":"gpt"}`))
 	if ok || fallback != "" {
 		t.Fatalf("callOpenAICompatibleCountTokens() ok=%v fallback=%q, want canceled without fallback", ok, fallback)

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/cua"
@@ -21,8 +22,10 @@ import (
 )
 
 type Config struct {
-	Store             *store.Store
-	Secrets           secret.Backend
+	Store   *store.Store
+	Secrets secret.Backend
+	// HTTPClient overrides the gateway-owned upstream client. Its configuration
+	// and transport cleanup remain the caller's responsibility.
 	HTTPClient        *http.Client
 	ImageHTTPClient   *http.Client
 	Token             string
@@ -47,9 +50,15 @@ type Config struct {
 }
 
 type Server struct {
-	httpServer *http.Server
-	listener   net.Listener
-	url        string
+	httpServer     *http.Server
+	listener       net.Listener
+	url            string
+	upstream       *upstreamTransport
+	cancelRequests context.CancelFunc
+	serveDone      chan struct{}
+	shutdownMu     sync.Mutex
+	shutdownErr    error
+	serveErr       error // Written by Serve; read only after serveDone closes.
 }
 
 func NewToken() (string, error) {
@@ -73,31 +82,49 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.Tracker != nil && strings.TrimSpace(cfg.ObserverToken) == "" {
 		return nil, fmt.Errorf("gateway.Start: observer token is required when runtime observation is enabled")
 	}
+	var upstream *upstreamTransport
+	if cfg.HTTPClient == nil {
+		var err error
+		upstream, err = newUpstreamTransport(http.DefaultTransport)
+		if err != nil {
+			return nil, err
+		}
+		cfg.HTTPClient = &http.Client{Transport: upstream}
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		if upstream != nil {
+			upstream.close()
+		}
 		return nil, fmt.Errorf("gateway.Start: listening on loopback: %w", err)
 	}
 
+	requestContext, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
 	handler := &handler{
-		cfg:         cfg,
-		activeModel: newActiveModelSelection(cfg.DefaultModelAlias),
+		cfg:           cfg,
+		upstreamOwned: upstream != nil,
+		activeModel:   newActiveModelSelection(cfg.DefaultModelAlias),
 	}
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return requestContext },
 	}
 	gateway := &Server{
-		httpServer: server,
-		listener:   listener,
-		url:        "http://" + listener.Addr().String(),
+		httpServer:     server,
+		listener:       listener,
+		url:            "http://" + listener.Addr().String(),
+		upstream:       upstream,
+		cancelRequests: cancelRequests,
+		serveDone:      make(chan struct{}),
 	}
-	errCh := make(chan error, 1)
 	go func() {
-		if serveErr := server.Serve(listener); serveErr != nil && !strings.Contains(serveErr.Error(), "Server closed") {
-			errCh <- serveErr
-			return
+		defer close(gateway.serveDone)
+		if serveErr := server.Serve(listener); !errors.Is(serveErr, http.ErrServerClosed) {
+			gateway.serveErr = serveErr
+			gateway.releaseUpstream()
+			_ = server.Close()
 		}
-		errCh <- nil
 	}()
 
 	select {
@@ -106,13 +133,15 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		defer cancel()
 		_ = gateway.Shutdown(shutdownCtx)
 		return nil, fmt.Errorf("gateway.Start: context canceled while starting: %w", ctx.Err())
-	case err := <-errCh:
-		if err != nil {
-			return nil, fmt.Errorf("gateway.Start: serving: %w", err)
+	case <-gateway.serveDone:
+		gateway.releaseUpstream()
+		if gateway.serveErr != nil {
+			return nil, fmt.Errorf("gateway.Start: serving: %w", gateway.serveErr)
 		}
 		return nil, fmt.Errorf("gateway.Start: server stopped during startup")
 	default:
 	}
+	recordTransportPolicy(ctx, cfg.Recorder, upstream != nil)
 	return gateway, nil
 }
 
@@ -127,16 +156,39 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s == nil || s.httpServer == nil {
 		return nil
 	}
-	if err := s.httpServer.Shutdown(ctx); err != nil {
-		return fmt.Errorf("gateway.Shutdown: shutting down server: %w", err)
+	err := s.httpServer.Shutdown(ctx)
+	if err != nil {
+		if s.cancelRequests != nil {
+			s.cancelRequests()
+		}
+		err = errors.Join(err, s.httpServer.Close())
 	}
-	return nil
+	s.releaseUpstream()
+	if s.serveDone != nil {
+		<-s.serveDone
+	}
+	s.shutdownMu.Lock()
+	defer s.shutdownMu.Unlock()
+	if s.shutdownErr == nil && err != nil {
+		s.shutdownErr = fmt.Errorf("gateway.Shutdown: shutting down server: %w", err)
+	}
+	return s.shutdownErr
+}
+
+func (s *Server) releaseUpstream() {
+	if s.cancelRequests != nil {
+		s.cancelRequests()
+	}
+	if s.upstream != nil {
+		s.upstream.close()
+	}
 }
 
 type handler struct {
-	cfg         Config
-	claudeAuth  claudeAuthTracker
-	activeModel activeModelSelection
+	cfg           Config
+	claudeAuth    claudeAuthTracker
+	activeModel   activeModelSelection
+	upstreamOwned bool
 }
 
 const (
@@ -207,6 +259,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var completion routeCompletionState
 	defer func(ctx context.Context) {
 		completeRoute(span, ctx, observedWriter.Status(), usage, completion)
+		h.completeTransportObservation(ctx, span)
 	}(r.Context())
 	route, validationErr := h.selectMessageRouteForRequest(r.Context(), claudeCodeSessionID(r), req)
 	if validationErr != nil {

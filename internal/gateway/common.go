@@ -10,10 +10,7 @@ import (
 )
 
 func (h *handler) httpClient() *http.Client {
-	if h.cfg.HTTPClient != nil {
-		return h.cfg.HTTPClient
-	}
-	return http.DefaultClient
+	return h.cfg.HTTPClient
 }
 
 func resolveProviderSecret(ctx context.Context, backend secret.Backend, ref string) (string, error) {
