@@ -364,8 +364,12 @@ func writeHumanTraceEvent(cmd *cobra.Command, event traceEventView) {
 	}
 	if event.Lifecycle != nil {
 		lifecycle := event.Lifecycle
-		fmt.Fprintf(cmd.OutOrStdout(), "%d\t%s\tlifecycle\t%s\tstatus=%s external=%s actor=%s\n",
+		details := ""
+		if lifecycle.Name == "upstream_transport" || lifecycle.Name == "upstream_transport_policy" {
+			details = fmt.Sprintf(" reason=%q", lifecycle.Reason)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%d\t%s\tlifecycle\t%s\tstatus=%s external=%s actor=%s%s\n",
 			event.ID, event.OccurredAt, lifecycle.Name, lifecycle.Status,
-			lifecycle.ExternalID, lifecycle.ActorName)
+			lifecycle.ExternalID, lifecycle.ActorName, details)
 	}
 }

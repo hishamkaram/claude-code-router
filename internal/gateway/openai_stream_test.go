@@ -303,7 +303,7 @@ func TestCallOpenAICompatibleCancellationInterruptsStreamRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, err := (&handler{}).callOpenAICompatible(ctx, store.Provider{
+		_, err := (&handler{cfg: Config{HTTPClient: http.DefaultClient}}).callOpenAICompatible(ctx, store.Provider{
 			Name: "fixture", BaseURL: provider.URL,
 		}, "", openAIChatRequest{Model: "fixture-model", Stream: true})
 		result <- err

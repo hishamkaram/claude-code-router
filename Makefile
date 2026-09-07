@@ -127,3 +127,12 @@ clean:
 
 help:
 	@sed -n 's/^\([a-zA-Z0-9_-]*\):.*/\1/p' $(MAKEFILE_LIST) | sort
+
+.PHONY: test-live-http2-idle test-live-http2-binary
+
+test-live-http2-idle:
+	CCR_LIVE_HTTP2_IDLE=1 $(GO) test -tags=live -count=1 -p 1 -timeout 10m -v -run '^TestLiveHTTP2IdleClaudeCLI$$' ./internal/gateway
+
+test-live-http2-binary:
+	@test -n "$$CCR_LIVE_HTTP2_BINARY" || (echo "CCR_LIVE_HTTP2_BINARY must name the candidate CCR executable" >&2; exit 1)
+	$(GO) test -tags=live -count=1 -p 1 -parallel 2 -timeout 30m -v -run '^TestLiveHTTP2BuiltBinary'  ./internal/cli
