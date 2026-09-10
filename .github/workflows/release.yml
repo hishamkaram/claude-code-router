@@ -130,6 +130,48 @@ jobs:
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "ghcr.io/${GITHUB_REPOSITORY}/browser@${DIGEST}"
 
+  archive-smoke:
+    if: ${{ github.event_name == 'push' }}
+    needs: release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      attestations: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Verify and smoke-test draft archives
+        shell: bash
+        run: |
+          gh release download "$TAG" --pattern 'claude-code-router_*.tar.gz' --pattern checksums.txt
+          shasum -a 256 --check checksums.txt
+          case "$(uname -s)" in
+            Linux) platform=linux ;;
+            Darwin) platform=darwin ;;
+            *) exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            arm64|aarch64) arch=arm64 ;;
+            *) exit 1 ;;
+          esac
+          archive="claude-code-router_${platform}_${arch}.tar.gz"
+          gh attestation verify "$archive" --repo "$GH_REPO" \
+            --signer-workflow "$GH_REPO/.github/workflows/release.yml"
+          tar -xzf "$archive"
+          ./ccr version
+          test "$(./ccr version | awk '{print $2}')" = "${TAG#v}"
+          ./ccr launch --help
+          ./ccr status --help
+          ./ccr cancel --help
+
   promote:
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest

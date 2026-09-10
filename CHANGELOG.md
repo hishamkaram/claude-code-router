@@ -5,6 +5,13 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.5.0
+
+- Add durable detached print-mode jobs with `launch --detach --prompt-file`,
+  job-ID status and cancellation, private output logs, and explicit cleanup coverage.
+- Use systemd user scopes on supported Linux hosts, with owner-held cancellation
+  authority and a degraded native process-group path on macOS or unavailable systemd.
+
 ## v0.4.14
 
 - Allow Claude Code cache hints on translated Chat Completions and Responses
