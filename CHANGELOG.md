@@ -11,6 +11,9 @@ lives under `docs/acceptance/`.
   job-ID status and cancellation, private output logs, and explicit cleanup coverage.
 - Use systemd user scopes on supported Linux hosts, with owner-held cancellation
   authority and a degraded native process-group path on macOS or unavailable systemd.
+- Retire gateway-owned idle upstream connections before HTTP/2 health-probe
+  expiry can fail the next turn or model selection. Preserve active-stream
+  pings, shorter caller limits, and the no-replay policy.
 
 ## v0.4.14
 

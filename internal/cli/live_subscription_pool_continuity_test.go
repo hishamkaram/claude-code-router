@@ -158,8 +158,6 @@ func TestLiveFixtureSubscriptionPoolKeepsRealClaudeOpenWhenAllAccountsLimited(t 
 		ctx, dbPath, secrets, launcher, fixture, commandOut, commandErr, commandDone,
 	)
 	start := launcher.WaitStart(t, ctx, commandDone, commandOut, commandErr)
-	start.WaitReady(t, ctx, commandDone)
-	start.Submit(t, "Trigger the configured rate-limit response.")
 	if err := fixture.WaitCallCount(ctx, 1); err != nil {
 		t.Fatalf("waiting for real Claude rate-limit request: %v", err)
 	}
@@ -249,6 +247,7 @@ func runLiveSubscriptionContinuityCommand(
 	cmd.SetArgs([]string{
 		"--db", dbPath, "launch", "--auth-mode", "subscription-pool",
 		"--no-lifecycle", "--no-statusline",
+		"--", "Trigger the configured rate-limit response.",
 	})
 	commandDone <- cmd.Execute()
 }

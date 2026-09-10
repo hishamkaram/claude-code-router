@@ -53,7 +53,7 @@ test-live-subscription-pool-fixture:
 
 test-live-real-routing:
 	@test "$$CCR_LIVE_REAL_MATRIX" = "1" || (echo "CCR_LIVE_REAL_MATRIX=1 is required" >&2; exit 1)
-	CCR_LIVE_CONFIGURED_PROVIDER=1 $(GO) test -tags=live -count=1 -p 1 -timeout 30m -run '^(TestLiveRealProviderMatrix|TestLiveConfiguredProviderAutoModeAgentWebFetch|TestLiveConfiguredProviderAutoModeWorkflow)$$' ./internal/cli
+	CCR_LIVE_CONFIGURED_PROVIDER=1 $(GO) test -tags=live -count=1 -p 1 -timeout 30m -run '^(TestLiveRealProviderMatrix|TestLiveConfiguredProviderAutoModeAgentWebFetch|TestLiveConfiguredProviderAutoModeWorkflow|TestLiveConfiguredProviderIdleTurn)$$' ./internal/cli
 
 test-live-real-vision:
 	CCR_LIVE_CONFIGURED_PROVIDER=1 CCR_LIVE_REAL_VISION=1 $(GO) test -tags=live -count=1 -p 1 -timeout 30m -run '^TestLiveLocalRealConfiguredVision$$' ./internal/cli

@@ -39,17 +39,6 @@ type liveSubscriptionPTYStart struct {
 	readDone          chan error
 }
 
-func (s *liveSubscriptionPTYStart) Submit(t *testing.T, input string) {
-	t.Helper()
-	if _, err := s.session.pty.Write([]byte(input + "\r")); err != nil {
-		t.Fatalf(
-			"submitting to real Claude PTY: %v\ntranscript:\n%s",
-			err,
-			redactLiveSubscriptionOutput(s.Transcript.String()),
-		)
-	}
-}
-
 func (s *liveSubscriptionPTYStart) WaitReady(t *testing.T, ctx context.Context, commandDone <-chan error) {
 	t.Helper()
 	ticker := time.NewTicker(25 * time.Millisecond)

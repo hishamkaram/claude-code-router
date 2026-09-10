@@ -211,8 +211,6 @@ func TestLiveFixtureSubscriptionPoolRotatesRealClaudeWithoutRestart(t *testing.T
 	)
 
 	start := launcher.WaitStart(t, ctx, commandDone, commandOut, commandErr)
-	start.WaitReady(t, ctx, commandDone)
-	start.Submit(t, "Trigger the configured rate-limit response.")
 	if err := fixture.WaitCallCount(ctx, 2); err != nil {
 		t.Fatalf("waiting for real Claude rate-limit request: %v", err)
 	}

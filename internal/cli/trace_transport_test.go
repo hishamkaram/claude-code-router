@@ -11,7 +11,7 @@ import (
 
 func TestHumanTraceShowsUpstreamTransportDetails(t *testing.T) {
 	for _, tc := range []struct{ name, reason string }{
-		{"upstream_transport_policy", "owner=ccr; http2_ping_after_ms=20000; http2_ping_timeout_ms=15000"},
+		{"upstream_transport_policy", "owner=ccr; http2_ping_after_ms=20000; http2_ping_timeout_ms=15000; max_idle_pool_ms=15000"},
 		{"upstream_transport", "owner=ccr; protocol=h2; idle_ping=enabled"},
 		{"upstream_transport", "owner=ccr; protocol=http/1.1; idle_ping=unavailable"},
 		{"upstream_transport", "owner=caller; protocol=unknown; idle_ping=unverified"},

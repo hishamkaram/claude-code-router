@@ -241,9 +241,12 @@ contract and rejects any classifier traffic that reaches first-party Anthropic.
 
 ### Upstream connection liveness
 
-Each gateway owns a reusable upstream HTTP transport. On HTTP/2 connections it
-sends an idle ping after 20 seconds and waits up to 15 seconds for an ACK. This
-protects long requests against the reproduced idle disconnect; it does not extend
+Each gateway owns a reusable upstream HTTP transport. Unused pooled connections
+close after at most 15 seconds, preserving shorter configured idle limits, so
+the next turn does not reuse a connection near an idle health-probe timeout.
+Active HTTP/2 connections send a ping after 20 seconds without received frames
+and wait up to 15 seconds for an ACK. This protects long requests against the
+reproduced idle disconnect; it does not extend
 request deadlines or prove that an individual generation is making progress.
 HTTP/1.1 remains supported, but does not receive HTTP/2 ping protection.
 
