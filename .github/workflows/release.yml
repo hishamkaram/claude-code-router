@@ -136,7 +136,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     permissions:
-      contents: read
+      # GitHub requires push access to discover unpublished draft releases.
+      contents: write
       attestations: read
     strategy:
       fail-fast: false
