@@ -23,6 +23,11 @@ func TestLiveDirectChildMigrationFinishesWithoutExternalSignal(t *testing.T) {
 	script := fmt.Sprintf("busctl --user call org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager StartTransientUnit 'ssa(sv)a(sa(sv))' %s fail 1 PIDs au 1 $$ 0 || exit 2; while :; do echo live >> '%s'; sleep 0.05; done", unit, file)
 	cfg := testProcessConfig(t, script)
 	cfg.Input = []byte(strings.Repeat("X", 1<<20))
+	probe, err := openScope(ctx, cfg.JobID)
+	if err != nil {
+		t.Fatalf("live migration test requires a ready user manager: %v", err)
+	}
+	probe.Close(ctx)
 	p, err := StartProcess(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +45,9 @@ func TestLiveDirectChildMigrationFinishesWithoutExternalSignal(t *testing.T) {
 		var status unix.WaitStatus
 		_, _ = unix.Wait4(pid, &status, unix.WNOHANG, nil)
 	}()
+	if p.Backend() != "systemd-scope" {
+		t.Fatal("live migration test requires actual systemd containment")
+	}
 	if err := awaitHeartbeat(ctx, file); err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -229,9 +230,6 @@ func (p *Process) stopOwned(ctx context.Context, s *scope, capabilityErr error) 
 		return Cleanup{Coverage: "unknown", Reason: "invalid owned child identity"}, fmt.Errorf("invalid owned child identity")
 	}
 	err := unix.Kill(-pid, unix.SIGKILL)
-	if errors.Is(err, unix.ESRCH) {
-		err = nil
-	}
 	reason := "process-group cleanup cannot exclude escaped descendants"
 	if capabilityErr != nil {
 		reason += "; systemd scope unavailable"
@@ -241,7 +239,19 @@ func (p *Process) stopOwned(ctx context.Context, s *scope, capabilityErr error) 
 	if cleanup.Coverage == "partial" {
 		cleanup.Reason = reason
 	}
-	return cleanup, err
+	return cleanup, groupSignalResult(err, cleanup)
+}
+
+func groupSignalResult(err error, cleanup Cleanup) error {
+	if err == nil || errors.Is(err, unix.ESRCH) {
+		return nil
+	}
+	// Darwin's killpg1 excludes zombies and returns EPERM if none remain.
+	// Observation may explain that result, but never authorizes another signal.
+	if runtime.GOOS == "darwin" && errors.Is(err, unix.EPERM) && cleanup.Coverage == "partial" && len(cleanup.Survivors) == 0 {
+		return nil
+	}
+	return fmt.Errorf("signaling owned process group: %w", err)
 }
 
 func (p *Process) PID() int           { return p.cmd.Process.Pid }

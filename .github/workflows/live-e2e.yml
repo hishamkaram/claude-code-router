@@ -46,6 +46,9 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Verify Linux user manager is ready on D-Bus
+        if: runner.os == 'Linux'
+        run: timeout 30s systemctl --user show-environment > /dev/null
       - name: Native containment and mutation controls
         run: go test -tags=live -race -count=1 -timeout 5m -v ./internal/jobs
       - name: Real Claude detached job lifecycle

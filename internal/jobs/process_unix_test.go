@@ -4,13 +4,16 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 )
 
 func TestMain(m *testing.M) {
@@ -83,5 +86,29 @@ func TestOwnedProcessCancellation(t *testing.T) {
 	cleanup, code := p.Result()
 	if cleanup.Coverage == "complete" || code == nil {
 		t.Fatalf("incorrect cancellation result: %+v %v", cleanup, code)
+	}
+}
+
+func TestGroupSignalResult(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		err       error
+		cleanup   Cleanup
+		wantError bool
+	}{
+		{"success", nil, Cleanup{}, false},
+		{"missing", unix.ESRCH, Cleanup{}, false},
+		{"empty", unix.EPERM, Cleanup{Coverage: "partial"}, runtime.GOOS != "darwin"},
+		{"survivor", unix.EPERM, Cleanup{Coverage: "partial", Survivors: []Survivor{{PID: 123}}}, true},
+		{"unknown", unix.EPERM, Cleanup{Coverage: "unknown"}, true},
+		{"missing observation", unix.EPERM, Cleanup{}, true},
+		{"other error", unix.EIO, Cleanup{Coverage: "partial"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := groupSignalResult(test.err, test.cleanup)
+			if (err != nil) != test.wantError || (err != nil && !errors.Is(err, test.err)) {
+				t.Fatalf("signal result: %v", err)
+			}
+		})
 	}
 }
