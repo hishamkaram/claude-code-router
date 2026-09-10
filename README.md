@@ -304,6 +304,20 @@ open with Claude Code's native limit behavior. Use `--no-statusline`,
 `--no-lifecycle`, or `--no-history` to disable those features independently for
 one launch.
 
+## Detached Jobs
+
+For durable headless work, use [detached jobs](docs/jobs.md):
+
+```bash
+ccr launch --model <alias> --detach -p --prompt-file prompt.txt
+ccr status <job_id> --json
+ccr cancel <job_id> --json
+```
+
+The launch receipt survives the launching CLI. Cancellation is requested by job
+ID, and cleanup coverage is reported separately from the workload's exit status.
+Linux uses systemd user scopes when available; macOS uses a degraded native path.
+
 ## Team Profiles
 
 Export provider and model routing configuration for another machine without

@@ -23,6 +23,42 @@ permissions:
   contents: read
 
 jobs:
+  durable-jobs:
+    name: Durable jobs / ${{ matrix.os }} / Claude ${{ matrix.claude-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        claude-version: ["2.1.209", "latest"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install Claude Code
+        run: npm install --global "@anthropic-ai/claude-code@${{ matrix.claude-version }}"
+      - name: Provision Linux user manager for containment tests
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Verify Linux user manager is ready on D-Bus
+        if: runner.os == 'Linux'
+        run: |
+          timeout 30s bash -c '
+            until busctl --user status org.freedesktop.systemd1 > /dev/null 2>&1; do
+              sleep 0.1
+            done
+          '
+      - name: Native containment and mutation controls
+        run: go test -tags=live -race -count=1 -timeout 5m -v ./internal/jobs
+      - name: Real Claude detached job lifecycle
+        run: go test -tags=live -count=1 -timeout 5m -v ./internal/cli -run '^TestLiveDetachedClaudeJobs$'
+
   fixture:
     name: Fixture / ${{ matrix.os }} / Claude ${{ matrix.claude-version }} / ${{ matrix.protocol }}
     runs-on: ${{ matrix.os }}

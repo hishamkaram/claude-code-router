@@ -14,6 +14,8 @@ import (
 type launchInvocation struct {
 	modelAlias     string
 	printMode      bool
+	detach         bool
+	promptFile     string
 	authMode       string
 	authModeSet    bool
 	claudeAccount  string
@@ -36,7 +38,7 @@ type launchInvocation struct {
 }
 
 func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
-	if invocation.modelAlias != "" || invocation.printMode ||
+	if invocation.modelAlias != "" || invocation.printMode || invocation.detach || invocation.promptFile != "" ||
 		invocation.authModeSet || invocation.claudeAccount != "" ||
 		invocation.permissionMode != "" ||
 		invocation.noHistory || invocation.noLifecycle || invocation.noStatusline ||
@@ -90,6 +92,9 @@ func parseLaunchInvocation(args []string) (launchInvocation, error) {
 func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *int) (bool, error) {
 	arg := args[*index]
 	switch arg {
+	case "--detach":
+		invocation.detach = true
+		return true, nil
 	case "--print", "-p":
 		invocation.printMode = true
 		return true, nil
@@ -133,6 +138,9 @@ func parseLaunchStringOption(invocation *launchInvocation, args []string, index 
 		if err != nil {
 			return true, err
 		}
+	}
+	if option == "--prompt-file" && strings.TrimSpace(value) == "" {
+		return true, fmt.Errorf("--prompt-file requires a nonempty path")
 	}
 	*target = value
 	if set != nil {
@@ -370,6 +378,8 @@ func parseLaunchDisableOption(invocation *launchInvocation, arg string) (bool, e
 	}
 	var target *bool
 	switch option {
+	case "--detach":
+		target = &invocation.detach
 	case "--no-history":
 		target = &invocation.noHistory
 	case "--no-lifecycle":
@@ -396,6 +406,8 @@ func launchPrintOptionValue(arg string) (string, bool) {
 
 func launchStringOptionTarget(invocation *launchInvocation, option string) (target *string, set *bool) {
 	switch option {
+	case "--prompt-file":
+		return &invocation.promptFile, nil
 	case "--model":
 		return &invocation.modelAlias, nil
 	case "--auth-mode":
@@ -448,7 +460,7 @@ func validateLaunchPassthroughArgs(args []string) error {
 			return fmt.Errorf("%s is managed by ccr launch; pass it before --", option)
 		}
 	}
-	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline"); option != "" {
+	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline", "--detach", "--prompt-file"); option != "" {
 		return fmt.Errorf("%s is managed by ccr launch; pass its CCR value before other Claude Code options", option)
 	}
 	if option := findLaunchOption(args, "--fallback-model"); option != "" {

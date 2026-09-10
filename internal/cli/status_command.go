@@ -30,10 +30,13 @@ type claudeAuthView struct {
 func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 	var jsonOutput bool
 	cmd := &cobra.Command{
-		Use:   "status",
+		Use:   "status [job_id]",
 		Short: "Show configuration and the latest runtime route",
-		Args:  cobra.NoArgs,
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return runJobStatus(cmd, args[0], jsonOutput)
+			}
 			document, err := loadStatusDocument(ctx, opts)
 			if err != nil {
 				return err

@@ -33,8 +33,15 @@ options, including --no-history, --no-lifecycle, --no-statusline and --ccr-cua-*
 options, must precede it. A second -- is forwarded as Claude Code's literal
 prompt boundary: ccr launch -p -- -- --prompt-starting-with-a-dash
 
-Fallback and detached background modes are rejected because they cannot preserve
-CCR's selected route and local gateway ownership.
+Claude's fallback and background modes are rejected because they cannot preserve
+CCR's selected route and local gateway ownership. Use CCR-owned detached jobs:
+  ccr launch --model <alias> --detach -p --prompt-file prompt.txt
+  ccr status <job_id> --json
+  ccr cancel <job_id>
+Detached launch returns a durable job/session receipt. Job status reports cleanup
+coverage separately from workload exit; partial coverage does not exclude escape.
+Detached Claude options cannot contain another standalone --; use --name=value
+for option values and --prompt-file for literal prompt text.
 
 By default, --auth-mode auto preserves a working Claude subscription or API-key
 login so first-party Claude models and registered CCR providers work side by
@@ -98,6 +105,9 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 			if invocation.dbPathSet {
 				opts.dbPath = invocation.dbPath
 			}
+			if invocation.detach || invocation.promptFile != "" {
+				return runPromptLaunch(ctx, cmd, opts, deps, invocation, args)
+			}
 			return runLaunch(ctx, cmd, opts, deps, invocation)
 		},
 	}
@@ -106,6 +116,8 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 	cmd.Flags().String("claude-account", "", "Named Claude account to use with subscription-pool auth")
 	cmd.Flags().String("permission-mode", "", "Optional Claude Code permission mode to pass through")
 	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
+	cmd.Flags().Bool("detach", false, "Return a durable job ID; requires -p and --prompt-file")
+	cmd.Flags().String("prompt-file", "", "Read a non-interactive prompt from this file before launch")
 	cmd.Flags().Bool("no-history", false, "Disable redacted route history for this launch")
 	cmd.Flags().Bool("no-lifecycle", false, "Disable Claude lifecycle hooks for this launch")
 	cmd.Flags().Bool("no-statusline", false, "Disable CCR status-line injection for this launch")
