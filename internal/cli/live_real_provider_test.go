@@ -90,8 +90,9 @@ return result
 		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "auto", "--tools", "Workflow",
 	)
+	var launchID int64
 	out, errOut, err := runLiveCommand(
-		ctx, Dependencies{In: strings.NewReader(input)},
+		ctx, Dependencies{In: strings.NewReader(input), StartGateway: liveRealGatewayStarter(&launchID)},
 		args...,
 	)
 	if err != nil {
@@ -114,7 +115,7 @@ return result
 	if strings.TrimSpace(out) == "" {
 		failLiveRealOutput(t, "configured provider Workflow returned no user-facing response", out, errOut)
 	}
-	assertConfiguredWorkflowEvidence(t, ctx, modelAlias)
+	assertConfiguredWorkflowEvidence(t, ctx, modelAlias, launchID)
 }
 
 func runConfiguredProviderProbe(t *testing.T, ctx context.Context, prompt string, claudeArgs ...string) (string, string, string) {
@@ -223,7 +224,7 @@ func TestConfiguredProviderAuthDiagnosticsMatchLaunchSummary(t *testing.T) {
 	}
 }
 
-func assertConfiguredWorkflowEvidence(t *testing.T, ctx context.Context, modelAlias string) {
+func assertConfiguredWorkflowEvidence(t *testing.T, ctx context.Context, modelAlias string, launchID int64) {
 	t.Helper()
 	dbPath := configuredLiveDBPath(t)
 	s, err := store.Open(ctx, dbPath)
@@ -231,11 +232,10 @@ func assertConfiguredWorkflowEvidence(t *testing.T, ctx context.Context, modelAl
 		t.Fatalf("store.Open() error = %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	launches, err := s.ListLaunches(ctx)
-	if err != nil || len(launches) == 0 {
-		t.Fatalf("ListLaunches() = %#v, error = %v", launches, err)
+	launch, err := s.GetLaunch(ctx, launchID)
+	if err != nil {
+		t.Fatalf("GetLaunch(%d): %v", launchID, err)
 	}
-	launch := launches[0]
 	if launch.State != "completed" || launch.LifecycleState != "observed" {
 		t.Fatalf("Workflow launch = %#v", launch)
 	}
