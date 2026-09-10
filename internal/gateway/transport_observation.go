@@ -74,7 +74,7 @@ func recordTransportPolicy(ctx context.Context, recorder *observability.Recorder
 	}
 	reason := "owner=caller; idle_ping=unverified"
 	if owned {
-		reason = "owner=ccr; http2_ping_after_ms=20000; http2_ping_timeout_ms=15000"
+		reason = "owner=ccr; http2_ping_after_ms=20000; http2_ping_timeout_ms=15000; max_idle_pool_ms=15000"
 	}
 	recorder.RecordLifecycle(ctx, observability.LifecycleEvent{
 		Name: "upstream_transport_policy", Status: "observed", Reason: reason,

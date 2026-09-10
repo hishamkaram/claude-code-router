@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	upstreamMaxIdleTime = 15 * time.Second
 	upstreamPingAfter   = 20 * time.Second
 	upstreamPingTimeout = 15 * time.Second
 )
@@ -34,6 +35,11 @@ func newUpstreamTransport(base http.RoundTripper) (*upstreamTransport, error) {
 		return nil, fmt.Errorf("gateway: custom default TLS dialers require caller-owned Config.HTTPClient for transport cleanup")
 	}
 	cloned := standard.Clone()
+	// Retire unused connections before their read-idle health probe starts.
+	// Active streams retain the independent ping policy below.
+	if cloned.IdleConnTimeout <= 0 || cloned.IdleConnTimeout > upstreamMaxIdleTime {
+		cloned.IdleConnTimeout = upstreamMaxIdleTime
+	}
 	config := http.HTTP2Config{}
 	if cloned.HTTP2 != nil {
 		config = *cloned.HTTP2

@@ -234,7 +234,7 @@ func assertHTTP2BinaryHumanTrace(t *testing.T, ctx context.Context, binary, dbPa
 	if err != nil {
 		t.Fatalf("candidate human trace failed: %v", err)
 	}
-	for _, required := range []string{"upstream_transport_policy", "http2_ping_after_ms=20000", "upstream_transport", "protocol=h2; idle_ping=enabled", "external="} {
+	for _, required := range []string{"upstream_transport_policy", "http2_ping_after_ms=20000", "max_idle_pool_ms=15000", "upstream_transport", "protocol=h2; idle_ping=enabled", "external="} {
 		if !strings.Contains(string(output), required) {
 			t.Fatalf("candidate human trace lacks %q", required)
 		}
