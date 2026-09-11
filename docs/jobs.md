@@ -86,6 +86,10 @@ macOS is a native development/degraded platform. Linux without an available
 user manager also uses a dedicated process group, retaining the unreaped child
 identity until group signalling finishes. Linux owners enable orphan reaping
 when available. Process-table observations are diagnostics, never signal targets.
+After signalling, CCR polls the group within the five-second cleanup deadline
+until no non-zombie members remain. If that deadline interrupts observation,
+the record retains the last observed survivors and explains the interruption.
+An observation failure without a successful snapshot reports unknown coverage.
 
 Cleanup coverage is separate from survivor lists:
 

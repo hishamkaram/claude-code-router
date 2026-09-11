@@ -8,7 +8,31 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// waitGroupEmpty observes signal delivery without reaping the child that pins
+// the group ID. The observer is injected so delayed exits can be tested reliably.
+func waitGroupEmpty(ctx context.Context, group int, observe func(context.Context, int) Cleanup) Cleanup {
+	cleanup := observe(ctx, group)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for cleanup.Coverage == "partial" && len(cleanup.Survivors) > 0 {
+		select {
+		case <-ctx.Done():
+			cleanup.Reason = "process-group cleanup observation interrupted: " + ctx.Err().Error()
+			return cleanup
+		case <-ticker.C:
+			next := observe(ctx, group)
+			// A deadline can interrupt ps itself. Keep the last successful
+			// snapshot instead of discarding known survivors in that case.
+			if ctx.Err() == nil || next.Coverage == "partial" {
+				cleanup = next
+			}
+		}
+	}
+	return cleanup
+}
 
 // Process-table output is diagnostic only. It never supplies signal targets.
 func observeGroup(ctx context.Context, group int) Cleanup {

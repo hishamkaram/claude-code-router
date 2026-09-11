@@ -102,6 +102,11 @@ func proveDetachedClaude(t *testing.T, ctx context.Context, binary string, cance
 			case <-r.Context().Done():
 				return
 			}
+			// Cancellation never releases a provider response. The release
+			// channel only unblocks teardown if a request outlives the job.
+			if cancelJob {
+				return
+			}
 		}
 		proxy.ServeHTTP(w, r)
 	}))
@@ -193,7 +198,7 @@ func assertDetachedLifecycle(t *testing.T, ctx context.Context, binary string, r
 	if runtime.GOOS == "darwin" {
 		backend = "process-group"
 	}
-	if final.Status != want || final.SessionID != receipt.SessionID || final.Containment != backend || final.Cleanup.Coverage != "partial" {
+	if final.Status != want || final.SessionID != receipt.SessionID || final.Containment != backend || final.Cleanup.Coverage != "partial" || len(final.Cleanup.Survivors) != 0 {
 		t.Fatalf("unexpected job result: %+v", final)
 	}
 	if !cancelJob {
