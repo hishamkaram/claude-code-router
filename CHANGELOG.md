@@ -5,6 +5,12 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+## v0.5.1
+
+- Wait for killed process-group members to exit before reporting job cleanup
+  survivors on the native fallback path. Preserve the latest observed survivors
+  when cleanup reaches its deadline; coverage remains explicitly partial.
+
 ## v0.5.0
 
 - Add durable detached print-mode jobs with `launch --detach --prompt-file`,
