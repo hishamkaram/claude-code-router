@@ -15,12 +15,16 @@ import (
 // The caller holds the session lease; this method takes a nonblocking job lease before
 // handoff. Neither acquisition waits inside a registry transaction.
 func (r *Registry) MaterializePrepared(ctx context.Context, lease *SessionLease, submission string) (Record, *os.File, error) {
+	return r.materializePrepared(ctx, lease, submission, syncDirectory)
+}
+
+func (r *Registry) materializePrepared(ctx context.Context, lease *SessionLease, submission string, syncRoot func(string) error) (Record, *os.File, error) {
 	admission, err := r.Lookup(ctx, submission)
 	if err != nil {
 		return Record{}, nil, err
 	}
 	if leaseErr := r.validateLease(lease, admission.SessionID); leaseErr != nil {
-		return Record{}, nil, err
+		return Record{}, nil, fmt.Errorf("validating prepared session lease: %w", leaseErr)
 	}
 	if admission.State != AdmissionPrepared {
 		return Record{}, nil, ErrAdmissionClosed
@@ -33,8 +37,8 @@ func (r *Registry) MaterializePrepared(ctx context.Context, lease *SessionLease,
 	if mkdirErr := os.MkdirAll(directory, 0o700); mkdirErr != nil {
 		return Record{}, nil, fmt.Errorf("creating prepared job directory: %w", mkdirErr)
 	}
-	if syncErr := syncDirectory(r.root); syncErr != nil {
-		return Record{}, nil, err
+	if syncErr := syncRoot(r.root); syncErr != nil {
+		return Record{}, nil, fmt.Errorf("synchronizing prepared job directory: %w", syncErr)
 	}
 	lock, acquired, err := s.Lock(admission.JobID)
 	if err != nil {

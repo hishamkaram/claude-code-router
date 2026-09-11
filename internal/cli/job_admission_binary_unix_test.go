@@ -163,6 +163,10 @@ func (h *admissionBinaryHarness) terminal(id string) jobs.Record {
 			h.t.Fatal(err)
 		}
 		if record.Terminal() {
+			if record.Status != "completed" {
+				diagnostic, _ := os.ReadFile(record.ErrorLog)
+				h.t.Logf("fixture job %s ended %s: %s", id, record.Status, diagnostic)
+			}
 			return record
 		}
 		time.Sleep(25 * time.Millisecond)

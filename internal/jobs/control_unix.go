@@ -56,12 +56,12 @@ func (o *Owner) Finish(runErr error, cleanup Cleanup, code *int) error {
 }
 
 func (o *Owner) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	if r.Method != http.MethodPost || r.URL.Path != "/cancel/"+o.record.JobID || r.URL.RawQuery != "" || r.ContentLength != 0 {
 		http.Error(w, "unsupported job operation", http.StatusBadRequest)
 		return
 	}
-	o.mu.Lock()
-	defer o.mu.Unlock()
 	if !o.record.Terminal() {
 		o.record.CancelRequested = true
 		if err := o.store.Write(o.record); err != nil {

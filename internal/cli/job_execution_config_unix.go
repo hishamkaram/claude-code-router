@@ -59,7 +59,7 @@ func executionFingerprint(ctx context.Context, opts *options, deps Dependencies,
 	}
 	config.ModelAlias, config.ClaudeModel = resolved.modelAlias, resolved.claudeModelID
 	config.AuthMode, config.DisableTools = normalizedAdmissionAuthMode(resolved.authMode), resolved.disableTools
-	config.Settings, err = admissionSettingsDigests()
+	config.Settings, err = admissionSettingsDigests(invocation.claudeArgs)
 	if err != nil {
 		return "", err
 	}
@@ -67,9 +67,9 @@ func executionFingerprint(ctx context.Context, opts *options, deps Dependencies,
 	return admissionDigest(config)
 }
 
-func admissionSettingsDigests() (map[string]string, error) {
+func admissionSettingsDigests(args []string) (map[string]string, error) {
 	result := make(map[string]string)
-	for _, path := range claudeSettingsPaths() {
+	for _, path := range append(claudeSettingsPaths(), forwardedSettingsPaths(args)...) {
 		canonical, err := canonicalAdmissionPath(path)
 		if err != nil {
 			return nil, err
@@ -124,4 +124,24 @@ func admissionExecutionEnvironment() map[string]string {
 		result[name] = value
 	}
 	return result
+}
+
+// Inline JSON is already bound byte-for-byte by the request fingerprint. Files
+// need their contents bound separately because their path can stay unchanged.
+func forwardedSettingsPaths(args []string) []string {
+	var paths []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		value, found := strings.CutPrefix(args[i], "--settings=")
+		if args[i] == "--settings" && i+1 < len(args) {
+			i++
+			value, found = args[i], true
+		}
+		if found && value != "" && !strings.HasPrefix(strings.TrimSpace(value), "{") {
+			paths = append(paths, value)
+		}
+	}
+	return paths
 }

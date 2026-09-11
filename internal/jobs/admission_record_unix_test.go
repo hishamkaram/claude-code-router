@@ -64,3 +64,33 @@ func TestCancelledReservationCannotMaterialize(t *testing.T) {
 		t.Fatalf("revived canceled admission: %v", err)
 	}
 }
+
+func TestPreparedMaterializationPreservesLeaseAndSyncFailures(t *testing.T) {
+	for _, failure := range []string{"lease", "directory-sync"} {
+		t.Run(failure, func(t *testing.T) {
+			registry := testRegistry(t, t.TempDir())
+			admission := testAdmission()
+			lease := reserveAdmission(t, registry, admission)
+			syncFailure := errors.New("injected directory synchronization failure")
+			synchronize := syncDirectory
+			if failure == "lease" {
+				if err := lease.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				synchronize = func(string) error { return syncFailure }
+			}
+			record, lock, err := registry.materializePrepared(t.Context(), lease, admission.SubmissionID, synchronize)
+			if err == nil || record.JobID != "" || lock != nil {
+				t.Fatalf("failed materialization reported success: record=%+v lock=%v err=%v", record, lock, err)
+			}
+			if failure == "directory-sync" && !errors.Is(err, syncFailure) {
+				t.Fatalf("lost synchronization cause: %v", err)
+			}
+			bound, lookupErr := registry.Lookup(t.Context(), admission.SubmissionID)
+			if lookupErr != nil || bound.State != AdmissionPrepared {
+				t.Fatalf("failure changed execution reservation: %+v %v", bound, lookupErr)
+			}
+		})
+	}
+}
