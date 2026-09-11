@@ -24,40 +24,78 @@ permissions:
 
 jobs:
   durable-jobs:
-    name: Durable jobs / ${{ matrix.os }} / Claude ${{ matrix.claude-version }}
+    defaults:
+      run:
+        shell: bash
+    name: Durable jobs / ${{ matrix.os }} / ${{ matrix.containment }} / Claude ${{ matrix.claude-version }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        claude-version: ["2.1.209", "latest"]
+        include:
+          - {os: ubuntu-latest, containment: systemd-scope, claude-version: "2.1.209"}
+          - {os: ubuntu-latest, containment: systemd-scope, claude-version: "latest"}
+          - {os: ubuntu-latest, containment: process-group, claude-version: "2.1.209"}
+          - {os: ubuntu-latest, containment: process-group, claude-version: "latest"}
+          - {os: macos-latest, containment: process-group, claude-version: "2.1.209"}
+          - {os: macos-latest, containment: process-group, claude-version: "latest"}
+    env:
+      CCR_LIVE_CONTAINMENT: ${{ matrix.containment }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Check out genuine CCR 0.5.1 predecessor
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: d17d9bde76530fe5de845ec5f8c12a4c84595b0f
+          path: .live-legacy
+          persist-credentials: false
+      - name: Build pinned predecessor
+        working-directory: .live-legacy
+        run: |
+          go build -ldflags '-X github.com/hishamkaram/claude-code-router/internal/buildinfo.Version=0.5.1 -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Commit=d17d9bde76530fe5de845ec5f8c12a4c84595b0f' -o "$RUNNER_TEMP/ccr-legacy" ./cmd/ccr
+          echo "CCR_LIVE_LEGACY_CCR=$RUNNER_TEMP/ccr-legacy" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/ccr-legacy" version
       - name: Install Claude Code
         run: npm install --global "@anthropic-ai/claude-code@${{ matrix.claude-version }}"
       - name: Provision Linux user manager for containment tests
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.containment == 'systemd-scope'
         run: |
           sudo loginctl enable-linger "$(id -un)"
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - name: Verify Linux user manager is ready on D-Bus
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.containment == 'systemd-scope'
         run: |
           timeout 30s bash -c '
             until busctl --user status org.freedesktop.systemd1 > /dev/null 2>&1; do
               sleep 0.1
             done
           '
+      - name: Force Linux process-group fallback
+        if: runner.os == 'Linux' && matrix.containment == 'process-group'
+        run: echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$RUNNER_TEMP/no-user-bus" >> "$GITHUB_ENV"
       - name: Native containment and mutation controls
-        run: go test -tags=live -race -count=1 -timeout 5m -v ./internal/jobs
-      - name: Real Claude detached job lifecycle
-        run: go test -tags=live -count=1 -timeout 5m -v ./internal/cli -run '^TestLiveDetachedClaudeJobs$'
+        if: runner.os != 'Linux' || matrix.containment == 'systemd-scope'
+        run: go test -tags=live -race -count=1 -timeout 5m -v ./internal/jobs | tee "$RUNNER_TEMP/durable-native.log"
+      - name: Forced process-group ownership and admission controls
+        if: runner.os == 'Linux' && matrix.containment == 'process-group'
+        run: go test -tags=live -race -count=1 -timeout 5m -v ./internal/jobs -run '^(TestOwnedProcessGroupCancellationSettles|TestAdmission.*)$' | tee "$RUNNER_TEMP/durable-native.log"
+      - name: Real Claude detached lifecycle and four-round continuation
+        run: |
+          claude --version
+          git rev-parse HEAD
+          go test -tags=live -count=1 -timeout 5m -v ./internal/cli -run '^TestLiveDetached(ClaudeJobs|ClaudeContinuation|LegacyContinuation)$' | tee "$RUNNER_TEMP/durable-cli.log"
+      - name: Preserve deterministic acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: durable-${{ matrix.os }}-${{ matrix.containment }}-${{ matrix.claude-version }}
+          path: ${{ runner.temp }}/durable-*.log
 
   fixture:
     name: Fixture / ${{ matrix.os }} / Claude ${{ matrix.claude-version }} / ${{ matrix.protocol }}

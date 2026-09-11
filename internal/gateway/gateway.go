@@ -34,6 +34,7 @@ type Config struct {
 	AnthropicBaseURL  string
 	Recorder          *observability.Recorder
 	Tracker           *session.Tracker
+	RequestAccounting *RequestAccounting
 	ManagedCUA        *cua.ManagedRuntime
 	ManagedCUAProject string
 	// AnthropicSubscriptionPool owns the active first-party OAuth credential
@@ -218,7 +219,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && (r.URL.Path == "/v1/messages" || r.URL.Path == "/messages") {
-		h.handleMessages(w, r)
+		h.handleAccountedMessages(w, r)
 		return
 	}
 	if r.Method == http.MethodPost && (r.URL.Path == "/v1/messages/count_tokens" || r.URL.Path == "/messages/count_tokens") {

@@ -64,6 +64,10 @@ type ProcessConfig struct {
 	Input      []byte
 	Out        *os.File
 	Err        *os.File
+	// BeforeRelease durably commits execution intent after containment is
+	// established and before the child receives any executable arguments.
+	// Failure aborts and reaps the gated child without starting the workload.
+	BeforeRelease func(context.Context) error
 }
 
 func StartProcess(ctx context.Context, cfg ProcessConfig) (*Process, error) {
@@ -120,11 +124,7 @@ func startProcess(ctx context.Context, cfg ProcessConfig, useScope bool) (*Proce
 			return nil, fmt.Errorf("admitting workload scope: %w", err)
 		}
 	}
-	if err := setupCtx.Err(); err != nil {
-		input.close()
-		return nil, abortGated(ctx, cmd, s, err)
-	}
-	if err := json.NewEncoder(write).Encode(ExecRequest{Path: cfg.Path, Args: cfg.Args}); err != nil {
+	if err := releaseWorkloadGate(setupCtx, write, cfg); err != nil {
 		input.close()
 		return nil, abortGated(ctx, cmd, s, err)
 	}
@@ -136,6 +136,18 @@ func startProcess(ctx context.Context, cfg ProcessConfig, useScope bool) (*Proce
 	p.cleanup = Cleanup{Coverage: "unknown", Reason: "workload has not finished"}
 	go p.run(runCtx, s, capabilityErr)
 	return p, nil
+}
+
+func releaseWorkloadGate(ctx context.Context, gate io.Writer, cfg ProcessConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if cfg.BeforeRelease != nil {
+		if err := cfg.BeforeRelease(ctx); err != nil {
+			return fmt.Errorf("committing workload execution intent: %w", err)
+		}
+	}
+	return json.NewEncoder(gate).Encode(ExecRequest{Path: cfg.Path, Args: cfg.Args})
 }
 
 func abortGated(ctx context.Context, cmd *exec.Cmd, s *scope, cause error) error {

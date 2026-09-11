@@ -104,14 +104,14 @@ func (s *scope) Admit(ctx context.Context, pid int) error {
 }
 
 func connectUserBus(ctx context.Context, signals *scopeSignals) (*dbus.Conn, error) {
-	for _, address := range strings.Split(os.Getenv("DBUS_SESSION_BUS_ADDRESS"), ";") {
-		if address != "" && !strings.HasPrefix(address, "unix:") {
-			return nil, fmt.Errorf("systemd job containment requires a local Unix user bus")
-		}
+	address, err := systemdUserBusAddress()
+	if err != nil {
+		return nil, err
 	}
-	// Do not auto-launch a bus during capability detection. Keep the established
-	// connection alive until scope cleanup, but cancel authentication on timeout.
-	conn, err := dbus.SessionBusPrivateNoAutoStartup(dbus.WithContext(context.WithoutCancel(ctx)), dbus.WithSignalHandler(signals))
+	// Dial the resolved address directly. The convenience discovery API writes
+	// DBUS_SESSION_BUS_ADDRESS into the owner's environment, changing the
+	// prepared execution fingerprint during containment setup.
+	conn, err := dbus.Dial(address, dbus.WithContext(context.WithoutCancel(ctx)), dbus.WithSignalHandler(signals))
 	if err != nil {
 		return nil, fmt.Errorf("opening user bus: %w", err)
 	}
@@ -270,4 +270,29 @@ func (s *scope) Close(ctx context.Context) {
 		_ = s.manager().CallWithContext(cleanupCtx, "org.freedesktop.systemd1.Manager.UnrefUnit", 0, s.name).Err
 	}
 	_ = s.conn.Close()
+}
+
+func systemdUserBusAddress() (string, error) {
+	address := os.Getenv("DBUS_SESSION_BUS_ADDRESS")
+	if address == "" || address == "autolaunch:" {
+		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		if runtimeDir == "" {
+			runtimeDir = fmt.Sprintf("/run/user/%d", os.Geteuid())
+		}
+		path := filepath.Join(runtimeDir, "bus")
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", fmt.Errorf("locating systemd user bus: %w", err)
+		}
+		if info.Mode()&os.ModeSocket == 0 {
+			return "", fmt.Errorf("systemd user bus path is not a socket")
+		}
+		address = "unix:path=" + dbus.EscapeBusAddressValue(path)
+	}
+	for _, candidate := range strings.Split(address, ";") {
+		if candidate == "" || !strings.HasPrefix(candidate, "unix:") {
+			return "", fmt.Errorf("systemd job containment requires a local Unix user bus")
+		}
+	}
+	return address, nil
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/unix"
 
+	"github.com/hishamkaram/claude-code-router/internal/gateway"
 	"github.com/hishamkaram/claude-code-router/internal/jobs"
 )
 
@@ -30,7 +31,7 @@ func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) err
 	defer func() { _ = input.Close() }()
 	defer func() { _ = ack.Close() }()
 	defer func() { _ = lease.Close() }()
-	for fd := 3; fd <= 5; fd++ {
+	for fd := 3; fd <= 6; fd++ {
 		unix.CloseOnExec(fd)
 	}
 	var admission jobAdmission
@@ -46,11 +47,21 @@ func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) err
 	if r.Terminal() {
 		return fmt.Errorf("cannot restart a terminal job")
 	}
+	registry, sessionLease, err := adoptJobAdmission(ctx, s, r, admission)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = registry.Close() }()
+	defer func() { _ = sessionLease.Close() }()
+
 	if reapErr := jobs.EnableSubreaper(); reapErr != nil {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Job orphan reaping unavailable")
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if socketErr := s.PrepareControlSocket(r.JobID, lease); socketErr != nil {
+		return socketErr
+	}
 	owner := jobs.NewOwner(s, r, cancel)
 	listener, err := owner.Listen()
 	if err != nil {
@@ -63,43 +74,70 @@ func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) err
 	if err := s.Write(r); err != nil {
 		return err
 	}
-	if err := json.NewEncoder(ack).Encode(jobReceipt{JobID: r.JobID, SessionID: r.SessionID}); err != nil {
-		return fmt.Errorf("acknowledging job admission: %w", err)
-	}
+	// Receipt delivery cannot revoke an admitted owner when its caller vanished.
+	_ = json.NewEncoder(ack).Encode(jobReceipt{JobID: r.JobID, SessionID: r.SessionID, SubmissionID: r.SubmissionID})
 	_ = ack.Close()
-	return executeOwnedJob(runCtx, cmd, deps, admission, r, owner)
+	return executeOwnedJob(runCtx, cmd, deps, admission, r, owner, registry, sessionLease)
 }
 
-func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies, admission jobAdmission, record jobs.Record, owner *jobs.Owner) error {
+func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies, admission jobAdmission, record jobs.Record, owner *jobs.Owner, registry *jobs.Registry, lease *jobs.SessionLease) error {
 	invocation, err := parseLaunchInvocation(admission.Args)
 	if err != nil {
-		return owner.Finish(err, jobs.Cleanup{Coverage: "unknown", Reason: "workload not started"}, nil)
+		return owner.FinishAdmission(context.WithoutCancel(ctx), registry, jobs.FinalOutcome{RunError: err})
 	}
-	invocation.claudeArgs = append([]string{"--session-id", record.SessionID}, invocation.claudeArgs...)
+	sessionFlag := "--session-id"
+	if record.RequestedResumeSession != "" {
+		sessionFlag = "--resume"
+	}
+	invocation.claudeArgs = append([]string{sessionFlag, record.SessionID}, invocation.claudeArgs...)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	accounting := gateway.NewRequestAccounting()
+	deps.RequestAccounting = accounting
 	launcher := &jobClaudeLauncher{id: record.JobID, owner: owner, out: os.Stdout, errOut: os.Stderr}
+	launcher.beforeRelease = func(gateCtx context.Context) error {
+		digest, digestErr := executionFingerprint(gateCtx, &options{dbPath: admission.DB}, invocation)
+		if digestErr != nil {
+			return digestErr
+		}
+		return registry.CommitExecution(gateCtx, lease, admission.SubmissionID, digest)
+	}
 	deps.Launcher = launcher
 	cmd.SetIn(bytes.NewReader(admission.Prompt))
 	cmd.SetOut(os.Stdout)
 	cmd.SetErr(os.Stderr)
-	err = runLaunch(ctx, cmd, &options{dbPath: admission.DB}, deps, invocation)
-	if err != nil {
-		fmt.Fprintln(cmd.ErrOrStderr(), "Detached job execution failed:", err)
+	observed := streamJSONJob(invocation.claudeArgs)
+	var observer *jobs.OutputObserver
+	var observationErr error
+	deps.launchPrepared = func(resolved resolvedLaunch) error {
+		record.ExpectedModel = resolved.claudeModelID
+		if err := owner.ExpectedModel(record.ExpectedModel); err != nil {
+			return err
+		}
+		if observed {
+			observer, observationErr = jobs.StartOutputObserver(context.WithoutCancel(ctx), record.Log, record.SessionID, record.ExpectedModel, cancel)
+		}
+		return observationErr
 	}
-	cleanup, code := launcher.result()
-	if reapErr := jobs.ReapOrphans(); reapErr != nil {
-		cleanup = jobs.Cleanup{Coverage: "unknown", Reason: "adopted child reaping failed"}
-		err = errors.Join(err, reapErr)
+	runErr := runLaunch(runCtx, cmd, &options{dbPath: admission.DB}, deps, invocation)
+	if runErr != nil {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Detached job execution failed:", runErr)
 	}
-	return owner.Finish(err, cleanup, code)
+	outcome := collectJobOutcome(ctx, launcher, accounting, observer, record, observed, runErr)
+	outcome.ObservationError = errors.Join(outcome.ObservationError, observationErr)
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer finishCancel()
+	return owner.FinishAdmission(finishCtx, registry, outcome)
 }
 
 type jobClaudeLauncher struct {
-	id      string
-	owner   *jobs.Owner
-	out     *os.File
-	errOut  *os.File
-	mu      sync.Mutex
-	process *jobs.Process
+	id            string
+	owner         *jobs.Owner
+	out           *os.File
+	errOut        *os.File
+	mu            sync.Mutex
+	process       *jobs.Process
+	beforeRelease func(context.Context) error
 }
 
 func (l *jobClaudeLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, in io.Reader, _, _ io.Writer) (ClaudeProcess, error) {
@@ -115,7 +153,7 @@ func (l *jobClaudeLauncher) Start(ctx context.Context, args []string, env Claude
 	if err != nil {
 		return nil, fmt.Errorf("reading admitted job prompt: %w", err)
 	}
-	p, err := jobs.StartProcess(ctx, jobs.ProcessConfig{JobID: l.id, Executable: executable, Path: claude, Args: args, Env: applyClaudeEnvironment(os.Environ(), env), Input: prompt, Out: l.out, Err: l.errOut})
+	p, err := jobs.StartProcess(ctx, jobs.ProcessConfig{BeforeRelease: l.beforeRelease, JobID: l.id, Executable: executable, Path: claude, Args: args, Env: applyClaudeEnvironment(os.Environ(), env), Input: prompt, Out: l.out, Err: l.errOut})
 	if err != nil {
 		return nil, err
 	}
