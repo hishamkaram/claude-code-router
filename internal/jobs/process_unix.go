@@ -234,9 +234,12 @@ func (p *Process) stopOwned(ctx context.Context, s *scope, capabilityErr error) 
 	if capabilityErr != nil {
 		reason += "; systemd scope unavailable"
 	}
-	cleanup := observeGroup(ctx, pid)
+	cleanup := waitGroupEmpty(ctx, pid, observeGroup)
 	cleanup.Unobservable = []string{"escaped_descendants"}
 	if cleanup.Coverage == "partial" {
+		if cleanup.Reason != "" {
+			reason += "; " + cleanup.Reason
+		}
 		cleanup.Reason = reason
 	}
 	return cleanup, groupSignalResult(err, cleanup)
