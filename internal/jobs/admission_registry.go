@@ -54,16 +54,13 @@ type Registry struct {
 // OpenRegistry creates private, fully synchronized admission bookkeeping in
 // the canonical job root. Bindings and heads outlive removable job artifacts.
 func OpenRegistry(ctx context.Context, root string) (*Registry, error) {
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, fmt.Errorf("creating admission root: %w", err)
-	}
-	root, err := filepath.EvalSymlinks(root)
+	return openRegistry(ctx, root, syncDirectory)
+}
+
+func openRegistry(ctx context.Context, root string, syncParent func(string) error) (*Registry, error) {
+	root, err := prepareRegistryRoot(root, syncParent)
 	if err != nil {
-		return nil, fmt.Errorf("canonicalizing admission root: %w", err)
-	}
-	root, err = filepath.Abs(root)
-	if err != nil {
-		return nil, fmt.Errorf("resolving admission root: %w", err)
+		return nil, err
 	}
 	path := filepath.Join(root, "admissions.sqlite")
 	established, err := checkRegistryIdentity(root, path)

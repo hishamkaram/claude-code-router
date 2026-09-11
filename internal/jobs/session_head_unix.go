@@ -5,6 +5,7 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,7 +98,7 @@ func (r *Registry) bootstrapSession(ctx context.Context, lease *SessionLease) (s
 	if bindings != 0 {
 		return "", fmt.Errorf("established session authority is missing")
 	}
-	head, err := legacySessionCandidate(Store{Root: r.root}, lease.sessionID)
+	head, err := r.legacySessionCandidate(ctx, lease.sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -112,7 +113,8 @@ func (r *Registry) bootstrapSession(ctx context.Context, lease *SessionLease) (s
 	return head, err
 }
 
-func legacySessionCandidate(s Store, sid string) (string, error) {
+func (r *Registry) legacySessionCandidate(ctx context.Context, sid string) (string, error) {
+	s := Store{Root: r.root}
 	entries, err := os.ReadDir(s.Root)
 	if err != nil {
 		return "", fmt.Errorf("reading legacy session candidates: %w", err)
@@ -121,6 +123,15 @@ func legacySessionCandidate(s Store, sid string) (string, error) {
 	for _, entry := range entries {
 		if !entry.IsDir() || ValidateID(entry.Name()) != nil {
 			continue
+		}
+		// Reservation precedes directory creation, so registry authority can
+		// safely exclude incomplete artifacts belonging to another session.
+		admission, lookupErr := r.LookupJob(ctx, entry.Name())
+		if lookupErr == nil && admission.SessionID != sid {
+			continue
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, ErrAdmissionNotFound) {
+			return "", lookupErr
 		}
 		r, err := s.Read(entry.Name())
 		if err != nil {

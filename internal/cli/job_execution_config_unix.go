@@ -16,27 +16,24 @@ import (
 )
 
 type admissionExecutionConfig struct {
-	Version           int
-	ModelAlias        string
-	ClaudeModel       string
-	AuthMode          string
-	DisableTools      bool
-	ResolutionFailure string
-	Models            []store.Model
-	Providers         []store.Provider
-	Settings          map[string]string
-	Environment       map[string]string
+	Version     int
+	ModelAlias  string
+	AuthMode    string
+	Models      []store.Model
+	Providers   []store.Provider
+	Settings    map[string]string
+	Environment map[string]string
 }
 
 // Only the resulting digest is persisted. Secret values are never resolved;
 // provider authentication is represented by its stored reference.
-func executionFingerprint(ctx context.Context, opts *options, deps Dependencies, invocation launchInvocation) (string, error) {
+func executionFingerprint(ctx context.Context, opts *options, invocation launchInvocation) (string, error) {
 	s, _, err := openMigratedStore(ctx, opts)
 	if err != nil {
 		return "", err
 	}
 	defer closeStore(s)
-	config := admissionExecutionConfig{Version: 1}
+	config := admissionExecutionConfig{Version: 2, ModelAlias: invocation.modelAlias, AuthMode: normalizedAdmissionAuthMode(invocation.authMode)}
 	config.Models, err = s.ListModels(ctx)
 	if err != nil {
 		return "", err
@@ -51,14 +48,9 @@ func executionFingerprint(ctx context.Context, opts *options, deps Dependencies,
 	for i := range config.Providers {
 		config.Providers[i].ID, config.Providers[i].CreatedAt = 0, ""
 	}
-	resolved, resolveErr := resolveLaunch(ctx, deps, s, invocation)
-	if resolveErr != nil {
-		// Preserve invalid-route startup classification in the owner. This snapshot
-		// still binds the configuration that produced the failure, without executing.
-		config.ResolutionFailure = resolveErr.Error()
-	}
-	config.ModelAlias, config.ClaudeModel = resolved.modelAlias, resolved.claudeModelID
-	config.AuthMode, config.DisableTools = normalizedAdmissionAuthMode(resolved.authMode), resolved.disableTools
+	// Provider availability and secret resolution belong to owner preflight,
+	// never configuration identity. Stored routes, capabilities, authentication
+	// references, declared auth mode, settings and environment bind that identity.
 	config.Settings, err = admissionSettingsDigests(invocation.claudeArgs)
 	if err != nil {
 		return "", err

@@ -58,7 +58,7 @@ func TestAdmissionPrepareCrashHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admitted, lease, err := prepareDetachedAdmission(t.Context(), registry, &options{dbPath: execution.Database}, Dependencies{}, invocation, digest)
+	admitted, lease, err := prepareDetachedAdmission(t.Context(), registry, &options{dbPath: execution.Database}, invocation, digest)
 	if err != nil || lease == nil {
 		t.Fatalf("prepare crash fixture: %v", err)
 	}

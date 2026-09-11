@@ -13,13 +13,13 @@ import (
 
 // A nil lease means a committed replay or a surviving owner: return the same
 // receipt without consulting current execution configuration or starting work.
-func prepareDetachedAdmission(ctx context.Context, registry *jobs.Registry, opts *options, deps Dependencies, invocation launchInvocation, requestDigest string) (jobs.Admission, *jobs.SessionLease, error) {
+func prepareDetachedAdmission(ctx context.Context, registry *jobs.Registry, opts *options, invocation launchInvocation, requestDigest string) (jobs.Admission, *jobs.SessionLease, error) {
 	if invocation.submissionID == "" {
 		invocation.submissionID = uuid.NewString()
 	}
 	existing, err := registry.Lookup(ctx, invocation.submissionID)
 	if err == nil {
-		return recoverDetachedAdmission(ctx, registry, opts, deps, invocation, requestDigest, existing)
+		return recoverDetachedAdmission(ctx, registry, opts, invocation, requestDigest, existing)
 	}
 	if !errors.Is(err, jobs.ErrAdmissionNotFound) {
 		return jobs.Admission{}, nil, err
@@ -36,7 +36,7 @@ func prepareDetachedAdmission(ctx context.Context, registry *jobs.Registry, opts
 		// Another caller can bind this same submission after our first lookup.
 		// Recover that binding even while its surviving owner holds the lease.
 		if raced, lookupErr := registry.Lookup(ctx, invocation.submissionID); lookupErr == nil {
-			return recoverDetachedAdmission(ctx, registry, opts, deps, invocation, requestDigest, raced)
+			return recoverDetachedAdmission(ctx, registry, opts, invocation, requestDigest, raced)
 		}
 	}
 	if err != nil {
@@ -45,25 +45,25 @@ func prepareDetachedAdmission(ctx context.Context, registry *jobs.Registry, opts
 	raced, lookupErr := registry.Lookup(ctx, invocation.submissionID)
 	if lookupErr == nil {
 		_ = lease.Close()
-		return recoverDetachedAdmission(ctx, registry, opts, deps, invocation, requestDigest, raced)
+		return recoverDetachedAdmission(ctx, registry, opts, invocation, requestDigest, raced)
 	}
 	if !errors.Is(lookupErr, jobs.ErrAdmissionNotFound) {
 		_ = lease.Close()
 		return jobs.Admission{}, nil, lookupErr
 	}
-	reserved, err := reserveDetachedAdmission(ctx, registry, lease, opts, deps, invocation, candidate)
+	reserved, err := reserveDetachedAdmission(ctx, registry, lease, opts, invocation, candidate)
 	if err != nil {
 		_ = lease.Close()
 		return jobs.Admission{}, nil, err
 	}
 	if reserved.JobID != candidate.JobID {
 		_ = lease.Close()
-		return recoverDetachedAdmission(ctx, registry, opts, deps, invocation, requestDigest, reserved)
+		return recoverDetachedAdmission(ctx, registry, opts, invocation, requestDigest, reserved)
 	}
 	return reserved, lease, nil
 }
 
-func reserveDetachedAdmission(ctx context.Context, registry *jobs.Registry, lease *jobs.SessionLease, opts *options, deps Dependencies, invocation launchInvocation, candidate jobs.Admission) (jobs.Admission, error) {
+func reserveDetachedAdmission(ctx context.Context, registry *jobs.Registry, lease *jobs.SessionLease, opts *options, invocation launchInvocation, candidate jobs.Admission) (jobs.Admission, error) {
 	if candidate.RequestedResumeSession != "" {
 		predecessor, err := registry.ResumeHead(ctx, lease, candidate.ExpectedParentJob)
 		if err != nil {
@@ -71,7 +71,7 @@ func reserveDetachedAdmission(ctx context.Context, registry *jobs.Registry, leas
 		}
 		candidate.ResumedFrom, candidate.ResumedFromStatus = predecessor.JobID, predecessor.Status
 	}
-	digest, err := executionFingerprint(ctx, opts, deps, invocation)
+	digest, err := executionFingerprint(ctx, opts, invocation)
 	if err != nil {
 		return jobs.Admission{}, err
 	}
@@ -79,7 +79,7 @@ func reserveDetachedAdmission(ctx context.Context, registry *jobs.Registry, leas
 	return registry.Reserve(ctx, lease, candidate)
 }
 
-func recoverDetachedAdmission(ctx context.Context, registry *jobs.Registry, opts *options, deps Dependencies, invocation launchInvocation, requestDigest string, existing jobs.Admission) (jobs.Admission, *jobs.SessionLease, error) {
+func recoverDetachedAdmission(ctx context.Context, registry *jobs.Registry, opts *options, invocation launchInvocation, requestDigest string, existing jobs.Admission) (jobs.Admission, *jobs.SessionLease, error) {
 	if existing.RequestDigest != requestDigest {
 		return jobs.Admission{}, nil, jobs.ErrSubmissionConflict
 	}
@@ -102,7 +102,7 @@ func recoverDetachedAdmission(ctx context.Context, registry *jobs.Registry, opts
 		_ = lease.Close()
 		return current, nil, nil
 	}
-	digest, err := executionFingerprint(ctx, opts, deps, invocation)
+	digest, err := executionFingerprint(ctx, opts, invocation)
 	if err != nil || digest != current.ExecutionDigest {
 		// The session lease excludes every participating owner. Atomic abort wins
 		// only while the durable execution boundary is still uncommitted.

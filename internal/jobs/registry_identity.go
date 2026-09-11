@@ -65,3 +65,29 @@ func establishRegistryIdentity(root string) error {
 	}
 	return syncDirectory(root)
 }
+
+// Synchronize every ancestor even when it already exists: it may have been
+// created by an interrupted or concurrent opener which never reached its
+// durability barrier. No registry transaction or execution can precede this.
+func prepareRegistryRoot(root string, syncParent func(string) error) (string, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("creating admission root: %w", err)
+	}
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("canonicalizing admission root: %w", err)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolving admission root: %w", err)
+	}
+	for parent := filepath.Dir(root); ; parent = filepath.Dir(parent) {
+		if err := syncParent(parent); err != nil {
+			return "", fmt.Errorf("synchronizing admission ancestor %s: %w", parent, err)
+		}
+		if filepath.Dir(parent) == parent {
+			break
+		}
+	}
+	return root, nil
+}

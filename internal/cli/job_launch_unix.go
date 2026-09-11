@@ -66,7 +66,7 @@ func launchDetached(ctx context.Context, cmd *cobra.Command, opts *options, deps
 	if err != nil {
 		return err
 	}
-	bound, lease, err := prepareDetachedAdmission(ctx, registry, &options{dbPath: execution.Database}, deps, invocation, digest)
+	bound, lease, err := prepareDetachedAdmission(ctx, registry, &options{dbPath: execution.Database}, invocation, digest)
 	if err != nil {
 		return err
 	}

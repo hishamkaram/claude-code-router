@@ -96,7 +96,7 @@ func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies,
 	deps.RequestAccounting = accounting
 	launcher := &jobClaudeLauncher{id: record.JobID, owner: owner, out: os.Stdout, errOut: os.Stderr}
 	launcher.beforeRelease = func(gateCtx context.Context) error {
-		digest, digestErr := executionFingerprint(gateCtx, &options{dbPath: admission.DB}, deps, invocation)
+		digest, digestErr := executionFingerprint(gateCtx, &options{dbPath: admission.DB}, invocation)
 		if digestErr != nil {
 			return digestErr
 		}

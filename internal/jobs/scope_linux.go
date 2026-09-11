@@ -277,7 +277,7 @@ func systemdUserBusAddress() (string, error) {
 	if address == "" || address == "autolaunch:" {
 		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
 		if runtimeDir == "" {
-			runtimeDir = filepath.Join("/run/user", strconv.Itoa(os.Geteuid()))
+			runtimeDir = filepath.Join("/", "run", "user", strconv.Itoa(os.Geteuid()))
 		}
 		path := filepath.Join(runtimeDir, "bus")
 		info, err := os.Stat(path)

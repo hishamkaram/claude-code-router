@@ -21,14 +21,14 @@ func TestForwardedSettingsContentsChangeExecutionFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := &options{dbPath: filepath.Join(root, "ccr.db")}
-	before, err := executionFingerprint(t.Context(), opts, Dependencies{}, inv)
+	before, err := executionFingerprint(t.Context(), opts, inv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if writeErr := os.WriteFile(settings, []byte(`{"env":{"EXAMPLE":"after"}}`), 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	after, err := executionFingerprint(t.Context(), opts, Dependencies{}, inv)
+	after, err := executionFingerprint(t.Context(), opts, inv)
 	if err != nil {
 		t.Fatal(err)
 	}
