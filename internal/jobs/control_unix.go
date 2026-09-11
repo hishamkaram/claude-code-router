@@ -27,6 +27,13 @@ func NewOwner(store Store, record Record, cancel context.CancelFunc) *Owner {
 	return &Owner{store: store, record: record, cancel: cancel}
 }
 
+func (o *Owner) ExpectedModel(model string) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.record.ExpectedModel = model
+	return o.store.Write(o.record)
+}
+
 func (o *Owner) Backend(backend string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -96,8 +103,21 @@ func (s Store) socketPath(id string) (string, error) {
 	return filepath.Join(root, fmt.Sprintf("%x.sock", key[:16])), nil
 }
 
+// Schema-2 admission is canonical-store scoped. Preserve schema-1 socket
+// addressing for owners started by older CCR binaries before an upgrade.
+func (s Store) controlSocketPath(record Record) (string, error) {
+	if record.SchemaVersion >= 2 {
+		root, err := filepath.EvalSymlinks(s.Root)
+		if err != nil {
+			return "", fmt.Errorf("canonicalizing job control root: %w", err)
+		}
+		s.Root = root
+	}
+	return s.socketPath(record.JobID)
+}
+
 func (o *Owner) Listen() (net.Listener, error) {
-	path, err := o.store.socketPath(o.record.JobID)
+	path, err := o.store.controlSocketPath(o.record)
 	if err != nil {
 		return nil, err
 	}
@@ -114,11 +134,14 @@ func (o *Owner) Listen() (net.Listener, error) {
 
 // Cancel requests cancellation; its response may still be running while stopping.
 func (s Store) Cancel(ctx context.Context, id string) (Record, error) {
-	r, err := s.Status(id)
+	r, err := s.StatusContext(ctx, id)
 	if err != nil || r.Terminal() {
 		return r, err
 	}
-	path, err := s.socketPath(id)
+	if prepared, aborted, cancelErr := s.cancelPrepared(ctx, r); cancelErr != nil || aborted {
+		return prepared, cancelErr
+	}
+	path, err := s.controlSocketPath(r)
 	if err != nil {
 		return Record{}, err
 	}
@@ -133,7 +156,7 @@ func (s Store) Cancel(ctx context.Context, id string) (Record, error) {
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		latest, statusErr := s.Status(id)
+		latest, statusErr := s.StatusContext(ctx, id)
 		if statusErr == nil && latest.Terminal() {
 			return latest, nil
 		}

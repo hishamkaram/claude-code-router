@@ -38,7 +38,13 @@ CCR's selected route and local gateway ownership. Use CCR-owned detached jobs:
   ccr launch --model <alias> --detach -p --prompt-file prompt.txt
   ccr status <job_id> --json
   ccr cancel <job_id>
-Detached launch returns a durable job/session receipt. Job status reports cleanup
+Use --submission-id=<persisted-token> to recover the original admission after a
+lost receipt; ccr status --submission-id=<token> --json never starts work.
+Use --resume=<sid> --expected-parent-job=<job> for a new job in the same registered
+session, with --output-format=stream-json --verbose. Resolve its authoritative
+head with ccr status --session-id=<sid> --json. Busy or unresolved heads refuse
+continuation. CCR session options must precede the option separator.
+Detached launch returns a durable job/session/submission receipt. Job status reports cleanup
 coverage separately from workload exit; partial coverage does not exclude escape.
 Detached Claude options cannot contain another standalone --; use --name=value
 for option values and --prompt-file for literal prompt text.
@@ -118,6 +124,9 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
 	cmd.Flags().Bool("detach", false, "Return a durable job ID; requires -p and --prompt-file")
 	cmd.Flags().String("prompt-file", "", "Read a non-interactive prompt from this file before launch")
+	cmd.Flags().String("submission-id", "", "Recover the same detached admission for an identical request")
+	cmd.Flags().String("expected-parent-job", "", "Require this session head for detached --resume")
+	cmd.Flags().String("resume", "", "Resume a registered detached session; requires stream-json and verbose output")
 	cmd.Flags().Bool("no-history", false, "Disable redacted route history for this launch")
 	cmd.Flags().Bool("no-lifecycle", false, "Disable Claude lifecycle hooks for this launch")
 	cmd.Flags().Bool("no-statusline", false, "Disable CCR status-line injection for this launch")
@@ -444,7 +453,8 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 	execution.finalizer.tracker = tracker
 	execution.server, err = deps.StartGateway(ctx, gateway.Config{
 		Store: execution.store, Secrets: deps.Secrets,
-		Token: execution.token, ObserverToken: execution.observerToken,
+		RequestAccounting: deps.RequestAccounting,
+		Token:             execution.token, ObserverToken: execution.observerToken,
 		DefaultModelAlias: execution.resolved.modelAlias,
 		Recorder:          recorder, Tracker: tracker,
 		ManagedCUA: execution.managedCUA.Runtime(), ManagedCUAProject: execution.cuaProject,

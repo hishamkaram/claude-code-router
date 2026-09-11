@@ -3,6 +3,7 @@
 package jobs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -32,7 +33,32 @@ func (s Store) Lock(id string) (*os.File, bool, error) {
 }
 
 func (s Store) Status(id string) (Record, error) {
+	return s.StatusContext(context.Background(), id)
+}
+
+func (s Store) StatusContext(ctx context.Context, id string) (Record, error) {
 	r, err := s.Read(id)
+	if errors.Is(err, os.ErrNotExist) {
+		if _, registryErr := os.Stat(filepath.Join(s.Root, "admissions.sqlite")); registryErr == nil {
+			registry, openErr := OpenRegistry(ctx, s.Root)
+			if openErr != nil {
+				return Record{}, openErr
+			}
+			defer func() { _ = registry.Close() }()
+			result, lookupErr := registry.JobStatus(ctx, id)
+			if !errors.Is(lookupErr, ErrAdmissionNotFound) {
+				return result, lookupErr
+			}
+		}
+	}
+	if err == nil && r.SchemaVersion == 2 {
+		registry, openErr := OpenRegistry(ctx, s.Root)
+		if openErr != nil {
+			return Record{}, openErr
+		}
+		defer func() { _ = registry.Close() }()
+		return registry.JobStatus(ctx, id)
+	}
 	if err != nil || r.Terminal() {
 		return r, err
 	}

@@ -194,10 +194,7 @@ func assertDetachedLifecycle(t *testing.T, ctx context.Context, binary string, r
 	if cancelJob {
 		want = "cancelled" //nolint:misspell // Public job status contract.
 	}
-	backend := "systemd-scope"
-	if runtime.GOOS == "darwin" {
-		backend = "process-group"
-	}
+	backend := expectedLiveContainment(t)
 	if final.Status != want || final.SessionID != receipt.SessionID || final.Containment != backend || final.Cleanup.Coverage != "partial" || len(final.Cleanup.Survivors) != 0 {
 		t.Fatalf("unexpected job result: %+v", final)
 	}
@@ -227,4 +224,18 @@ func readBuiltJobStatus(t *testing.T, ctx context.Context, binary, id string) jo
 		t.Fatal(err)
 	}
 	return r
+}
+
+func expectedLiveContainment(t *testing.T) string {
+	t.Helper()
+	if expected := os.Getenv("CCR_LIVE_CONTAINMENT"); expected != "" {
+		if expected != "systemd-scope" && expected != "process-group" {
+			t.Fatalf("invalid expected containment %q", expected)
+		}
+		return expected
+	}
+	if runtime.GOOS == "darwin" {
+		return "process-group"
+	}
+	return "systemd-scope"
 }

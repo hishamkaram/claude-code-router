@@ -50,22 +50,44 @@ func (c *Cleanup) Normalize() {
 }
 
 type Record struct {
-	SchemaVersion   int       `json:"schema_version"`
-	JobID           string    `json:"job_id"`
-	SessionID       string    `json:"session_id"`
-	Status          string    `json:"status"`
-	ExitCode        *int      `json:"exit_code"`
-	Log             string    `json:"log"`
-	ErrorLog        string    `json:"error_log"`
-	CancelRequested bool      `json:"cancel_requested"`
-	Containment     string    `json:"containment"`
-	Cleanup         Cleanup   `json:"cleanup"`
-	Reason          string    `json:"reason,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ExpectedModel          string          `json:"expected_model,omitempty"`
+	SubmissionID           string          `json:"submission_id,omitempty"`
+	RequestedResumeSession string          `json:"requested_resume_session,omitempty"`
+	ResumedFrom            string          `json:"resumed_from,omitempty"`
+	ResumedFromStatus      string          `json:"resumed_from_status,omitempty"`
+	AdmissionState         string          `json:"admission_state,omitempty"`
+	WorkloadDisposition    string          `json:"workload_disposition,omitempty"`
+	ReasonCode             string          `json:"reason_code,omitempty"`
+	ObservedSessionID      string          `json:"observed_session_id,omitempty"`
+	ResultEvidence         *ResultEvidence `json:"result_evidence,omitempty"`
+	SchemaVersion          int             `json:"schema_version"`
+	JobID                  string          `json:"job_id"`
+	SessionID              string          `json:"session_id"`
+	Status                 string          `json:"status"`
+	ExitCode               *int            `json:"exit_code"`
+	Log                    string          `json:"log"`
+	ErrorLog               string          `json:"error_log"`
+	CancelRequested        bool            `json:"cancel_requested"`
+	Containment            string          `json:"containment"`
+	Cleanup                Cleanup         `json:"cleanup"`
+	Reason                 string          `json:"reason,omitempty"`
+	CreatedAt              time.Time       `json:"created_at"`
+	UpdatedAt              time.Time       `json:"updated_at"`
 }
 
 func (r Record) Terminal() bool { return r.Status != "running" }
+
+// Stopped requires positive child-exit and cleanup evidence. Partial coverage
+// remains explicit and does not prove the absence of escaped descendants.
+func (r Record) Stopped() bool {
+	switch r.Status {
+	case "completed", "failed", statusCancelled:
+	default:
+		return false
+	}
+	return r.ExitCode != nil && (r.Cleanup.Coverage == "complete" || r.Cleanup.Coverage == "partial") &&
+		r.Cleanup.Survivors != nil && len(r.Cleanup.Survivors) == 0
+}
 
 func ValidateID(id string) error {
 	value, ok := strings.CutPrefix(id, "ccr-")
@@ -149,13 +171,16 @@ func (s Store) Read(id string) (Record, error) {
 	if err := json.NewDecoder(f).Decode(&r); err != nil {
 		return Record{}, fmt.Errorf("decoding job record: %w", err)
 	}
-	if r.JobID != id || r.SchemaVersion != 1 {
+	if r.JobID != id || (r.SchemaVersion != 1 && r.SchemaVersion != 2) {
 		return Record{}, fmt.Errorf("job record identity or schema mismatch")
 	}
 	switch r.Status {
 	case "running", "completed", "failed", statusCancelled:
 	default:
 		return Record{}, fmt.Errorf("unrecognized job status")
+	}
+	if r.Cleanup.Survivors == nil {
+		r.Cleanup.Coverage, r.Cleanup.Reason = "unknown", "cleanup survivor observation missing"
 	}
 	r.Cleanup.Normalize()
 	return r, nil

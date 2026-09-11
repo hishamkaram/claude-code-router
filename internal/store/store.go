@@ -89,7 +89,15 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("store.Open: creating database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("store.Open: resolving database path: %w", err)
+	}
+	databaseURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	query := databaseURL.Query()
+	query.Set("_pragma", "busy_timeout(5000)")
+	databaseURL.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite", databaseURL.String())
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: opening sqlite database: %w", err)
 	}
@@ -135,6 +143,7 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 	databaseURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
 	query := databaseURL.Query()
 	query.Set("mode", "ro")
+	query.Set("_pragma", "busy_timeout(5000)")
 	databaseURL.RawQuery = query.Encode()
 	db, err := sql.Open("sqlite", databaseURL.String())
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 )
 
 type Dependencies struct {
+	RequestAccounting      *gateway.RequestAccounting
 	In                     io.Reader
 	Out                    io.Writer
 	Err                    io.Writer

@@ -14,6 +14,9 @@ import (
 type launchInvocation struct {
 	modelAlias     string
 	printMode      bool
+	submissionID   string
+	expectedParent string
+	resumeSession  string
 	detach         bool
 	promptFile     string
 	authMode       string
@@ -86,6 +89,9 @@ func parseLaunchInvocation(args []string) (launchInvocation, error) {
 	if err := normalizeLaunchCUAOptions(&invocation); err != nil {
 		return launchInvocation{}, err
 	}
+	if err := normalizeAdmissionOptions(&invocation); err != nil {
+		return launchInvocation{}, err
+	}
 	return invocation, nil
 }
 
@@ -107,6 +113,9 @@ func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *
 	case "--no-statusline":
 		invocation.noStatusline = true
 		return true, nil
+	}
+	if handled, err := parseAdmissionOption(invocation, args, index); handled {
+		return true, err
 	}
 	if handled, err := parseLaunchDisableOption(invocation, arg); handled {
 		return true, err
@@ -460,7 +469,7 @@ func validateLaunchPassthroughArgs(args []string) error {
 			return fmt.Errorf("%s is managed by ccr launch; pass it before --", option)
 		}
 	}
-	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline", "--detach", "--prompt-file"); option != "" {
+	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline", "--detach", "--prompt-file", "--submission-id", "--expected-parent-job"); option != "" {
 		return fmt.Errorf("%s is managed by ccr launch; pass its CCR value before other Claude Code options", option)
 	}
 	if option := findLaunchOption(args, "--fallback-model"); option != "" {

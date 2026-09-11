@@ -29,13 +29,23 @@ type claudeAuthView struct {
 
 func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 	var jsonOutput bool
+	var submissionID, sessionID string
 	cmd := &cobra.Command{
 		Use:   "status [job_id]",
 		Short: "Show configuration and the latest runtime route",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("submission-id") || cmd.Flags().Changed("session-id") {
+				if len(args) != 0 || (cmd.Flags().Changed("submission-id") && cmd.Flags().Changed("session-id")) {
+					return fmt.Errorf("choose exactly one job ID, --submission-id, or --session-id")
+				}
+				if submissionID == "" && sessionID == "" {
+					return fmt.Errorf("status identity must not be empty")
+				}
+				return runAdmissionStatus(ctx, cmd, submissionID, sessionID, jsonOutput)
+			}
 			if len(args) == 1 {
-				return runJobStatus(cmd, args[0], jsonOutput)
+				return runJobStatus(ctx, cmd, args[0], jsonOutput)
 			}
 			document, err := loadStatusDocument(ctx, opts)
 			if err != nil {
@@ -49,6 +59,8 @@ func newStatusCommand(ctx context.Context, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit schema-versioned JSON")
+	cmd.Flags().StringVar(&submissionID, "submission-id", "", "Look up a durable submission without starting work")
+	cmd.Flags().StringVar(&sessionID, "session-id", "", "Resolve the authoritative detached session head")
 	return cmd
 }
 

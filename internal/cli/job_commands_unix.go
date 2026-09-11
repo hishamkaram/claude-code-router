@@ -30,16 +30,52 @@ func jobStore() (jobs.Store, error) {
 	return jobs.Store{Root: filepath.Join(root, "jobs")}, nil
 }
 
-func runJobStatus(cmd *cobra.Command, id string, jsonOutput bool) error {
+func runJobStatus(ctx context.Context, cmd *cobra.Command, id string, jsonOutput bool) error {
 	s, err := jobStore()
 	if err != nil {
 		return err
 	}
-	r, err := s.Status(id)
+	r, err := s.StatusContext(ctx, id)
 	if err != nil {
 		return err
 	}
 	return writeJobStatus(cmd, r, jsonOutput)
+}
+
+func runAdmissionStatus(ctx context.Context, cmd *cobra.Command, submission, session string, jsonOutput bool) error {
+	if err := validateAdmissionStatusIdentity(submission, session); err != nil {
+		return err
+	}
+	s, err := jobStore()
+	if err != nil {
+		return err
+	}
+	registry, err := jobs.OpenRegistry(ctx, s.Root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = registry.Close() }()
+	var record jobs.Record
+	if submission != "" {
+		binding, lookupErr := registry.Lookup(ctx, submission)
+		if lookupErr != nil {
+			return lookupErr
+		}
+		record, err = registry.JobStatus(ctx, binding.JobID)
+	} else {
+		record, err = registry.SessionStatus(ctx, session)
+	}
+	if err != nil {
+		return err
+	}
+	return writeJobStatus(cmd, record, jsonOutput)
+}
+
+func validateAdmissionStatusIdentity(submission, session string) error {
+	if submission != "" {
+		return jobs.ValidateSubmissionID(submission)
+	}
+	return jobs.ValidateSessionID(session)
 }
 
 func writeJobStatus(cmd *cobra.Command, r jobs.Record, jsonOutput bool) error {
@@ -86,6 +122,9 @@ func runPromptLaunch(ctx context.Context, cmd *cobra.Command, opts *options, dep
 			if arg == "--" {
 				return fmt.Errorf("standalone -- is not supported in detached Claude options; use --name=value for option values and --prompt-file for prompt text")
 			}
+		}
+		if err := validateDetachedAdmission(invocation); err != nil {
+			return err
 		}
 		if option := detachedSessionOption(invocation.claudeArgs); option != "" {
 			return fmt.Errorf("%s conflicts with CCR's detached session identity", option)
@@ -165,13 +204,14 @@ func foregroundJobArgs(args []string) []string {
 	result := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--" {
-			return append(result, args[i:]...)
+			result = append(result, args[i])
+			continue
 		}
 		option, _, inline := strings.Cut(args[i], "=")
 		if option == "--detach" {
 			continue
 		}
-		if option == "--prompt-file" {
+		if option == "--prompt-file" || option == "--submission-id" || option == "--expected-parent-job" || option == "--resume" {
 			if !inline {
 				i++
 			}
