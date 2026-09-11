@@ -106,23 +106,25 @@ func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies,
 	cmd.SetIn(bytes.NewReader(admission.Prompt))
 	cmd.SetOut(os.Stdout)
 	cmd.SetErr(os.Stderr)
-	record.ExpectedModel = resolveOwnedModel(runCtx, deps, admission, invocation)
-	if modelErr := owner.ExpectedModel(record.ExpectedModel); modelErr != nil {
-		return modelErr
-	}
 	observed := streamJSONJob(invocation.claudeArgs)
 	var observer *jobs.OutputObserver
-	if observed {
-		observer, err = jobs.StartOutputObserver(context.WithoutCancel(ctx), record.Log, record.SessionID, record.ExpectedModel, cancel)
-		if err != nil {
-			return owner.FinishAdmission(context.WithoutCancel(ctx), registry, jobs.FinalOutcome{RunError: err, ObservationError: err})
+	var observationErr error
+	deps.launchPrepared = func(resolved resolvedLaunch) error {
+		record.ExpectedModel = resolved.claudeModelID
+		if err := owner.ExpectedModel(record.ExpectedModel); err != nil {
+			return err
 		}
+		if observed {
+			observer, observationErr = jobs.StartOutputObserver(context.WithoutCancel(ctx), record.Log, record.SessionID, record.ExpectedModel, cancel)
+		}
+		return observationErr
 	}
 	runErr := runLaunch(runCtx, cmd, &options{dbPath: admission.DB}, deps, invocation)
 	if runErr != nil {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Detached job execution failed:", runErr)
 	}
 	outcome := collectJobOutcome(ctx, launcher, accounting, observer, record, observed, runErr)
+	outcome.ObservationError = errors.Join(outcome.ObservationError, observationErr)
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer finishCancel()
 	return owner.FinishAdmission(finishCtx, registry, outcome)

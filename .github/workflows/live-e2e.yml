@@ -24,6 +24,9 @@ permissions:
 
 jobs:
   durable-jobs:
+    defaults:
+      run:
+        shell: bash
     name: Durable jobs / ${{ matrix.os }} / ${{ matrix.containment }} / Claude ${{ matrix.claude-version }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15

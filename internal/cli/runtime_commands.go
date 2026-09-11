@@ -214,6 +214,11 @@ func runLaunchAttempt(
 	if err != nil {
 		return err
 	}
+	if deps.launchPrepared != nil {
+		if prepareErr := deps.launchPrepared(resolved); prepareErr != nil {
+			return fmt.Errorf("preparing launch observation: %w", prepareErr)
+		}
+	}
 	execution, err := createLaunchExecution(
 		ctx, s, invocation, resolved, selectedAccount, subscriptionPool,
 	)

@@ -18,6 +18,9 @@ import (
 )
 
 type Dependencies struct {
+	// launchPrepared binds detached observation to the same successful resolution
+	// used by the gateway and child. It runs synchronously before execution starts.
+	launchPrepared         func(resolvedLaunch) error
 	RequestAccounting      *gateway.RequestAccounting
 	In                     io.Reader
 	Out                    io.Writer

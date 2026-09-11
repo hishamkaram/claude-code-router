@@ -76,16 +76,3 @@ func collectJobOutcome(ctx context.Context, launcher *jobClaudeLauncher, account
 	}
 	return outcome
 }
-
-func resolveOwnedModel(ctx context.Context, deps Dependencies, admission jobAdmission, invocation launchInvocation) string {
-	s, _, err := openMigratedStore(ctx, &options{dbPath: admission.DB})
-	if err != nil {
-		return ""
-	}
-	defer closeStore(s)
-	resolved, err := resolveLaunch(ctx, deps, s, invocation)
-	if err != nil {
-		return ""
-	} // runLaunch publishes the actual startup failure.
-	return resolved.claudeModelID
-}

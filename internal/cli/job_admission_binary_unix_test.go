@@ -75,8 +75,12 @@ func TestAdmissionBinaryClaudeHelper(t *testing.T) {
 		os.Exit(7)
 	}
 	_ = count.Close()
+	model := option("--model")
+	if override := os.Getenv("CCR_ADMISSION_OUTPUT_MODEL"); override != "" {
+		model = override
+	}
 	encoder := json.NewEncoder(os.Stdout)
-	_ = encoder.Encode(map[string]any{"type": "system", "subtype": "init", "session_id": session, "model": option("--model")})
+	_ = encoder.Encode(map[string]any{"type": "system", "subtype": "init", "session_id": session, "model": model})
 	_ = encoder.Encode(map[string]any{"type": "result", "subtype": "success", "session_id": session, "is_error": false, "result": text})
 	os.Exit(0)
 }
