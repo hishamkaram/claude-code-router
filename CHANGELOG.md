@@ -5,6 +5,12 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+- Fold a system message that arrives after user or assistant turns into the
+  leading system message on the OpenAI-compatible chat path. Claude Code sends
+  subagents a late `# Environment` system block, and chat templates that require
+  the system message first (the Qwen3 family, for example) rejected every
+  subagent request with an HTTP 500.
+
 ## v0.5.1
 
 - Wait for killed process-group members to exit before reporting job cleanup

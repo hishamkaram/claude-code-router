@@ -127,7 +127,9 @@ func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicReq
 		if err != nil {
 			return openAIMessageConversion{}, err
 		}
-		messages = append(messages, converted.messages...)
+		for _, item := range converted.messages {
+			messages = appendOpenAIMessage(messages, item)
+		}
 		for _, field := range converted.ignoredFields {
 			ignoredFields = appendIgnoredAnthropicField(ignoredFields, field)
 		}
@@ -136,6 +138,38 @@ func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicReq
 		messages = append(messages, identityMessage)
 	}
 	return openAIMessageConversion{messages: messages, ignoredFields: ignoredFields}, nil
+}
+
+// appendOpenAIMessage appends a converted message, folding a system message
+// that would land after a user or assistant turn into the leading system
+// message. Claude Code sends subagents their environment block as a separate
+// late system message, and strict chat templates (the Qwen3 family among
+// others) raise "System message must be at the beginning" for any system
+// message that is not first.
+func appendOpenAIMessage(messages []openAIMessage, message openAIMessage) []openAIMessage {
+	if message.Role != "system" || !hasNonSystemMessage(messages) {
+		return append(messages, message)
+	}
+	text, ok := message.Content.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return messages
+	}
+	if len(messages) > 0 && messages[0].Role == "system" {
+		if lead, ok := messages[0].Content.(string); ok {
+			messages[0].Content = lead + "\n\n" + text
+			return messages
+		}
+	}
+	return append([]openAIMessage{{Role: "system", Content: text}}, messages...)
+}
+
+func hasNonSystemMessage(messages []openAIMessage) bool {
+	for _, message := range messages {
+		if message.Role != "system" {
+			return true
+		}
+	}
+	return false
 }
 
 func latestUserAsksModelIdentity(messages []anthropicMessage) bool {
