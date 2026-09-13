@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	_ "modernc.org/sqlite"
@@ -82,6 +83,19 @@ type ConformanceRecord struct {
 	CreatedAt    string
 }
 
+// sqliteURIPath converts an absolute filesystem path into the path component
+// of a file: URI. Windows paths begin with a drive letter, so a leading slash
+// is required; otherwise url.URL renders file://C:/... and SQLite rejects "C:"
+// as an invalid URI authority. The result is file:///C:/..., which SQLite
+// documents as the Windows form.
+func sqliteURIPath(absolute string) string {
+	p := filepath.ToSlash(absolute)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return p
+}
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("store.Open: database path is required")
@@ -93,7 +107,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: resolving database path: %w", err)
 	}
-	databaseURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	databaseURL := url.URL{Scheme: "file", Path: sqliteURIPath(absolute)}
 	query := databaseURL.Query()
 	query.Set("_pragma", "busy_timeout(5000)")
 	databaseURL.RawQuery = query.Encode()
@@ -140,7 +154,7 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("store.OpenReadOnly: database path must be a regular file")
 	}
-	databaseURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	databaseURL := url.URL{Scheme: "file", Path: sqliteURIPath(absolute)}
 	query := databaseURL.Query()
 	query.Set("mode", "ro")
 	query.Set("_pragma", "busy_timeout(5000)")

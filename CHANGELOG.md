@@ -5,6 +5,10 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+- Build the SQLite connection URI as `file:///C:/...` on Windows. The previous
+  `file://C:/...` form made SQLite read the drive letter as a URI authority, so
+  every command failed with `invalid uri authority: C:`.
+
 ## v0.5.1
 
 - Wait for killed process-group members to exit before reporting job cleanup
