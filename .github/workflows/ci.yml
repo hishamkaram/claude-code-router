@@ -55,5 +55,5 @@ jobs:
           go build -o $binary ./cmd/ccr
           & $binary --db $database doctor --json
           if ($LASTEXITCODE -ne 0) { throw "ccr doctor failed with exit code $LASTEXITCODE" }
-          & $binary --db $database model list --json
+          & $binary --db $database model list
           if ($LASTEXITCODE -ne 0) { throw "ccr model list failed with exit code $LASTEXITCODE" }
