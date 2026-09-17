@@ -3,6 +3,18 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
+## v0.6.3
+
+- Accept and drop `cache_control` on Anthropic `tool_addition` and
+  `tool_removal` system blocks for both the OpenAI Chat Completions and
+  Responses routes. Claude Code can mark the final system block for prompt
+  caching even when that block is a tool change; translated routes now expose
+  the dropped provider-specific hint through
+  `X-CCR-Ignored-Anthropic-Fields: cache_control` while continuing to reject
+  other unsupported fields visibly.
+
+## Unreleased
+
 ## v0.6.1
 
 - Translate Anthropic mid-conversation `tool_addition` and `tool_removal`
@@ -11,16 +23,6 @@ lives under `docs/acceptance/`.
   activate declared deferred tools from ToolSearch `tool_reference` results,
   and reject unsupported references visibly instead of treating the `tool`
   field as ordinary system text.
-
-## Unreleased
-
-- Accept and drop `cache_control` on Anthropic `tool_addition` and `tool_removal`
-  system blocks for both the OpenAI Chat Completions and Responses routes. Claude
-  Code marks the final system block for prompt caching, and since v0.6.1 that block
-  is a tool change whenever tools change mid-conversation, so the strict field
-  allowlist rejected the whole request with 501 even though text system
-  blocks already tolerate the same field. Translated OpenAI routes expose the
-  dropped hint through `X-CCR-Ignored-Anthropic-Fields: cache_control`.
 
 ## v0.5.1
 
