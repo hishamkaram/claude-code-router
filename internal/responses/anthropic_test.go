@@ -150,6 +150,30 @@ func TestRequestFromAnthropicMessagesJSONEnablesDeferredTool(t *testing.T) {
 	}
 }
 
+func TestRequestFromAnthropicMessagesJSONEnablesTopLevelDeferredTool(t *testing.T) {
+	t.Parallel()
+
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","system":[{"type":"text","text":"before"},{"type":"tool_addition","tool":{"type":"tool_reference","name":"read"}},{"type":"text","text":"after"}],"tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v", err)
+	}
+	if len(got.Tools) != 2 || got.Tools[1].Name != "read" || got.Instructions != "before\nafter" {
+		t.Fatalf("tools = %#v instructions = %q, want bash/read and before/after", got.Tools, got.Instructions)
+	}
+}
+
+func TestRequestFromAnthropicMessagesJSONEnablesToolReference(t *testing.T) {
+	t.Parallel()
+
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_search","content":[{"type":"text","text":"Loaded matching tools:"},{"type":"tool_reference","tool_name":"read"}]}]},{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v", err)
+	}
+	if len(got.Tools) != 2 || got.Tools[1].Name != "read" {
+		t.Fatalf("tools = %#v, want bash and read", got.Tools)
+	}
+}
+
 func wantFullFixtureRequest(temp *float64) *Request {
 	return &Request{
 		Model:           "claude-sonnet-4-5",

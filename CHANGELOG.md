@@ -8,6 +8,7 @@ lives under `docs/acceptance/`.
 - Translate Anthropic mid-conversation `tool_addition` and `tool_removal`
   system blocks on OpenAI Chat Completions and Responses routes. Preserve mixed
   system text, apply tool availability chronologically, honor deferred tools,
+  activate declared deferred tools from ToolSearch `tool_reference` results,
   and reject unsupported references visibly instead of treating the `tool`
   field as ordinary system text.
 

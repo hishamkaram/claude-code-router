@@ -38,8 +38,8 @@ type anthropicToolChange struct {
 	toolName string
 }
 
-func responsesToolsAfterAnthropicChanges(tools []Tool, messages []anthropicMsg) ([]Tool, error) {
-	changes, err := anthropicToolChanges(messages)
+func responsesToolsAfterAnthropicChanges(tools []Tool, system json.RawMessage, messages []anthropicMsg) ([]Tool, error) {
+	changes, err := anthropicToolChanges(system, messages)
 	if err != nil {
 		return nil, err
 	}
@@ -63,9 +63,12 @@ func responsesToolsAfterAnthropicChanges(tools []Tool, messages []anthropicMsg) 
 	}
 	for _, change := range changes {
 		if !defined[change.toolName] {
+			if change.typeName == "tool_reference" {
+				continue
+			}
 			return nil, fmt.Errorf("system %s references unknown tool %q", change.typeName, change.toolName)
 		}
-		active[change.toolName] = change.typeName == "tool_addition"
+		active[change.toolName] = change.typeName != "tool_removal"
 	}
 
 	filtered := make([]Tool, 0, len(tools))
@@ -96,32 +99,109 @@ func responsesToolCapabilities(tools []Tool) (hasComputer bool, functionNames ma
 	return hasComputer, functionNames
 }
 
-func anthropicToolChanges(messages []anthropicMsg) ([]anthropicToolChange, error) {
+func anthropicToolChanges(system json.RawMessage, messages []anthropicMsg) ([]anthropicToolChange, error) {
 	changes := make([]anthropicToolChange, 0)
-	for _, message := range messages {
-		if message.Role != "system" {
-			continue
-		}
-		blocks, err := rawArrayIfPresent(message.Content)
+	if len(system) > 0 && string(system) != "null" {
+		var err error
+		changes, err = appendAnthropicToolChanges(changes, system)
 		if err != nil {
 			return nil, err
 		}
-		for _, rawBlock := range blocks {
-			blockType, err := blockType(rawBlock)
+	}
+	for _, message := range messages {
+		if message.Role == "system" {
+			var err error
+			changes, err = appendAnthropicToolChanges(changes, message.Content)
 			if err != nil {
 				return nil, err
 			}
-			if blockType != "tool_addition" && blockType != "tool_removal" {
-				continue
-			}
-			change, err := parseAnthropicToolChange(rawBlock, blockType)
+		}
+		if message.Role == "user" {
+			var err error
+			changes, err = appendAnthropicToolResultReferences(changes, message.Content)
 			if err != nil {
 				return nil, err
 			}
-			changes = append(changes, change)
 		}
 	}
 	return changes, nil
+}
+
+func appendAnthropicToolChanges(changes []anthropicToolChange, raw json.RawMessage) ([]anthropicToolChange, error) {
+	blocks, err := rawArrayIfPresent(raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, rawBlock := range blocks {
+		blockType, err := blockType(rawBlock)
+		if err != nil {
+			return nil, err
+		}
+		if blockType != "tool_addition" && blockType != "tool_removal" {
+			continue
+		}
+		change, err := parseAnthropicToolChange(rawBlock, blockType)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
+	}
+	return changes, nil
+}
+
+func appendAnthropicToolResultReferences(changes []anthropicToolChange, raw json.RawMessage) ([]anthropicToolChange, error) {
+	blocks, err := rawArrayIfPresent(raw)
+	if err != nil {
+		return nil, err
+	}
+	for _, rawBlock := range blocks {
+		names, err := anthropicToolResultReferenceNames(rawBlock)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range names {
+			changes = append(changes, anthropicToolChange{typeName: "tool_reference", toolName: name})
+		}
+	}
+	return changes, nil
+}
+
+func anthropicToolResultReferenceNames(rawBlock json.RawMessage) ([]string, error) {
+	resultType, err := blockType(rawBlock)
+	if err != nil {
+		return nil, err
+	}
+	if resultType != "tool_result" {
+		return nil, nil
+	}
+	var fields map[string]json.RawMessage
+	if decodeErr := json.Unmarshal(rawBlock, &fields); decodeErr != nil || fields == nil {
+		return nil, fmt.Errorf("decode tool_result block")
+	}
+	content, ok := fields["content"]
+	if !ok || string(content) == "null" {
+		return nil, nil
+	}
+	contentBlocks, err := rawArrayIfPresent(content)
+	if err != nil {
+		return nil, fmt.Errorf("tool_result content must be a string or array: %w", err)
+	}
+	names := make([]string, 0, len(contentBlocks))
+	for _, rawContent := range contentBlocks {
+		contentType, err := blockType(rawContent)
+		if err != nil {
+			return nil, err
+		}
+		if contentType != "tool_reference" {
+			continue
+		}
+		name, err := toolReferenceName(rawContent)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }
 
 func rawArrayIfPresent(raw json.RawMessage) ([]json.RawMessage, error) {

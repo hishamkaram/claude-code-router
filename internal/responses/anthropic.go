@@ -42,7 +42,7 @@ func RequestFromAnthropicMessagesJSON(raw []byte) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	tools, err = responsesToolsAfterAnthropicChanges(tools, req.Messages)
+	tools, err = responsesToolsAfterAnthropicChanges(tools, req.System, req.Messages)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func RequestFromAnthropicMessagesJSON(raw []byte) (*Request, error) {
 		Text:            text,
 	}
 	if len(req.System) > 0 && string(req.System) != "null" {
-		instructions, instructionErr := textFromAnthropicContent(req.System)
+		instructions, instructionErr := textFromAnthropicSystemMessage(req.System)
 		if instructionErr != nil {
 			return nil, fmt.Errorf("convert system content: %w", instructionErr)
 		}
