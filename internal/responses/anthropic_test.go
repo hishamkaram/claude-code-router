@@ -78,7 +78,7 @@ func TestRequestFromAnthropicMessagesJSONBasicCases(t *testing.T) {
 		},
 		{
 			name: "system tool removal is omitted and filters tools",
-			raw:  `{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"text","text":"before"},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read"}},{"type":"text","text":"after"}]},{"role":"user","content":"hello"}]}`,
+			raw:  `{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"text","text":"before"},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read"},"cache_control":{"type":"ephemeral"}},{"type":"text","text":"after"}]},{"role":"user","content":"hello"}]}`,
 			want: &Request{
 				Model: "claude",
 				Tools: []Tool{{Type: "function", Name: "bash", Parameters: rawJSON(`{"type":"object"}`)}},
@@ -153,7 +153,7 @@ func TestRequestFromAnthropicMessagesJSONEnablesDeferredTool(t *testing.T) {
 func TestRequestFromAnthropicMessagesJSONEnablesTopLevelDeferredTool(t *testing.T) {
 	t.Parallel()
 
-	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","system":[{"type":"text","text":"before"},{"type":"tool_addition","tool":{"type":"tool_reference","name":"read"}},{"type":"text","text":"after"}],"tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`))
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","system":[{"type":"text","text":"before"},{"type":"tool_addition","tool":{"type":"tool_reference","name":"read"},"cache_control":{"type":"ephemeral"}},{"type":"text","text":"after"}],"tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`))
 	if err != nil {
 		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v", err)
 	}
@@ -257,6 +257,10 @@ func TestRequestFromAnthropicMessagesJSONErrors(t *testing.T) {
 		{
 			name: "function tool missing schema",
 			raw:  `{"model":"claude","tools":[{"name":"lookup"}],"messages":[{"role":"user","content":"go"}]}`,
+		},
+		{
+			name: "reject unknown tool change block field",
+			raw:  `{"model":"claude","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"read"},"cache_control":{"type":"ephemeral"},"extra":true}]}]}`,
 		},
 	}
 	for _, test := range tests {

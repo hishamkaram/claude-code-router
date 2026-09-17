@@ -18,8 +18,9 @@ lives under `docs/acceptance/`.
   system blocks for both the OpenAI Chat Completions and Responses routes. Claude
   Code marks the final system block for prompt caching, and since v0.6.1 that block
   is a tool change whenever tools change mid-conversation, so the strict field
-  allowlist rejected the whole request with 501 even though text system blocks
-  already tolerate the same field.
+  allowlist rejected the whole request with 501 even though text system
+  blocks already tolerate the same field. Translated OpenAI routes expose the
+  dropped hint through `X-CCR-Ignored-Anthropic-Fields: cache_control`.
 
 ## v0.5.1
 

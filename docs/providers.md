@@ -347,6 +347,12 @@ into one leading system message. This keeps late subagent environment messages
 valid for strict templates such as Qwen3 while preserving all user, assistant,
 and tool message ordering.
 
+Tool-change system blocks can also carry Anthropic's `cache_control` prompt
+hint. OpenAI-compatible routes drop this provider-specific hint and expose the
+compatibility degradation through
+`X-CCR-Ignored-Anthropic-Fields: cache_control`; all other unsupported
+tool-change fields remain rejected.
+
 On Windows, database paths use SQLite's drive-letter URI form. UNC database
 paths are rejected explicitly because the default SQLite URI parser does not
 accept arbitrary URI authorities; use a local drive path for the CCR database.

@@ -108,8 +108,9 @@ func TestOpenAIToolChangesFilterRemovedTools(t *testing.T) {
 	filtered, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
 		Role: "system",
 		Content: []any{map[string]any{
-			"type": "tool_removal",
-			"tool": map[string]any{"type": "tool_reference", "name": "read"},
+			"type":          "tool_removal",
+			"tool":          map[string]any{"type": "tool_reference", "name": "read"},
+			"cache_control": map[string]any{"type": "ephemeral"},
 		}},
 	}})
 	if err != nil {
@@ -771,5 +772,22 @@ func TestOpenAIToolChangesAcceptCachedToolAdditionBlock(t *testing.T) {
 	}
 	if len(active) != 2 || active[1].Function.Name != "read" {
 		t.Fatalf("active tools after cached addition = %#v, want bash and read", active)
+	}
+}
+
+func TestOpenAIToolChangesRejectUnknownBlockFields(t *testing.T) {
+	t.Parallel()
+
+	_, err := openAIToolsAfterAnthropicChanges(nil, []anthropicMessage{{
+		Role: "system",
+		Content: []any{map[string]any{
+			"type":          "tool_addition",
+			"tool":          map[string]any{"type": "tool_reference", "name": "read"},
+			"cache_control": map[string]any{"type": "ephemeral"},
+			"extra":         true,
+		}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), `field "extra"`) {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v, want unknown-field rejection", err)
 	}
 }
