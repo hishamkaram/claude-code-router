@@ -284,7 +284,8 @@ func (f *liveClaudeConformanceFixture) handleOpenAI(t *testing.T, w http.Respons
 	switch {
 	case liveToolsContain(payload.Tools, "ccr_probe"):
 		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-conformance", "toolu_conformance", "ccr_probe", map[string]any{})
-	case !f.workflowStarted() && strings.Contains(latest, claudeConformanceWorkflowParent):
+	case !f.workflowStarted() && (strings.Contains(latest, claudeConformanceWorkflowParent) ||
+		openAIMessagesContain(payload.Messages, claudeConformanceWorkflowParent)):
 		f.markWorkflow()
 		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-conformance-workflow", "toolu_workflow_conformance", "Workflow", map[string]any{"script": conformanceWorkflowScript()})
 	case f.workflowStarted() && openAIMessagesContain(payload.Messages, "<task-notification>"):
@@ -293,11 +294,22 @@ func (f *liveClaudeConformanceFixture) handleOpenAI(t *testing.T, w http.Respons
 		f.writeOpenAIText(w, payload, claudeConformanceWorkflowParent)
 	case f.workflowStarted() && strings.Contains(latest, "subagent spawned by a workflow orchestration script") && strings.Contains(latest, claudeConformanceWorkflowChild):
 		f.writeOpenAIText(w, payload, claudeConformanceWorkflowChild)
+	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && openAIMessagesContainToolRole(payload.Messages, ""):
+		f.writeOpenAIText(w, payload, claudeConformanceAgentParent)
+	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") &&
+		openAIMessageRoleContains(payload.Messages, "assistant", "CCR_CONFORMANCE_AGENT_CHILD_OK"):
+		f.writeOpenAIText(w, payload, claudeConformanceAgentParent)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") &&
 		(strings.Contains(latest, "tool_result") || strings.HasPrefix(latest, "tool ")):
 		f.writeOpenAIText(w, payload, claudeConformanceAgentParent)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && !strings.Contains(latest, claudeConformanceAgentParent):
-		f.writeOpenAIText(w, payload, "CCR_CONFORMANCE_AGENT_CHILD_OK")
+		if liveToolsContain(payload.Tools, "SubagentHandback") {
+			writeLiveOpenAIToolFixture(w, payload, "chatcmpl-conformance-handback", "toolu_agent_handback", "SubagentHandback", map[string]any{
+				"message": "CCR_CONFORMANCE_AGENT_CHILD_OK",
+			})
+		} else {
+			f.writeOpenAIText(w, payload, "CCR_CONFORMANCE_AGENT_CHILD_OK")
+		}
 	case strings.Contains(latest, claudeConformanceAgentParent):
 		f.markAgentTool()
 		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-conformance-agent", "toolu_agent_conformance", "Agent", map[string]any{
@@ -387,9 +399,14 @@ func (f *liveClaudeConformanceFixture) handleAnthropic(t *testing.T, w http.Resp
 		f.recordFirstParty()
 	}
 	latest := latestAnthropicMessage(payload.Messages)
+	latestUser := latestAnthropicUserMessage(payload.Messages)
 	f.recordRequestStep(payload.Model, latest)
 	if strings.Contains(latest, "CCR_CONFORMANCE_CANCEL") {
 		waitForFixtureCancellation(r)
+		return
+	}
+	if strings.Contains(latestUser, "CCR_CONFORMANCE_ANTHROPIC_RETURN_") {
+		writeAnthropicFixtureText(w, payload, latestConformanceSentinel(latestUser))
 		return
 	}
 	if !aliasRoute {
@@ -399,7 +416,8 @@ func (f *liveClaudeConformanceFixture) handleAnthropic(t *testing.T, w http.Resp
 	switch {
 	case liveAnthropicToolsContain(payload.Tools, "ccr_probe"):
 		writeAnthropicFixtureToolCall(w, payload, "ccr_probe", "toolu_conformance", map[string]any{})
-	case !f.workflowStarted() && strings.Contains(latest, claudeConformanceWorkflowParent):
+	case !f.workflowStarted() && (strings.Contains(latest, claudeConformanceWorkflowParent) ||
+		liveAnthropicMessagesContain(payload.Messages, claudeConformanceWorkflowParent)):
 		f.markWorkflow()
 		writeAnthropicFixtureToolCall(w, payload, "Workflow", "toolu_workflow_conformance", map[string]any{"script": conformanceWorkflowScript()})
 	case f.workflowStarted() && bytes.Contains(payload.System, []byte("subagent spawned by a workflow orchestration script")) &&
@@ -409,10 +427,23 @@ func (f *liveClaudeConformanceFixture) handleAnthropic(t *testing.T, w http.Resp
 		writeAnthropicFixtureText(w, payload, claudeConformanceWorkflowParent)
 	case f.workflowStarted() && liveAnthropicMessagesContain(payload.Messages, "Workflow launched in background"):
 		writeAnthropicFixtureText(w, payload, claudeConformanceWorkflowParent)
+	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") &&
+		(liveAnthropicMessagesContainRole(payload.Messages, "tool", "") ||
+			liveAnthropicMessagesContainRole(payload.Messages, "system", "CCR_CONFORMANCE_AGENT_CHILD_OK")):
+		writeAnthropicFixtureText(w, payload, claudeConformanceAgentParent)
+	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") &&
+		liveAnthropicMessagesContainRole(payload.Messages, "assistant", "CCR_CONFORMANCE_AGENT_CHILD_OK"):
+		writeAnthropicFixtureText(w, payload, claudeConformanceAgentParent)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && strings.Contains(latest, "tool_result"):
 		writeAnthropicFixtureText(w, payload, claudeConformanceAgentParent)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && !strings.Contains(latest, claudeConformanceAgentParent):
-		writeAnthropicFixtureText(w, payload, "CCR_CONFORMANCE_AGENT_CHILD_OK")
+		if liveAnthropicToolsContain(payload.Tools, "SubagentHandback") {
+			writeAnthropicFixtureToolCall(w, payload, "SubagentHandback", "toolu_agent_handback", map[string]any{
+				"message": "CCR_CONFORMANCE_AGENT_CHILD_OK",
+			})
+		} else {
+			writeAnthropicFixtureText(w, payload, "CCR_CONFORMANCE_AGENT_CHILD_OK")
+		}
 	case strings.Contains(latest, claudeConformanceAgentParent):
 		f.markAgentTool()
 		writeAnthropicFixtureToolCall(w, payload, "Agent", "toolu_agent_conformance", map[string]any{
@@ -435,6 +466,15 @@ func latestOpenAIMessage(messages []liveOpenAIChatMessage) string {
 	}
 	message := messages[len(messages)-1]
 	return message.Role + " " + message.Content
+}
+
+func openAIMessageRoleContains(messages []liveOpenAIChatMessage, role, needle string) bool {
+	for _, message := range messages {
+		if message.Role == role && strings.Contains(message.Content, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func isLiveResponsesAutoClassifierRequest(payload openairesponses.Request) bool {
@@ -533,10 +573,7 @@ func responsesInputItemText(item openairesponses.InputItem) string {
 	return item.Role + " " + item.Type + " " + strings.Join(parts, " ")
 }
 
-func latestAnthropicMessage(messages []struct {
-	Content json.RawMessage `json:"content"`
-},
-) string {
+func latestAnthropicMessage(messages []liveAnthropicMessage) string {
 	if len(messages) == 0 {
 		return ""
 	}
@@ -546,6 +583,15 @@ func latestAnthropicMessage(messages []struct {
 		}
 	}
 	return string(messages[len(messages)-1].Content)
+}
+
+func latestAnthropicUserMessage(messages []liveAnthropicMessage) string {
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Role == "user" && bytes.Contains(messages[index].Content, []byte("CCR_CONFORMANCE_")) {
+			return string(messages[index].Content)
+		}
+	}
+	return ""
 }
 
 func latestConformanceSentinel(content string) string {

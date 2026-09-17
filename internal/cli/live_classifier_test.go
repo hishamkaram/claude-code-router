@@ -117,6 +117,10 @@ func (s *liveAutoClassifierState) handleChat(t *testing.T, w http.ResponseWriter
 	if !ok {
 		return
 	}
+	if openAIMessagesContain(payload.Messages, "You are naming a coding session") {
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-classifier-title", "Classifier test", 4, 2)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++
@@ -124,7 +128,7 @@ func (s *liveAutoClassifierState) handleChat(t *testing.T, w http.ResponseWriter
 	case isLiveAutoClassifierRequest(payload):
 		s.classifierRequestSeen = true
 		writeLiveOpenAIClassifierResponse(w, payload)
-	case s.chatCalls == 1:
+	case !s.firstRequestHadWrite:
 		s.firstRequestHadWrite = liveToolsContain(payload.Tools, "Write")
 		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-classifier-write", "toolu_classifier_write", "Write", map[string]string{
 			"file_path": s.writePath,

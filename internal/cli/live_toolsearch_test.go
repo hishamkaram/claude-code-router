@@ -91,6 +91,10 @@ func (s *liveToolSearchAgentState) handleChat(t *testing.T, w http.ResponseWrite
 	if !ok {
 		return
 	}
+	if openAIMessagesContain(payload.Messages, "You are naming a coding session") {
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-title", "Tool search test", 4, 2)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++
@@ -98,7 +102,7 @@ func (s *liveToolSearchAgentState) handleChat(t *testing.T, w http.ResponseWrite
 	case isLiveAutoClassifierRequest(payload):
 		s.classifierRequestSeen = true
 		writeLiveOpenAIClassifierResponse(w, payload)
-	case s.chatCalls == 1:
+	case !s.firstRequestHadToolSearch:
 		s.firstRequestHadToolSearch = liveToolsContain(payload.Tools, "ToolSearch")
 		writeLiveToolSearchCall(w, payload)
 	case !s.toolReferenceResultSeen && openAIMessagesContainToolRole(payload.Messages, "[Loaded tool: Agent]"):

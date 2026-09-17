@@ -87,9 +87,12 @@ type liveAnthropicMessagePayload struct {
 	Tools         []struct {
 		Name string `json:"name"`
 	} `json:"tools"`
-	Messages []struct {
-		Content json.RawMessage `json:"content"`
-	} `json:"messages"`
+	Messages []liveAnthropicMessage `json:"messages"`
+}
+
+type liveAnthropicMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
 func (s *liveAnthropicToolSearchAgentState) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -111,6 +114,10 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		t.Errorf("provider decode error: %v", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if isLiveAnthropicSessionTitleRequest(payload) {
+		writeLiveAnthropicStream(w, payload.Model, "Tool search test")
 		return
 	}
 	s.mu.Lock()
@@ -156,6 +163,10 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	}
 }
 
+func isLiveAnthropicSessionTitleRequest(payload liveAnthropicMessagePayload) bool {
+	return strings.Contains(string(payload.System), "You are naming a coding session")
+}
+
 func (s *liveAnthropicToolSearchAgentState) assertComplete(t *testing.T, out, errOut string) {
 	t.Helper()
 	s.mu.Lock()
@@ -178,12 +189,18 @@ func liveAnthropicToolsContain(tools []struct {
 	return false
 }
 
-func liveAnthropicMessagesContain(messages []struct {
-	Content json.RawMessage `json:"content"`
-}, want string,
-) bool {
+func liveAnthropicMessagesContain(messages []liveAnthropicMessage, want string) bool {
 	for _, message := range messages {
 		if strings.Contains(string(message.Content), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func liveAnthropicMessagesContainRole(messages []liveAnthropicMessage, role, want string) bool {
+	for _, message := range messages {
+		if message.Role == role && strings.Contains(string(message.Content), want) {
 			return true
 		}
 	}

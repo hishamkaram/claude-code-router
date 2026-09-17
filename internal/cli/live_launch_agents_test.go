@@ -148,6 +148,10 @@ func (s *liveAgentToolProviderState) handleChat(t *testing.T, w http.ResponseWri
 		writeLiveOpenAIClassifierResponse(w, payload)
 		return
 	}
+	if openAIMessagesContain(payload.Messages, "You are naming a coding session") {
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-agent-title", "Agent tool test", 4, 2)
+		return
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -163,6 +167,9 @@ func (s *liveAgentToolProviderState) handleChat(t *testing.T, w http.ResponseWri
 		})
 	case s.chatCalls == 2:
 		s.handleChildRequest(t, w, payload)
+	case openAIMessagesContainToolRole(payload.Messages, ""):
+		s.parentToolResultSeen = true
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-agent-parent", "CCR_LIVE_PARENT_OK", 4, 2)
 	case openAIMessagesContainToolRole(payload.Messages, "CCR_LIVE_CHILD_OK"):
 		s.parentToolResultSeen = true
 		writeLiveOpenAITextFixture(w, payload, "chatcmpl-agent-parent", "CCR_LIVE_PARENT_OK", 4, 2)
@@ -176,6 +183,10 @@ func (s *liveWorkflowProviderState) handleChat(t *testing.T, w http.ResponseWrit
 	t.Helper()
 	payload, ok := decodeLiveOpenAIChatPayload(t, w, r)
 	if !ok {
+		return
+	}
+	if openAIMessagesContain(payload.Messages, "You are naming a coding session") {
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-workflow-title", "Workflow test", 4, 2)
 		return
 	}
 	s.mu.Lock()
@@ -248,6 +259,12 @@ func (s *liveAgentToolProviderState) handleChildRequest(t *testing.T, w http.Res
 		return
 	}
 	s.childPromptSeen = true
+	if liveToolsContain(payload.Tools, "SubagentHandback") {
+		writeLiveOpenAIToolFixture(w, payload, "chatcmpl-agent-handback", "toolu_agent_handback", "SubagentHandback", map[string]any{
+			"message": "CCR_LIVE_CHILD_OK",
+		})
+		return
+	}
 	writeLiveOpenAITextFixture(w, payload, "chatcmpl-agent-child", "CCR_LIVE_CHILD_OK", 4, 2)
 }
 
@@ -275,7 +292,7 @@ func liveToolsContainAgent(tools []struct {
 	} `json:"function"`
 },
 ) bool {
-	return liveToolsContain(tools, "Agent")
+	return liveToolsContain(tools, "Agent") || liveToolsContain(tools, "Task")
 }
 
 func liveToolsContain(tools []struct {

@@ -142,7 +142,7 @@ func writeLiveOpenAITextFixture(
 				"id": id,
 				"choices": []any{map[string]any{
 					"index": 0,
-					"delta": map[string]any{"content": content},
+					"delta": map[string]any{"role": "assistant", "content": content},
 				}},
 			},
 			map[string]any{
@@ -165,7 +165,7 @@ func writeLiveOpenAITextFixture(
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"id": id,
 		"choices": []any{map[string]any{
-			"message":       map[string]string{"content": content},
+			"message":       map[string]string{"role": "assistant", "content": content},
 			"finish_reason": "stop",
 		}},
 		"usage": map[string]int{"prompt_tokens": promptTokens, "completion_tokens": completionTokens},
