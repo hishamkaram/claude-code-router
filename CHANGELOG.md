@@ -5,6 +5,12 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+- Translate Anthropic mid-conversation `tool_addition` and `tool_removal`
+  system blocks on OpenAI Chat Completions and Responses routes. Preserve mixed
+  system text, apply tool availability chronologically, honor deferred tools,
+  and reject unsupported references visibly instead of treating the `tool`
+  field as ordinary system text.
+
 ## v0.5.1
 
 - Wait for killed process-group members to exit before reporting job cleanup

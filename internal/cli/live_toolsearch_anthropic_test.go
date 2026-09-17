@@ -144,6 +144,9 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	case !s.childPromptSeen && liveAnthropicMessagesContain(payload.Messages, "Find latest ChatGPT news"):
 		s.childPromptSeen = true
 		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
+	case s.childPromptSeen && (liveAnthropicMessagesContain(payload.Messages, "subagent ended without delivering") || liveAnthropicMessagesContain(payload.Messages, "terminated early due to an API error")):
+		s.callerAgentResultSeen = true
+		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
 	case liveAnthropicMessagesContain(payload.Messages, liveToolSearchAgentResult):
 		s.callerAgentResultSeen = true
 		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
@@ -157,7 +160,7 @@ func (s *liveAnthropicToolSearchAgentState) assertComplete(t *testing.T, out, er
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.toolSearchSeen || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen ||
+	if !s.toolSearchSeen || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen || !s.callerAgentResultSeen ||
 		!s.sessionHeaderSeen || s.claudeSessionID == "" || s.sessionMismatch {
 		t.Fatalf("Anthropic research Agent live route incomplete: toolSearchSeen=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v messageCalls=%d sessionID=%q sessionMismatch=%v\nstdout:\n%s\nstderr:\n%s", s.toolSearchSeen, s.toolReferenceResultSeen, s.classifierRequestSeen, s.childPromptSeen, s.callerAgentResultSeen, s.messageCalls, s.claudeSessionID, s.sessionMismatch, out, errOut)
 	}

@@ -211,6 +211,38 @@ func textFromAnthropicContent(raw json.RawMessage) (string, error) {
 	return strings.Join(parts, "\n"), nil
 }
 
+func textFromAnthropicSystemMessage(raw json.RawMessage) (string, error) {
+	if text, ok, err := rawString(raw); ok || err != nil {
+		return text, err
+	}
+	blocks, err := rawArray(raw)
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, len(blocks))
+	for _, rawBlock := range blocks {
+		blockType, err := blockType(rawBlock)
+		if err != nil {
+			return "", err
+		}
+		switch blockType {
+		case "text":
+			text, err := textBlock(rawBlock)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, text)
+		case "tool_addition", "tool_removal":
+			if _, err := parseAnthropicToolChange(rawBlock, blockType); err != nil {
+				return "", err
+			}
+		default:
+			return "", fmt.Errorf("system content block type %q is not supported", blockType)
+		}
+	}
+	return strings.Join(parts, "\n"), nil
+}
+
 func textBlock(raw json.RawMessage) (string, error) {
 	var block struct {
 		Text string `json:"text"`

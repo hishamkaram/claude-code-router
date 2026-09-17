@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/hishamkaram/claude-code-router/internal/cua"
 )
@@ -32,6 +33,168 @@ func responsesTools(rawTools []json.RawMessage) (tools []Tool, hasComputer bool,
 	return tools, hasComputer, functionNames, nil
 }
 
+type anthropicToolChange struct {
+	typeName string
+	toolName string
+}
+
+func responsesToolsAfterAnthropicChanges(tools []Tool, messages []anthropicMsg) ([]Tool, error) {
+	changes, err := anthropicToolChanges(messages)
+	if err != nil {
+		return nil, err
+	}
+	needsFilter := len(changes) > 0
+	for _, tool := range tools {
+		if tool.deferred {
+			needsFilter = true
+			break
+		}
+	}
+	if !needsFilter {
+		return tools, nil
+	}
+
+	defined := make(map[string]bool, len(tools))
+	active := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		name := responsesToolName(tool)
+		defined[name] = true
+		active[name] = !tool.deferred
+	}
+	for _, change := range changes {
+		if !defined[change.toolName] {
+			return nil, fmt.Errorf("system %s references unknown tool %q", change.typeName, change.toolName)
+		}
+		active[change.toolName] = change.typeName == "tool_addition"
+	}
+
+	filtered := make([]Tool, 0, len(tools))
+	for _, tool := range tools {
+		if active[responsesToolName(tool)] {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered, nil
+}
+
+func responsesToolName(tool Tool) string {
+	if tool.Type == "computer" {
+		return "computer"
+	}
+	return tool.Name
+}
+
+func responsesToolCapabilities(tools []Tool) (hasComputer bool, functionNames map[string]bool) {
+	functionNames = make(map[string]bool)
+	for _, tool := range tools {
+		if tool.Type == "computer" {
+			hasComputer = true
+			continue
+		}
+		functionNames[strings.ToLower(tool.Name)] = true
+	}
+	return hasComputer, functionNames
+}
+
+func anthropicToolChanges(messages []anthropicMsg) ([]anthropicToolChange, error) {
+	changes := make([]anthropicToolChange, 0)
+	for _, message := range messages {
+		if message.Role != "system" {
+			continue
+		}
+		blocks, err := rawArrayIfPresent(message.Content)
+		if err != nil {
+			return nil, err
+		}
+		for _, rawBlock := range blocks {
+			blockType, err := blockType(rawBlock)
+			if err != nil {
+				return nil, err
+			}
+			if blockType != "tool_addition" && blockType != "tool_removal" {
+				continue
+			}
+			change, err := parseAnthropicToolChange(rawBlock, blockType)
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, change)
+		}
+	}
+	return changes, nil
+}
+
+func rawArrayIfPresent(raw json.RawMessage) ([]json.RawMessage, error) {
+	if _, ok, err := rawString(raw); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	blocks, err := rawArray(raw)
+	if err != nil {
+		return nil, fmt.Errorf("system content must be a string or array: %w", err)
+	}
+	return blocks, nil
+}
+
+func parseAnthropicToolChange(raw json.RawMessage, blockType string) (anthropicToolChange, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return anthropicToolChange{}, fmt.Errorf("decode system %s block", blockType)
+	}
+	toolRaw, err := anthropicToolReferenceRaw(fields, blockType)
+	if err != nil {
+		return anthropicToolChange{}, err
+	}
+	name, err := anthropicToolReferenceName(toolRaw, blockType)
+	if err != nil {
+		return anthropicToolChange{}, err
+	}
+	return anthropicToolChange{typeName: blockType, toolName: name}, nil
+}
+
+func anthropicToolReferenceRaw(fields map[string]json.RawMessage, blockType string) (json.RawMessage, error) {
+	for key := range fields {
+		if key != "type" && key != "tool" {
+			return nil, fmt.Errorf("system %s block field %q is not supported by the OpenAI Responses gateway path", blockType, key)
+		}
+	}
+	toolRaw, ok := fields["tool"]
+	if !ok {
+		return nil, fmt.Errorf("system %s block requires a tool reference object", blockType)
+	}
+	return toolRaw, nil
+}
+
+func anthropicToolReferenceName(toolRaw json.RawMessage, blockType string) (string, error) {
+	var reference map[string]json.RawMessage
+	if err := json.Unmarshal(toolRaw, &reference); err != nil || reference == nil {
+		return "", fmt.Errorf("system %s block requires a tool reference object", blockType)
+	}
+	for key := range reference {
+		if key != "type" && key != "name" {
+			return "", fmt.Errorf("system %s tool reference field %q is not supported by the OpenAI Responses gateway path", blockType, key)
+		}
+	}
+	var referenceType string
+	if err := json.Unmarshal(reference["type"], &referenceType); err != nil || referenceType != "tool_reference" {
+		return "", fmt.Errorf("system %s tool reference type %q is not supported by the OpenAI Responses gateway path", blockType, referenceType)
+	}
+	var name string
+	if err := json.Unmarshal(reference["name"], &name); err != nil {
+		return "", fmt.Errorf("system %s tool reference name must be a string", blockType)
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("system %s tool reference name is required", blockType)
+	}
+	if strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return "", fmt.Errorf("system %s tool reference name must not contain control characters", blockType)
+	}
+	return name, nil
+}
+
 func responsesTool(raw json.RawMessage) (Tool, bool, error) {
 	var tool struct {
 		Type            string          `json:"type"`
@@ -39,6 +202,7 @@ func responsesTool(raw json.RawMessage) (Tool, bool, error) {
 		Description     string          `json:"description"`
 		InputSchema     json.RawMessage `json:"input_schema"`
 		Strict          *bool           `json:"strict"`
+		DeferLoading    bool            `json:"defer_loading"`
 		DisplayWidthPX  *int            `json:"display_width_px"`
 		DisplayHeightPX *int            `json:"display_height_px"`
 		DisplayWidth    *int            `json:"display_width"`
@@ -50,6 +214,7 @@ func responsesTool(raw json.RawMessage) (Tool, bool, error) {
 	}
 	if cua.IsNativeComputerTool(tool.Type, tool.Name, tool.InputSchema) {
 		computerTool, err := responsesComputerTool(tool.DisplayWidthPX, tool.DisplayHeightPX, tool.DisplayWidth, tool.DisplayHeight, tool.Environment)
+		computerTool.deferred = tool.DeferLoading
 		return computerTool, true, err
 	}
 	name := strings.TrimSpace(tool.Name)
@@ -65,6 +230,7 @@ func responsesTool(raw json.RawMessage) (Tool, bool, error) {
 		Description: tool.Description,
 		Parameters:  tool.InputSchema,
 		Strict:      tool.Strict,
+		deferred:    tool.DeferLoading,
 	}, false, nil
 }
 
@@ -147,6 +313,32 @@ func responsesToolChoice(raw json.RawMessage, hasNativeComputer bool) (toolChoic
 	default:
 		return nil, nil, fmt.Errorf("tool_choice type %q is not supported", choice.Type)
 	}
+}
+
+func validateResponsesToolChoiceAgainstTools(raw json.RawMessage, tools []Tool) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var choice struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &choice); err != nil {
+		return fmt.Errorf("decode tool_choice: %w", err)
+	}
+	if strings.TrimSpace(choice.Type) != "tool" {
+		return nil
+	}
+	name := strings.TrimSpace(choice.Name)
+	for _, tool := range tools {
+		if tool.Type == "computer" && strings.EqualFold(name, "computer") {
+			return nil
+		}
+		if tool.Type != "computer" && tool.Name == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("tool_choice references unavailable tool %q", name)
 }
 
 func responsesParallelToolCalls(disabled *bool) *bool {

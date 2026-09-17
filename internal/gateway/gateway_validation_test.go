@@ -280,6 +280,74 @@ func TestGatewayTranslatesToolsForOpenAICompatibleProviders(t *testing.T) {
 	}
 }
 
+func TestGatewayAppliesSystemToolRemovalForOpenAIProvider(t *testing.T) {
+	ctx := context.Background()
+	var gotToolNames []string
+	var gotMessages []map[string]any
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		for _, tool := range payload.Tools {
+			gotToolNames = append(gotToolNames, tool.Function.Name)
+		}
+		gotMessages = payload.Messages
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-tool-change","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{
+		Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded",
+	})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	body := `{
+		"model":"gpt",
+		"tools":[
+			{"name":"bash","input_schema":{"type":"object"}},
+			{"name":"read","input_schema":{"type":"object"}}
+		],
+		"messages":[
+			{"role":"user","content":"start"},
+			{"role":"system","content":[
+				{"type":"tool_removal","tool":{"type":"tool_reference","name":"read"}}
+			]},
+			{"role":"user","content":"continue"}
+		]
+	}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if len(gotToolNames) != 1 || gotToolNames[0] != "bash" {
+		t.Fatalf("provider tools = %#v, want only bash", gotToolNames)
+	}
+	for _, message := range gotMessages {
+		if message["role"] == "system" {
+			t.Fatalf("provider received a translated tool-change system message: %#v", message)
+		}
+	}
+}
+
 func TestGatewayTranslatesLegacyFunctionCallResponse(t *testing.T) {
 	ctx := context.Background()
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
