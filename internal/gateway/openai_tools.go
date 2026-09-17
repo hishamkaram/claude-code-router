@@ -122,7 +122,12 @@ func openAIToolChangesFromAnthropic(messages []anthropicMessage) ([]openAIToolCh
 func openAIToolChangeFromAnthropic(block map[string]any) (openAIToolChange, error) {
 	blockType, _ := block["type"].(string)
 	for key := range block {
-		if key != "type" && key != "tool" {
+		// cache_control is accepted and dropped, matching the text system block path.
+		// Claude Code marks the final system block for prompt caching, and that block is
+		// a tool_addition whenever tools change mid-conversation. OpenAI has no equivalent
+		// field, so ignoring it costs caching and nothing else; rejecting it fails the
+		// whole request over a hint.
+		if key != "type" && key != "tool" && key != "cache_control" {
 			return openAIToolChange{}, fmt.Errorf("system %s block field %q is not supported by the OpenAI-compatible gateway path", blockType, key)
 		}
 	}

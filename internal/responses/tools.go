@@ -236,7 +236,11 @@ func parseAnthropicToolChange(raw json.RawMessage, blockType string) (anthropicT
 
 func anthropicToolReferenceRaw(fields map[string]json.RawMessage, blockType string) (json.RawMessage, error) {
 	for key := range fields {
-		if key != "type" && key != "tool" {
+		// cache_control is accepted and dropped. Text system blocks on this route already
+		// tolerate it implicitly (they decode into a struct, so unknown fields fall away);
+		// the strict allowlist here made tool_addition the one system block Claude Code's
+		// prompt-cache marker could not land on.
+		if key != "type" && key != "tool" && key != "cache_control" {
 			return nil, fmt.Errorf("system %s block field %q is not supported by the OpenAI Responses gateway path", blockType, key)
 		}
 	}
