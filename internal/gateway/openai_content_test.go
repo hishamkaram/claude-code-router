@@ -743,3 +743,33 @@ func TestOpenAIUserMessagesDropEmptyTextPartInMultipart(t *testing.T) {
 		t.Fatalf("marshaled = %s, want %s", encoded, want)
 	}
 }
+
+func TestOpenAIToolChangesAcceptCachedToolAdditionBlock(t *testing.T) {
+	t.Parallel()
+
+	tools, err := openAIToolsFromAnthropic([]json.RawMessage{
+		json.RawMessage(`{"name":"bash","input_schema":{"type":"object"}}`),
+		json.RawMessage(`{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}`),
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
+	}
+
+	// Claude Code stamps cache_control on the final system block. When tools change
+	// mid-conversation that block is a tool_addition, which used to fail the whole
+	// request with 501 even though text system blocks accept the same field.
+	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+		Role: "system",
+		Content: []any{map[string]any{
+			"type":          "tool_addition",
+			"tool":          map[string]any{"type": "tool_reference", "name": "read"},
+			"cache_control": map[string]any{"type": "ephemeral"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() cached addition error = %v", err)
+	}
+	if len(active) != 2 || active[1].Function.Name != "read" {
+		t.Fatalf("active tools after cached addition = %#v, want bash and read", active)
+	}
+}

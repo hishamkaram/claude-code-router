@@ -390,3 +390,18 @@ func fixture(t *testing.T, name string) string {
 	}
 	return strings.TrimSpace(string(data))
 }
+
+func TestRequestFromAnthropicMessagesJSONAcceptsCachedToolAdditionBlock(t *testing.T) {
+	t.Parallel()
+
+	// cache_control on a tool_addition block is dropped, not rejected: text system
+	// blocks on this route already ignore it, so the strict allowlist here made
+	// tool_addition the one block the prompt-cache marker could not land on.
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"read"},"cache_control":{"type":"ephemeral"}}]},{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v", err)
+	}
+	if len(got.Tools) != 2 || got.Tools[1].Name != "read" {
+		t.Fatalf("tools = %#v, want bash and read", got.Tools)
+	}
+}
