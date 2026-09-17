@@ -3,7 +3,7 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
-## Unreleased
+## v0.6.1
 
 - Translate Anthropic mid-conversation `tool_addition` and `tool_removal`
   system blocks on OpenAI Chat Completions and Responses routes. Preserve mixed
@@ -11,6 +11,8 @@ lives under `docs/acceptance/`.
   activate declared deferred tools from ToolSearch `tool_reference` results,
   and reject unsupported references visibly instead of treating the `tool`
   field as ordinary system text.
+
+## Unreleased
 
 ## v0.5.1
 
