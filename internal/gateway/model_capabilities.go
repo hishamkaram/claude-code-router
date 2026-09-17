@@ -34,9 +34,6 @@ func validateModelMessageCapabilities(model store.Model, capabilities modelcap.V
 	if isNonChatModelKind(capabilities.Kind) {
 		return unsupportedModelCapability(model, "kind "+capabilities.Kind)
 	}
-	if validationErr := validateModelOutputLimit(model, capabilities, req); validationErr != nil {
-		return validationErr
-	}
 	if validationErr := validateModelGenerationFeatures(model, capabilities, req); validationErr != nil {
 		return validationErr
 	}
@@ -47,16 +44,6 @@ func validateModelMessageCapabilities(model store.Model, capabilities modelcap.V
 		return validationErr
 	}
 	return validateModelInputModalities(model, capabilities, req)
-}
-
-func validateModelOutputLimit(model store.Model, capabilities modelcap.Values, req anthropicRequest) *requestValidationError {
-	if req.MaxTokens > 0 && capabilities.MaxOutputTokens != nil && int64(req.MaxTokens) > *capabilities.MaxOutputTokens {
-		return &requestValidationError{
-			status:  http.StatusBadRequest,
-			message: fmt.Sprintf("model alias %q max_tokens %d exceeds its configured maximum output of %d", model.Alias, req.MaxTokens, *capabilities.MaxOutputTokens),
-		}
-	}
-	return nil
 }
 
 func validateModelGenerationFeatures(model store.Model, capabilities modelcap.Values, req anthropicRequest) *requestValidationError {

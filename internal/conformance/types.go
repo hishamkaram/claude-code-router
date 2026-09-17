@@ -17,12 +17,13 @@ const (
 )
 
 type Config struct {
-	Store      *store.Store
-	Secrets    secret.Backend
-	HTTPClient *http.Client
-	Alias      string
-	Timeout    time.Duration
-	SmokeOnly  bool
+	Store         *store.Store
+	Secrets       secret.Backend
+	HTTPClient    *http.Client
+	Alias         string
+	Timeout       time.Duration
+	WarmupTimeout time.Duration
+	SmokeOnly     bool
 }
 
 type Check struct {

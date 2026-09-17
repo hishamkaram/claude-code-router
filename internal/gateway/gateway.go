@@ -268,10 +268,19 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.observeRoute(r.Context(), span, route)
+	var outputClamp *outputLimitClamp
+	var outputErr *requestValidationError
+	req, outputClamp, outputErr = normalizeModelOutputLimit(route, req)
+	if outputErr != nil {
+		writeAnthropicError(w, outputErr.status, outputErr.message)
+		return
+	}
 	if capabilityErr := h.validateManagedRouteMessageCapabilities(route, req); capabilityErr != nil {
 		writeAnthropicError(w, capabilityErr.status, capabilityErr.message)
 		return
 	}
+	applyOutputLimitHeader(w.Header(), outputClamp)
+	h.recordOutputLimitClamp(r.Context(), span, route, outputClamp)
 	switch route.kind {
 	case routeAnthropic:
 		passBody, err := rewriteAnthropicMessageBody(
@@ -284,6 +293,13 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadRequest, err.Error())
 			return
+		}
+		if outputClamp != nil {
+			passBody, err = rewriteAnthropicRequestMaxTokens(passBody, outputClamp.applied)
+			if err != nil {
+				writeAnthropicError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, req.Stream, &completion)
 		return

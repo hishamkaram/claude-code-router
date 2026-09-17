@@ -19,11 +19,12 @@ import (
 const conformanceAnthropicVersion = "2023-06-01"
 
 type checkRunner struct {
-	config     Config
-	target     target
-	gatewayURL string
-	token      string
-	client     *http.Client
+	config       Config
+	target       target
+	gatewayURL   string
+	token        string
+	client       *http.Client
+	warmupClient *http.Client
 }
 
 type probeResponse struct {
@@ -37,11 +38,14 @@ func (r checkRunner) run(ctx context.Context) []Check {
 	checks = append(
 		checks,
 		r.execute(ctx, "discovery", r.checkDiscovery),
-		r.execute(ctx, "text", r.checkText),
 	)
 	if r.config.SmokeOnly {
-		return checks
+		return append(checks, r.execute(ctx, "text", r.checkText))
 	}
+	checks = append(checks,
+		r.execute(ctx, "warmup", r.checkWarmup),
+		r.execute(ctx, "text", r.checkText),
+	)
 	streaming := modelCapabilityEnabled(r.target.capabilities.SupportsStreaming, r.target.modelCapabilities.SupportsStreaming)
 	checks = append(checks, r.capabilityCheck(ctx, "stream", streaming, r.checkStream))
 	tools := modelCapabilityEnabled(r.target.capabilities.SupportsTools, r.target.modelCapabilities.SupportsTools) && r.target.model.Status != "chat-only"
@@ -132,7 +136,7 @@ func (r checkRunner) checkDiscovery(ctx context.Context) (string, error) {
 
 func (r checkRunner) checkText(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(2048, 32),
+		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(2048, 2048),
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
 	if err != nil {
@@ -149,7 +153,7 @@ func (r checkRunner) checkText(ctx context.Context) (string, error) {
 
 func (r checkRunner) checkStream(ctx context.Context) (string, error) {
 	response, err := r.message(ctx, map[string]any{
-		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(2048, 32), "stream": true,
+		"model": r.config.Alias, "max_tokens": r.probeOutputBudget(2048, 2048), "stream": true,
 		"messages": []map[string]string{{"role": "user", "content": "Reply with the word OK."}},
 	})
 	if err != nil {
@@ -338,7 +342,32 @@ func (r checkRunner) message(ctx context.Context, payload map[string]any) (probe
 	return r.request(ctx, http.MethodPost, "/v1/messages", payload)
 }
 
+func (r checkRunner) checkWarmup(ctx context.Context) (string, error) {
+	client := r.warmupClient
+	if client == nil {
+		client = r.client
+	}
+	response, err := r.requestWithClient(ctx, client, http.MethodPost, "/v1/messages", map[string]any{
+		"model": r.config.Alias, "max_tokens": r.probeMaxTokens(16),
+		"messages": []map[string]string{{"role": "user", "content": "Warm up the configured model."}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("model warm-up request failed: %w", err)
+	}
+	if err := requireSuccess(response); err != nil {
+		return "", fmt.Errorf("model warm-up request failed: %w", err)
+	}
+	return "provider accepted a warm-up request before steady-state probes", nil
+}
+
 func (r checkRunner) request(ctx context.Context, method, path string, payload any) (probeResponse, error) {
+	return r.requestWithClient(ctx, r.client, method, path, payload)
+}
+
+func (r checkRunner) requestWithClient(ctx context.Context, client *http.Client, method, path string, payload any) (probeResponse, error) {
+	if client == nil {
+		return probeResponse{}, fmt.Errorf("conformance request client is required")
+	}
 	var body io.Reader = http.NoBody
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
@@ -356,7 +385,7 @@ func (r checkRunner) request(ctx context.Context, method, path string, payload a
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := r.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return probeResponse{}, err
 	}

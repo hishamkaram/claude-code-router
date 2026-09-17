@@ -159,6 +159,23 @@ func rewriteAnthropicRequestModel(body []byte, model string) ([]byte, error) {
 	return rewritten, nil
 }
 
+func rewriteAnthropicRequestMaxTokens(body []byte, maxTokens int) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("rewriting Anthropic request max_tokens: %w", err)
+	}
+	encoded, err := json.Marshal(maxTokens)
+	if err != nil {
+		return nil, fmt.Errorf("rewriting Anthropic request max_tokens: %w", err)
+	}
+	payload["max_tokens"] = encoded
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("rewriting Anthropic request max_tokens: %w", err)
+	}
+	return rewritten, nil
+}
+
 func rewriteAnthropicMessageBody(body []byte, providerModel string, disableParallelTools bool) ([]byte, error) {
 	rewritten := body
 	var err error

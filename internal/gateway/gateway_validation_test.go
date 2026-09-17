@@ -136,11 +136,6 @@ func TestGatewayEnforcesExplicitModelCapabilityRestrictions(t *testing.T) {
 			wantStatus: http.StatusNotImplemented,
 		},
 		{
-			name: "max output", overrides: modelcap.Values{MaxOutputTokens: modelcap.Int64(32)},
-			body:       `{"model":"gpt","max_tokens":64,"messages":[{"role":"user","content":"hello"}]}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
 			name: "vision", overrides: modelcap.Values{SupportsVision: modelcap.Bool(false)},
 			body:       `{"model":"gpt","messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}`,
 			wantStatus: http.StatusNotImplemented,

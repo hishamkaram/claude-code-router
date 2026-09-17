@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -53,6 +54,8 @@ type conformanceRunOptions struct {
 	includeAnthropic bool
 	jsonOutput       bool
 	all              bool
+	timeout          time.Duration
+	warmupTimeout    time.Duration
 }
 
 func newConformanceCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
@@ -77,6 +80,12 @@ func newConformanceCommand(ctx context.Context, opts *options, deps Dependencies
 			if runOptions.includeAnthropic && !runOptions.claude {
 				return fmt.Errorf("--include-anthropic requires --claude")
 			}
+			if runOptions.timeout < 0 {
+				return fmt.Errorf("--timeout must not be negative")
+			}
+			if runOptions.warmupTimeout < 0 {
+				return fmt.Errorf("--warmup-timeout must not be negative")
+			}
 			if runOptions.all {
 				return runConformanceAll(ctx, cmd, opts, deps, runOptions)
 			}
@@ -87,6 +96,8 @@ func newConformanceCommand(ctx context.Context, opts *options, deps Dependencies
 	run.Flags().BoolVar(&runOptions.includeAnthropic, "include-anthropic", false, "Include first-party Anthropic in the Claude CLI matrix")
 	run.Flags().BoolVar(&runOptions.jsonOutput, "json", false, "Emit schema-versioned JSON")
 	run.Flags().BoolVar(&runOptions.all, "all", false, "Run conformance for every registered non-blocked routable model alias")
+	run.Flags().DurationVar(&runOptions.timeout, "timeout", 0, "Steady-state provider probe timeout (default 30s)")
+	run.Flags().DurationVar(&runOptions.warmupTimeout, "warmup-timeout", 0, "Cold model warm-up timeout (default 5m)")
 	cmd.AddCommand(run, newConformanceListCommand(ctx, opts))
 	return cmd
 }
@@ -126,6 +137,7 @@ func runConformance(ctx context.Context, cmd *cobra.Command, opts *options, deps
 	}
 	result, runErr := conformancecheck.RunProvider(ctx, conformancecheck.Config{
 		Store: s, Secrets: deps.Secrets, Alias: alias,
+		Timeout: options.timeout, WarmupTimeout: options.warmupTimeout,
 	})
 	if runErr != nil {
 		_ = s.CompleteConformanceRun(context.WithoutCancel(ctx), runID, "failed", false, "provider suite could not start")

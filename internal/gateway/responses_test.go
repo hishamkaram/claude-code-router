@@ -43,7 +43,7 @@ func TestGatewayRoutesResponsesModelWithoutChatFallback(t *testing.T) {
 	s := newGatewayStore(t,
 		store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: provider.URL, SupportsTools: true, SupportsStreaming: true, SupportsThinking: true, SupportsResponses: true},
 		store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
-			Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true), SupportsThinking: modelcap.Bool(true),
+			Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true), SupportsThinking: modelcap.Bool(true), MaxOutputTokens: modelcap.Int64(8),
 		}},
 	)
 	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
@@ -66,6 +66,9 @@ func TestGatewayRoutesResponsesModelWithoutChatFallback(t *testing.T) {
 	}
 	if chatCalls != 0 || responsesCalls != 1 {
 		t.Fatalf("upstream calls chat=%d responses=%d, want 0 and 1", chatCalls, responsesCalls)
+	}
+	if providerRequest.MaxOutputTokens != 8 || response.Header.Get(ccrOutputLimitHeader) != "clamped;requested=16;applied=8" {
+		t.Fatalf("Responses output limit = %d, header=%q; want 8 and visible clamp", providerRequest.MaxOutputTokens, response.Header.Get(ccrOutputLimitHeader))
 	}
 	if providerRequest.Model != "gpt-responses" || providerRequest.Metadata["user_id"] != "fixture-user" || providerRequest.Reasoning == nil || providerRequest.Reasoning.Effort != "medium" || len(providerRequest.Input) != 1 ||
 		len(providerRequest.Input[0].Content) != 1 || providerRequest.Input[0].Content[0].Text != "hello" {

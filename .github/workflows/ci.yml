@@ -34,3 +34,26 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
+
+  windows-sqlite:
+    name: Windows SQLite and CLI smoke
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Run Windows database and gateway tests
+        run: go test ./internal/store ./internal/gateway ./internal/conformance -count=1
+      - name: Exercise the built CLI against a Windows database path
+        shell: pwsh
+        run: |
+          $binary = Join-Path $env:RUNNER_TEMP "ccr.exe"
+          $database = Join-Path $env:RUNNER_TEMP "ccr-windows-smoke\nested\ccr.db"
+          go build -o $binary ./cmd/ccr
+          & $binary --db $database doctor --json
+          if ($LASTEXITCODE -ne 0) { throw "ccr doctor failed with exit code $LASTEXITCODE" }
+          & $binary --db $database model list
+          if ($LASTEXITCODE -ne 0) { throw "ccr model list failed with exit code $LASTEXITCODE" }

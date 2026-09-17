@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	_ "modernc.org/sqlite"
@@ -93,7 +95,10 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store.Open: resolving database path: %w", err)
 	}
-	databaseURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	databaseURL, err := sqliteDatabaseURL(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("store.Open: building sqlite URI: %w", err)
+	}
 	query := databaseURL.Query()
 	query.Set("_pragma", "busy_timeout(5000)")
 	databaseURL.RawQuery = query.Encode()
@@ -140,7 +145,10 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("store.OpenReadOnly: database path must be a regular file")
 	}
-	databaseURL := url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}
+	databaseURL, err := sqliteDatabaseURL(absolute)
+	if err != nil {
+		return nil, fmt.Errorf("store.OpenReadOnly: building sqlite URI: %w", err)
+	}
 	query := databaseURL.Query()
 	query.Set("mode", "ro")
 	query.Set("_pragma", "busy_timeout(5000)")
@@ -161,6 +169,38 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("store.OpenReadOnly: enforcing query-only mode: %w", err)
 	}
 	return store, nil
+}
+
+// sqliteDatabaseURL builds a file URI in the form expected by SQLite's URI
+// parser. In particular, a Windows drive-letter path must have a slash before
+// the drive letter so that "C:" is parsed as part of the path, not as the URI
+// authority. SQLite does not accept arbitrary URI authorities in the default
+// build, so UNC database paths are rejected explicitly instead of producing a
+// misleading authority error.
+func sqliteDatabaseURL(absolute string) (url.URL, error) {
+	return sqliteURLForPath(absolute, runtime.GOOS == "windows")
+}
+
+func sqliteURLForPath(path string, windows bool) (url.URL, error) {
+	normalized := path
+	if windows {
+		normalized = strings.ReplaceAll(normalized, `\`, "/")
+	} else {
+		normalized = filepath.ToSlash(normalized)
+	}
+	if windows && strings.HasPrefix(normalized, "//") {
+		return url.URL{}, fmt.Errorf("windows UNC database paths are not supported; use a local drive path")
+	}
+	if strings.HasPrefix(normalized, "//") {
+		normalized = "/" + strings.TrimLeft(normalized, "/")
+	}
+	if windows && len(normalized) >= 2 && normalized[1] == ':' && !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	if !strings.HasPrefix(normalized, "/") {
+		return url.URL{}, fmt.Errorf("database path %q is not absolute", path)
+	}
+	return url.URL{Scheme: "file", Path: normalized}, nil
 }
 
 func (s *Store) Close() error {

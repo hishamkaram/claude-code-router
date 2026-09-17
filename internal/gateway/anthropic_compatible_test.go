@@ -38,7 +38,10 @@ func TestGatewayRoutesZAIAnthropicCompatibleProvider(t *testing.T) {
 
 	s := newGatewayStore(t, store.Provider{Name: "zai", Type: "zai", BaseURL: zai.URL, SecretRef: "env:ZAI_API_KEY"}, store.Model{
 		Alias: "glm", ProviderName: "zai", ProviderModel: "glm-4.7", Status: "full",
-		CapabilityOverrides: modelcap.Values{SupportsParallelTools: modelcap.Bool(false)},
+		CapabilityOverrides: modelcap.Values{
+			SupportsParallelTools: modelcap.Bool(false),
+			MaxOutputTokens:       modelcap.Int64(32),
+		},
 	})
 	server := startGateway(t, ctx, s, fakeGatewaySecrets{"env:ZAI_API_KEY": "zai-secret"})
 	defer func() {
@@ -61,7 +64,7 @@ func TestGatewayRoutesZAIAnthropicCompatibleProvider(t *testing.T) {
 		t.Fatalf("gateway models status = %d, want 200", modelsResp.StatusCode)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"glm","tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"future_field":{"kept":true}}`))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(`{"model":"glm","max_tokens":64,"tools":[{"name":"bash","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}],"future_field":{"kept":true}}`))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
 	}
@@ -74,11 +77,25 @@ func TestGatewayRoutesZAIAnthropicCompatibleProvider(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
 	}
+	if got := resp.Header.Get(ccrOutputLimitHeader); got != "clamped;requested=64;applied=32" {
+		t.Fatalf("output limit header = %q", got)
+	}
 	if gotAPIKey != "zai-secret" {
 		t.Fatalf("Z.AI provider did not receive API key")
 	}
 	if !strings.Contains(gotBody, `"model":"glm-4.7"`) || !strings.Contains(gotBody, `"future_field"`) {
 		t.Fatalf("Z.AI body = %s", gotBody)
+	}
+	var maxTokens int
+	var maxPayload struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	if err := json.Unmarshal([]byte(gotBody), &maxPayload); err != nil {
+		t.Fatalf("decoding Z.AI max_tokens: %v", err)
+	}
+	maxTokens = maxPayload.MaxTokens
+	if maxTokens != 32 {
+		t.Fatalf("Z.AI max_tokens = %d, want 32", maxTokens)
 	}
 	var forwarded struct {
 		ToolChoice struct {

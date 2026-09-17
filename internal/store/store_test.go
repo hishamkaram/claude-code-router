@@ -42,6 +42,57 @@ func TestOpenReadOnlyHandlesEscapedPathsAndRejectsWrites(t *testing.T) {
 	}
 }
 
+func TestSQLiteURLForPathUsesPlatformSafeFileURI(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		path    string
+		windows bool
+		want    string
+		wantErr string
+	}{
+		{
+			name: "posix",
+			path: "/tmp/ccr #1?%.db",
+			want: "file:///tmp/ccr%20%231%3F%25.db",
+		},
+		{
+			name:    "windows drive",
+			path:    `C:\Users\Ada\ccr #1?%.db`,
+			windows: true,
+			want:    "file:///C:/Users/Ada/ccr%20%231%3F%25.db",
+		},
+		{
+			name:    "windows unc",
+			path:    `\\server\share\ccr.db`,
+			windows: true,
+			wantErr: "UNC",
+		},
+		{
+			name:    "relative",
+			path:    "ccr.db",
+			wantErr: "not absolute",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := sqliteURLForPath(test.path, test.windows)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("sqliteURLForPath() error = %v, want %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sqliteURLForPath() error = %v", err)
+			}
+			if got.String() != test.want {
+				t.Fatalf("sqliteURLForPath() = %q, want %q", got.String(), test.want)
+			}
+		})
+	}
+}
+
 func TestOpenReadOnlyDoesNotCreateMissingDatabase(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "missing")

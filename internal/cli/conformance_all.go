@@ -67,7 +67,7 @@ func runConformanceAll(ctx context.Context, cmd *cobra.Command, opts *options, d
 		}
 		return fmt.Errorf("conformance found no runnable non-blocked routable model aliases")
 	}
-	executions := runProviderConformanceTargets(ctx, deps, s, targets, func(execution conformanceExecution) {
+	executions := runProviderConformanceTargets(ctx, deps, s, targets, options, func(execution conformanceExecution) {
 		status := conformancecheck.StatusPassed
 		if execution.err != nil || execution.result.Status != conformancecheck.StatusPassed {
 			status = conformancecheck.StatusFailed
@@ -168,6 +168,7 @@ func runProviderConformanceTargets(
 	deps Dependencies,
 	s *store.Store,
 	targets []conformanceTarget,
+	runOptions conformanceRunOptions,
 	onComplete func(conformanceExecution),
 ) []conformanceExecution {
 	if len(targets) == 0 {
@@ -192,6 +193,7 @@ func runProviderConformanceTargets(
 				}
 				result, err := conformancecheck.RunProvider(ctx, conformancecheck.Config{
 					Store: s, Secrets: deps.Secrets, Alias: target.model.Alias,
+					Timeout: runOptions.timeout, WarmupTimeout: runOptions.warmupTimeout,
 				})
 				results <- conformanceExecution{target: target, result: result, err: err}
 			}

@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,7 +152,7 @@ func TestProviderSecretRejectsClaudeAccountCredentialRef(t *testing.T) {
 
 func assertConformancePassed(t *testing.T, result Result) {
 	t.Helper()
-	if result.Status != StatusPassed || len(result.Checks) != 9 {
+	if result.Status != StatusPassed || len(result.Checks) != 10 {
 		t.Fatalf("result = %#v", result)
 	}
 	for _, check := range result.Checks {
@@ -179,7 +178,6 @@ func findCheck(t *testing.T, checks []Check, name string) Check {
 
 func newOpenAIConformanceFixture(t *testing.T, breakStream bool) *httptest.Server {
 	t.Helper()
-	var chatCalls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
@@ -189,7 +187,6 @@ func newOpenAIConformanceFixture(t *testing.T, breakStream bool) *httptest.Serve
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"input_tokens":9}`)
 		case "/v1/chat/completions":
-			call := chatCalls.Add(1)
 			var payload struct {
 				Stream   bool `json:"stream"`
 				Messages []struct {
@@ -211,7 +208,7 @@ func newOpenAIConformanceFixture(t *testing.T, breakStream bool) *httptest.Serve
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
-			if breakStream && call == 2 {
+			if breakStream && payload.Stream {
 				http.Error(w, "stream unavailable", http.StatusBadGateway)
 				return
 			}
