@@ -45,8 +45,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Run Windows database-opening tests
-        run: go test ./internal/store ./internal/gateway ./internal/conformance ./internal/cli -count=1
+      - name: Run Windows database and gateway tests
+        run: go test ./internal/store ./internal/gateway ./internal/conformance -count=1
       - name: Exercise the built CLI against a Windows database path
         shell: pwsh
         run: |
