@@ -67,6 +67,7 @@ type openAIMessage struct {
 type openAITool struct {
 	Type     string         `json:"type"`
 	Function openAIFunction `json:"function"`
+	deferred bool
 }
 
 type openAIFunction struct {

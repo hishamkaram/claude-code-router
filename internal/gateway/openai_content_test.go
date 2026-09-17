@@ -46,6 +46,112 @@ func TestOpenAIAssistantTextRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestOpenAIMidConversationToolChangesDoNotBecomeSystemText(t *testing.T) {
+	t.Parallel()
+
+	conversion, err := openAIMessagesFromAnthropicWithResolver(context.Background(), anthropicMessage{
+		Role: "system",
+		Content: []any{
+			map[string]any{"type": "text", "text": "before"},
+			map[string]any{
+				"type": "tool_removal",
+				"tool": map[string]any{"type": "tool_reference", "name": "read"},
+			},
+			map[string]any{"type": "text", "text": "after"},
+		},
+	}, testImageSourceResolver)
+	if err != nil {
+		t.Fatalf("openAIMessagesFromAnthropicWithResolver() error = %v", err)
+	}
+	if len(conversion.messages) != 1 || conversion.messages[0].Role != "system" || conversion.messages[0].Content != "before\nafter" {
+		t.Fatalf("system conversion = %#v, want text-only system message", conversion.messages)
+	}
+}
+
+func TestOpenAIToolChangesFilterRemovedTools(t *testing.T) {
+	t.Parallel()
+
+	tools, err := openAIToolsFromAnthropic([]json.RawMessage{
+		json.RawMessage(`{"name":"bash","input_schema":{"type":"object"}}`),
+		json.RawMessage(`{"name":"read","input_schema":{"type":"object"}}`),
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
+	}
+	filtered, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+		Role: "system",
+		Content: []any{map[string]any{
+			"type": "tool_removal",
+			"tool": map[string]any{"type": "tool_reference", "name": "read"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].Function.Name != "bash" {
+		t.Fatalf("filtered tools = %#v, want only bash", filtered)
+	}
+}
+
+func TestOpenAIToolChangesRespectDeferredTools(t *testing.T) {
+	t.Parallel()
+
+	tools, err := openAIToolsFromAnthropic([]json.RawMessage{
+		json.RawMessage(`{"name":"bash","input_schema":{"type":"object"}}`),
+		json.RawMessage(`{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}`),
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
+	}
+	active, err := openAIToolsAfterAnthropicChanges(tools, nil)
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v", err)
+	}
+	if len(active) != 1 || active[0].Function.Name != "bash" {
+		t.Fatalf("initial active tools = %#v, want only bash", active)
+	}
+
+	active, err = openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+		Role: "system",
+		Content: []any{map[string]any{
+			"type": "tool_addition",
+			"tool": map[string]any{"type": "tool_reference", "name": "read"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() addition error = %v", err)
+	}
+	if len(active) != 2 || active[1].Function.Name != "read" {
+		t.Fatalf("active tools after addition = %#v, want bash and read", active)
+	}
+}
+
+func TestOpenAIToolChangesRejectForcedRemovedTool(t *testing.T) {
+	t.Parallel()
+
+	tools, err := openAIToolsFromAnthropic([]json.RawMessage{
+		json.RawMessage(`{"name":"bash","input_schema":{"type":"object"}}`),
+		json.RawMessage(`{"name":"read","input_schema":{"type":"object"}}`),
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
+	}
+	filtered, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+		Role: "system",
+		Content: []any{map[string]any{
+			"type": "tool_removal",
+			"tool": map[string]any{"type": "tool_reference", "name": "read"},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v", err)
+	}
+	err = validateOpenAIToolChoiceAgainstTools(json.RawMessage(`{"type":"tool","name":"read"}`), filtered)
+	if err == nil || !strings.Contains(err.Error(), `unavailable tool "read"`) {
+		t.Fatalf("validateOpenAIToolChoiceAgainstTools() error = %v, want removed-tool error", err)
+	}
+}
+
 func TestAnthropicToolResultTextConvertsToolReferences(t *testing.T) {
 	t.Parallel()
 

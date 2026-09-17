@@ -152,6 +152,14 @@ func toolResultOutputBlock(raw json.RawMessage) (text, image string, isImage boo
 }
 
 func toolReferenceOutputText(raw json.RawMessage) (string, error) {
+	name, err := toolReferenceName(raw)
+	if err != nil {
+		return "", err
+	}
+	return "[Loaded tool: " + name + "]", nil
+}
+
+func toolReferenceName(raw json.RawMessage) (string, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
 		return "", fmt.Errorf("decode tool_reference block")
@@ -176,10 +184,10 @@ func toolReferenceOutputText(raw json.RawMessage) (string, error) {
 	if strings.IndexFunc(name, unicode.IsControl) >= 0 {
 		return "", fmt.Errorf("tool_reference block tool_name must not contain control characters")
 	}
-	return "[Loaded tool: " + name + "]", nil
+	return name, nil
 }
 
-func textFromAnthropicContent(raw json.RawMessage) (string, error) {
+func textFromAnthropicSystemMessage(raw json.RawMessage) (string, error) {
 	if text, ok, err := rawString(raw); ok || err != nil {
 		return text, err
 	}
@@ -200,10 +208,10 @@ func textFromAnthropicContent(raw json.RawMessage) (string, error) {
 				return "", err
 			}
 			parts = append(parts, text)
-		case "document":
-			return "", fmt.Errorf("%w: document blocks are not supported", ErrUnsupportedPDF)
-		case "audio":
-			return "", fmt.Errorf("%w: audio blocks are not supported", ErrUnsupportedAudio)
+		case "tool_addition", "tool_removal":
+			if _, err := parseAnthropicToolChange(rawBlock, blockType); err != nil {
+				return "", err
+			}
 		default:
 			return "", fmt.Errorf("system content block type %q is not supported", blockType)
 		}

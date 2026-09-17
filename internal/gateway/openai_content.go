@@ -24,7 +24,7 @@ func openAIMessagesFromAnthropicWithResolver(ctx context.Context, message anthro
 	case "assistant":
 		return openAIAssistantMessagesFromAnthropic(message.Content)
 	case "system":
-		messages, err := openAISystemMessagesFromAnthropic(message.Content)
+		messages, err := openAIMidConversationSystemMessagesFromAnthropic(message.Content)
 		if err != nil {
 			return openAIMessageConversion{}, err
 		}
@@ -34,11 +34,44 @@ func openAIMessagesFromAnthropicWithResolver(ctx context.Context, message anthro
 	}
 }
 
-func openAISystemMessagesFromAnthropic(content any) ([]openAIMessage, error) {
-	text, err := anthropicContentText(content)
-	if err != nil {
-		return nil, fmt.Errorf("unsupported system message content: %w", err)
+func openAIMidConversationSystemMessagesFromAnthropic(content any) ([]openAIMessage, error) {
+	return openAISystemMessagesFromAnthropicContent(content)
+}
+
+func openAISystemMessagesFromAnthropicContent(content any) ([]openAIMessage, error) {
+	if text, ok := content.(string); ok {
+		if text == "" {
+			return nil, nil
+		}
+		return []openAIMessage{{Role: "system", Content: text}}, nil
 	}
+	blocks, ok := content.([]any)
+	if !ok {
+		return nil, fmt.Errorf("unsupported system message content type %T", content)
+	}
+	textParts := make([]string, 0, len(blocks))
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("system content block is not an object")
+		}
+		blockType, _ := block["type"].(string)
+		switch blockType {
+		case "text":
+			text, err := anthropicTextBlockText(block)
+			if err != nil {
+				return nil, fmt.Errorf("unsupported system text block: %w", err)
+			}
+			textParts = append(textParts, text)
+		case "tool_addition", "tool_removal":
+			if _, err := openAIToolChangeFromAnthropic(block); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("system content block type %q is not supported by the OpenAI-compatible gateway path", blockType)
+		}
+	}
+	text := strings.Join(textParts, "\n")
 	if text == "" {
 		return nil, nil
 	}

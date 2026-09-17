@@ -81,6 +81,7 @@ type Tool struct {
 	DisplayWidth  int             `json:"display_width,omitempty"`
 	DisplayHeight int             `json:"display_height,omitempty"`
 	Environment   string          `json:"environment,omitempty"`
+	deferred      bool
 }
 
 // ComputerScreenshot is the output object for a computer_call_output item.

@@ -67,9 +67,17 @@ func toOpenAIChatRequestWithResolver(ctx context.Context, req anthropicRequest, 
 	if err != nil {
 		return openAIChatRequest{}, nil, err
 	}
+	tools, err = openAIToolsAfterAnthropicChanges(tools, req.Messages)
+	if err != nil {
+		return openAIChatRequest{}, nil, err
+	}
 	toolChoice, parallelTools, err := openAIToolChoiceFromAnthropic(req.ToolChoice)
 	if err != nil {
 		return openAIChatRequest{}, nil, err
+	}
+	validationErr := validateOpenAIToolChoiceAgainstTools(req.ToolChoice, tools)
+	if validationErr != nil {
+		return openAIChatRequest{}, nil, validationErr
 	}
 	if route.forceDisableParallelTools && len(tools) > 0 {
 		parallelDisabled := false

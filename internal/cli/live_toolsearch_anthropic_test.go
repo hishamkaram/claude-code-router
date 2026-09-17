@@ -87,9 +87,12 @@ type liveAnthropicMessagePayload struct {
 	Tools         []struct {
 		Name string `json:"name"`
 	} `json:"tools"`
-	Messages []struct {
-		Content json.RawMessage `json:"content"`
-	} `json:"messages"`
+	Messages []liveAnthropicMessage `json:"messages"`
+}
+
+type liveAnthropicMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
 func (s *liveAnthropicToolSearchAgentState) handle(t *testing.T, w http.ResponseWriter, r *http.Request) {
@@ -111,6 +114,10 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		t.Errorf("provider decode error: %v", err)
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if isLiveAnthropicSessionTitleRequest(payload) {
+		writeLiveAnthropicStream(w, payload.Model, "Tool search test")
 		return
 	}
 	s.mu.Lock()
@@ -144,6 +151,9 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	case !s.childPromptSeen && liveAnthropicMessagesContain(payload.Messages, "Find latest ChatGPT news"):
 		s.childPromptSeen = true
 		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
+	case s.childPromptSeen && (liveAnthropicMessagesContain(payload.Messages, "subagent ended without delivering") || liveAnthropicMessagesContain(payload.Messages, "terminated early due to an API error")):
+		s.callerAgentResultSeen = true
+		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
 	case liveAnthropicMessagesContain(payload.Messages, liveToolSearchAgentResult):
 		s.callerAgentResultSeen = true
 		writeLiveAnthropicStream(w, payload.Model, liveToolSearchAgentResult)
@@ -153,11 +163,15 @@ func (s *liveAnthropicToolSearchAgentState) handleMessage(t *testing.T, w http.R
 	}
 }
 
+func isLiveAnthropicSessionTitleRequest(payload liveAnthropicMessagePayload) bool {
+	return strings.Contains(string(payload.System), "You are naming a coding session")
+}
+
 func (s *liveAnthropicToolSearchAgentState) assertComplete(t *testing.T, out, errOut string) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.toolSearchSeen || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen ||
+	if !s.toolSearchSeen || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen || !s.callerAgentResultSeen ||
 		!s.sessionHeaderSeen || s.claudeSessionID == "" || s.sessionMismatch {
 		t.Fatalf("Anthropic research Agent live route incomplete: toolSearchSeen=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v messageCalls=%d sessionID=%q sessionMismatch=%v\nstdout:\n%s\nstderr:\n%s", s.toolSearchSeen, s.toolReferenceResultSeen, s.classifierRequestSeen, s.childPromptSeen, s.callerAgentResultSeen, s.messageCalls, s.claudeSessionID, s.sessionMismatch, out, errOut)
 	}
@@ -175,12 +189,18 @@ func liveAnthropicToolsContain(tools []struct {
 	return false
 }
 
-func liveAnthropicMessagesContain(messages []struct {
-	Content json.RawMessage `json:"content"`
-}, want string,
-) bool {
+func liveAnthropicMessagesContain(messages []liveAnthropicMessage, want string) bool {
 	for _, message := range messages {
 		if strings.Contains(string(message.Content), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func liveAnthropicMessagesContainRole(messages []liveAnthropicMessage, role, want string) bool {
+	for _, message := range messages {
+		if message.Role == role && strings.Contains(string(message.Content), want) {
 			return true
 		}
 	}

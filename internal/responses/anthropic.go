@@ -38,10 +38,15 @@ func RequestFromAnthropicMessagesJSON(raw []byte) (*Request, error) {
 	if err := json.Unmarshal(raw, &req); err != nil {
 		return nil, fmt.Errorf("decode Anthropic Messages request: %w", err)
 	}
-	tools, hasComputer, functionNames, err := responsesTools(req.Tools)
+	tools, _, _, err := responsesTools(req.Tools)
 	if err != nil {
 		return nil, err
 	}
+	tools, err = responsesToolsAfterAnthropicChanges(tools, req.System, req.Messages)
+	if err != nil {
+		return nil, err
+	}
+	hasComputer, functionNames := responsesToolCapabilities(tools)
 	metadata, err := responsesMetadata(req.Metadata)
 	if err != nil {
 		return nil, err
@@ -75,7 +80,7 @@ func RequestFromAnthropicMessagesJSON(raw []byte) (*Request, error) {
 		Text:            text,
 	}
 	if len(req.System) > 0 && string(req.System) != "null" {
-		instructions, instructionErr := textFromAnthropicContent(req.System)
+		instructions, instructionErr := textFromAnthropicSystemMessage(req.System)
 		if instructionErr != nil {
 			return nil, fmt.Errorf("convert system content: %w", instructionErr)
 		}
@@ -83,6 +88,9 @@ func RequestFromAnthropicMessagesJSON(raw []byte) (*Request, error) {
 	}
 	toolChoice, parallelToolCalls, err := responsesToolChoice(req.ToolChoice, hasComputer)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateResponsesToolChoiceAgainstTools(req.ToolChoice, tools); err != nil {
 		return nil, err
 	}
 	converted.ToolChoice = toolChoice
@@ -206,7 +214,7 @@ func inputItemsFromAnthropicMessage(msg anthropicMsg, state *convertState) ([]In
 }
 
 func developerInputItems(raw json.RawMessage) ([]InputItem, error) {
-	text, err := textFromAnthropicContent(raw)
+	text, err := textFromAnthropicSystemMessage(raw)
 	if err != nil {
 		return nil, fmt.Errorf("convert system message content: %w", err)
 	}

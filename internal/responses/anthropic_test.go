@@ -77,6 +77,18 @@ func TestRequestFromAnthropicMessagesJSONBasicCases(t *testing.T) {
 			},
 		},
 		{
+			name: "system tool removal is omitted and filters tools",
+			raw:  `{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"text","text":"before"},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read"}},{"type":"text","text":"after"}]},{"role":"user","content":"hello"}]}`,
+			want: &Request{
+				Model: "claude",
+				Tools: []Tool{{Type: "function", Name: "bash", Parameters: rawJSON(`{"type":"object"}`)}},
+				Input: []InputItem{
+					{Type: "message", Role: "developer", Content: []Content{{Type: "input_text", Text: "before\nafter"}}},
+					{Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "hello"}}},
+				},
+			},
+		},
+		{
 			name: "thinking and structured output options",
 			raw: `{
 				"model":"claude",
@@ -123,6 +135,42 @@ func TestRequestFromAnthropicMessagesJSONBasicCases(t *testing.T) {
 			}
 			assertJSONEqual(t, got, test.want)
 		})
+	}
+}
+
+func TestRequestFromAnthropicMessagesJSONEnablesDeferredTool(t *testing.T) {
+	t.Parallel()
+
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_reference","name":"read"}}]},{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v", err)
+	}
+	if len(got.Tools) != 2 || got.Tools[1].Name != "read" {
+		t.Fatalf("tools = %#v, want bash and read", got.Tools)
+	}
+}
+
+func TestRequestFromAnthropicMessagesJSONEnablesTopLevelDeferredTool(t *testing.T) {
+	t.Parallel()
+
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","system":[{"type":"text","text":"before"},{"type":"tool_addition","tool":{"type":"tool_reference","name":"read"}},{"type":"text","text":"after"}],"tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v", err)
+	}
+	if len(got.Tools) != 2 || got.Tools[1].Name != "read" || got.Instructions != "before\nafter" {
+		t.Fatalf("tools = %#v instructions = %q, want bash/read and before/after", got.Tools, got.Instructions)
+	}
+}
+
+func TestRequestFromAnthropicMessagesJSONEnablesToolReference(t *testing.T) {
+	t.Parallel()
+
+	got, err := RequestFromAnthropicMessagesJSON([]byte(`{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","defer_loading":true,"input_schema":{"type":"object"}}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_search","content":[{"type":"text","text":"Loaded matching tools:"},{"type":"tool_reference","tool_name":"read"}]}]},{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatalf("RequestFromAnthropicMessagesJSON() error = %v", err)
+	}
+	if len(got.Tools) != 2 || got.Tools[1].Name != "read" {
+		t.Fatalf("tools = %#v, want bash and read", got.Tools)
 	}
 }
 

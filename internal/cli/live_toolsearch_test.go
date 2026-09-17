@@ -91,6 +91,10 @@ func (s *liveToolSearchAgentState) handleChat(t *testing.T, w http.ResponseWrite
 	if !ok {
 		return
 	}
+	if openAIMessagesContain(payload.Messages, "You are naming a coding session") {
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-title", "Tool search test", 4, 2)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chatCalls++
@@ -98,16 +102,22 @@ func (s *liveToolSearchAgentState) handleChat(t *testing.T, w http.ResponseWrite
 	case isLiveAutoClassifierRequest(payload):
 		s.classifierRequestSeen = true
 		writeLiveOpenAIClassifierResponse(w, payload)
-	case s.chatCalls == 1:
+	case !s.firstRequestHadToolSearch:
 		s.firstRequestHadToolSearch = liveToolsContain(payload.Tools, "ToolSearch")
 		writeLiveToolSearchCall(w, payload)
 	case !s.toolReferenceResultSeen && openAIMessagesContainToolRole(payload.Messages, "[Loaded tool: Agent]"):
 		s.toolReferenceResultSeen = true
 		writeLiveResearchAgentCall(w, payload)
-	case !s.childPromptSeen && openAIMessagesContain(payload.Messages, "Find latest ChatGPT news"):
+	case s.toolReferenceResultSeen && !s.childPromptSeen && openAIMessagesContain(payload.Messages, "Find latest ChatGPT news"):
 		s.childPromptSeen = true
 		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-child", liveToolSearchAgentResult, 4, 2)
+	case s.childPromptSeen && (openAIMessagesContainToolRole(payload.Messages, "subagent ended without delivering") || openAIMessagesContainToolRole(payload.Messages, "terminated early due to an API error")):
+		s.callerAgentResultSeen = true
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-caller", liveToolSearchAgentResult, 4, 2)
 	case openAIMessagesContainToolRole(payload.Messages, liveToolSearchAgentResult):
+		s.callerAgentResultSeen = true
+		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-caller", liveToolSearchAgentResult, 4, 2)
+	case s.childPromptSeen && openAIMessagesContain(payload.Messages, liveToolSearchAgentResult):
 		s.callerAgentResultSeen = true
 		writeLiveOpenAITextFixture(w, payload, "chatcmpl-toolsearch-caller", liveToolSearchAgentResult, 4, 2)
 	default:
@@ -133,7 +143,7 @@ func (s *liveToolSearchAgentState) assertComplete(t *testing.T, out, errOut stri
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.firstRequestHadToolSearch || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen {
+	if !s.firstRequestHadToolSearch || !s.toolReferenceResultSeen || !s.classifierRequestSeen || !s.childPromptSeen || !s.callerAgentResultSeen {
 		t.Fatalf("Research Agent live route incomplete: firstRequestHadToolSearch=%v toolReferenceResultSeen=%v selectedClassifierSeen=%v childPromptSeen=%v callerAgentResultSeen=%v chatCalls=%d\nstdout:\n%s\nstderr:\n%s", s.firstRequestHadToolSearch, s.toolReferenceResultSeen, s.classifierRequestSeen, s.childPromptSeen, s.callerAgentResultSeen, s.chatCalls, out, errOut)
 	}
 }
