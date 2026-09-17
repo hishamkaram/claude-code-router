@@ -27,6 +27,9 @@ func RunProvider(ctx context.Context, config Config) (Result, error) {
 	if config.Timeout <= 0 {
 		config.Timeout = 30 * time.Second
 	}
+	if config.WarmupTimeout <= 0 {
+		config.WarmupTimeout = 5 * time.Minute
+	}
 	probeTarget, err := loadTarget(ctx, config.Store, config.Alias)
 	if err != nil {
 		return Result{}, err
@@ -60,7 +63,8 @@ func RunProvider(ctx context.Context, config Config) (Result, error) {
 
 	runner := checkRunner{
 		config: config, target: probeTarget, gatewayURL: server.URL(), token: token,
-		client: &http.Client{Timeout: config.Timeout},
+		client:       &http.Client{Timeout: config.Timeout},
+		warmupClient: &http.Client{Timeout: config.WarmupTimeout},
 	}
 	result.Checks = append(result.Checks, runner.run(ctx)...)
 	for _, check := range result.Checks {

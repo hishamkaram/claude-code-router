@@ -39,7 +39,7 @@ func TestConformanceCommandPersistsChecksAndEmitsVersionedJSON(t *testing.T) {
 		t.Fatalf("conformance JSON error = %v\n%s", decodeErr, out)
 	}
 	if document.SchemaVersion != 1 || document.Status != "passed" ||
-		!document.LiveVerified || len(document.Checks) != 9 {
+		!document.LiveVerified || len(document.Checks) != 10 {
 		t.Fatalf("conformance document = %#v", document)
 	}
 	ctx := context.Background()
@@ -53,7 +53,7 @@ func TestConformanceCommandPersistsChecksAndEmitsVersionedJSON(t *testing.T) {
 		t.Fatalf("ListConformanceRuns() = %#v, %v", runs, err)
 	}
 	checks, err := s.ListConformanceChecks(ctx, runs[0].ID)
-	if err != nil || len(checks) != 9 {
+	if err != nil || len(checks) != 10 {
 		t.Fatalf("ListConformanceChecks() = %#v, %v", checks, err)
 	}
 	listOut, _, err := runCommand(t, "--db", dbPath, "conformance", "list", "coder", "--json")

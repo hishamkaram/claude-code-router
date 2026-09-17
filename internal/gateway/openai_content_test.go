@@ -68,6 +68,33 @@ func TestOpenAIMidConversationToolChangesDoNotBecomeSystemText(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAISystemMessagesCreatesOneLeadingInstruction(t *testing.T) {
+	t.Parallel()
+	got, err := normalizeOpenAISystemMessages([]openAIMessage{
+		{Role: "system", Content: "base"},
+		{Role: "user", Content: "first"},
+		{Role: "system", Content: "environment"},
+		{Role: "assistant", Content: "ack"},
+		{Role: "system", Content: "late"},
+		{Role: "tool", Content: "result"},
+	})
+	if err != nil {
+		t.Fatalf("normalizeOpenAISystemMessages() error = %v", err)
+	}
+	if len(got) != 4 || got[0].Role != "system" || got[0].Content != "base\n\nenvironment\n\nlate" ||
+		got[1].Role != "user" || got[2].Role != "assistant" || got[3].Role != "tool" {
+		t.Fatalf("normalized messages = %#v", got)
+	}
+}
+
+func TestNormalizeOpenAISystemMessagesRejectsNonTextSystemContent(t *testing.T) {
+	t.Parallel()
+	_, err := normalizeOpenAISystemMessages([]openAIMessage{{Role: "system", Content: []any{map[string]any{"type": "image"}}}})
+	if err == nil || !strings.Contains(err.Error(), "unsupported OpenAI system message content type") {
+		t.Fatalf("normalizeOpenAISystemMessages() error = %v", err)
+	}
+}
+
 func TestOpenAIToolChangesFilterRemovedTools(t *testing.T) {
 	t.Parallel()
 

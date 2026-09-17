@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 )
@@ -19,8 +21,8 @@ func TestProbeBudgetsLeaveReasoningHeadroomAndRespectModelLimit(t *testing.T) {
 			want, unknown int
 			run           func(checkRunner, context.Context) (string, error)
 		}{
-			{"text", 2048, 32, checkRunner.checkText},
-			{"stream", 2048, 32, checkRunner.checkStream},
+			{"text", 2048, 2048, checkRunner.checkText},
+			{"stream", 2048, 2048, checkRunner.checkStream},
 			{"tool", 2048, 128, checkRunner.checkForcedTool},
 			{"thinking", 32768, 1200, checkRunner.checkThinking},
 		} {
@@ -76,6 +78,23 @@ func TestRequireTextResponseRejectsEmptyOrNonTextMessages(t *testing.T) {
 	}
 	if err := requireTextResponse([]byte(`{"type":"message","content":[{"type":"text","text":"OK"}]}`)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWarmupUsesDedicatedTimeoutAndReportsColdLoadFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = fmt.Fprint(w, `{"type":"message","content":[{"type":"text","text":"OK"}]}`)
+	}))
+	defer server.Close()
+	runner := checkRunner{
+		config:       Config{Alias: "qwen"},
+		gatewayURL:   server.URL,
+		client:       server.Client(),
+		warmupClient: &http.Client{Timeout: 5 * time.Millisecond},
+	}
+	if _, err := runner.checkWarmup(context.Background()); err == nil || !strings.Contains(err.Error(), "model warm-up request failed") {
+		t.Fatalf("checkWarmup() error = %v, want explicit warm-up failure", err)
 	}
 }
 

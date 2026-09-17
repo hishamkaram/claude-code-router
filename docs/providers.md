@@ -304,8 +304,9 @@ ccr conformance run --all
 ccr conformance list code-review --json
 ```
 
-The matrix checks configuration, discovery where supported, text, streaming,
-forced tools, thinking, token counting, cancellation, and sanitized errors.
+The matrix checks configuration, discovery where supported, model warm-up, text,
+streaming, forced tools, thinking, token counting, cancellation, and sanitized
+errors.
 Capability-disabled checks are reported as not applicable. A failed declared
 capability does not silently change the model's compatibility setting.
 
@@ -326,6 +327,29 @@ to probe one alias per provider or `ccr doctor --live --all` to probe every
 routable alias and report excluded aliases as skipped. Live Doctor
 failures identify the failed check, safe HTTP status details, bounded evidence,
 and a command to run next.
+
+Conformance uses a short steady-state timeout plus a separate five-minute
+model warm-up check by default. This keeps a cold local model load from being
+mistaken for a protocol failure. Adjust either budget when needed:
+
+```bash
+ccr conformance run <alias> --timeout 2m --warmup-timeout 10m
+```
+
+The text and stream probes use a reasoning-safe budget when the provider has
+not declared an output limit. A known smaller model limit is respected rather
+than treated as a reason to reject the alias. When Claude Code requests more
+than that limit, CCR sends the safe upper bound and exposes the degradation in
+the `X-CCR-Output-Limit` response header and trace lifecycle event.
+
+For OpenAI-compatible Chat Completions, CCR also combines system instructions
+into one leading system message. This keeps late subagent environment messages
+valid for strict templates such as Qwen3 while preserving all user, assistant,
+and tool message ordering.
+
+On Windows, database paths use SQLite's drive-letter URI form. UNC database
+paths are rejected explicitly because the default SQLite URI parser does not
+accept arbitrary URI authorities; use a local drive path for the CCR database.
 
 ## Team Profiles
 

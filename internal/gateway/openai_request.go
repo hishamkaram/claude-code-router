@@ -143,7 +143,36 @@ func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicReq
 	if includeIdentity && !identityAdded {
 		messages = append(messages, identityMessage)
 	}
+	messages, err := normalizeOpenAISystemMessages(messages)
+	if err != nil {
+		return openAIMessageConversion{}, err
+	}
 	return openAIMessageConversion{messages: messages, ignoredFields: ignoredFields}, nil
+}
+
+func normalizeOpenAISystemMessages(messages []openAIMessage) ([]openAIMessage, error) {
+	systemText := make([]string, 0, 1)
+	nonSystem := make([]openAIMessage, 0, len(messages))
+	for _, message := range messages {
+		if message.Role != "system" {
+			nonSystem = append(nonSystem, message)
+			continue
+		}
+		text, ok := message.Content.(string)
+		if !ok {
+			return nil, fmt.Errorf("unsupported OpenAI system message content type %T", message.Content)
+		}
+		if strings.TrimSpace(text) != "" {
+			systemText = append(systemText, text)
+		}
+	}
+	if len(systemText) == 0 {
+		return nonSystem, nil
+	}
+	result := make([]openAIMessage, 0, len(nonSystem)+1)
+	result = append(result, openAIMessage{Role: "system", Content: strings.Join(systemText, "\n\n")})
+	result = append(result, nonSystem...)
+	return result, nil
 }
 
 func latestUserAsksModelIdentity(messages []anthropicMessage) bool {

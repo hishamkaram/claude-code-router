@@ -213,7 +213,7 @@ func runLiveClaudeConformanceProtocol(t *testing.T, ctx context.Context, protoco
 	if err := json.Unmarshal([]byte(out), &document); err != nil {
 		t.Fatalf("conformance JSON error = %v\n%s", err, out)
 	}
-	if document.SchemaVersion != 1 || document.Status != "passed" || !document.LiveVerified || len(document.Checks) != 10 {
+	if document.SchemaVersion != 1 || document.Status != "passed" || !document.LiveVerified || len(document.Checks) != 11 {
 		t.Fatalf("conformance document = %#v", document)
 	}
 	fixture.assertComplete(t, out, errOut)
