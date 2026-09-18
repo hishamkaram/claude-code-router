@@ -239,6 +239,11 @@ func (f *liveImageToolFixture) handleOpenAI(t *testing.T, w http.ResponseWriter,
 			http.Error(w, "fixture image tool missing", http.StatusBadRequest)
 			return
 		}
+		if findLiveImageTool(payload.Tools) != toolName {
+			f.setError(fmt.Sprintf("OpenAI request after ToolSearch did not expose activated fixture image MCP tool %q: %#v", toolName, payload.Tools))
+			http.Error(w, "activated fixture image tool missing", http.StatusBadRequest)
+			return
+		}
 		f.mu.Lock()
 		f.toolCallSeen = true
 		f.mu.Unlock()
