@@ -3,6 +3,13 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
+## v0.6.4
+
+- Activate declared deferred tools from ToolSearch `tool_reference` results on
+  the OpenAI Chat Completions route. Keep activation chronological, ignore
+  undeclared ToolSearch references, and preserve visible validation for
+  unsupported system-block tool changes.
+
 ## v0.6.3
 
 - Accept and drop `cache_control` on Anthropic `tool_addition` and
@@ -14,14 +21,6 @@ lives under `docs/acceptance/`.
   other unsupported fields visibly.
 
 ## Unreleased
-
-- Activate deferred tools from ToolSearch `tool_reference` results on the OpenAI
-  Chat Completions route. The Responses route already did this; the Chat
-  Completions route never scanned `tool_result` content for references and
-  treated anything that was not a `tool_addition` as deactivating, so a deferred
-  tool stayed filtered out of the upstream request after ToolSearch loaded it.
-  The model was told the tool was available, asked for it, and the provider
-  never saw it in the tool list — so the call landed on a different tool.
 
 ## v0.6.1
 
