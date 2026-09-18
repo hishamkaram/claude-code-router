@@ -791,3 +791,95 @@ func TestOpenAIToolChangesRejectUnknownBlockFields(t *testing.T) {
 		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v, want unknown-field rejection", err)
 	}
 }
+
+func TestOpenAIToolChangesActivateDeferredToolFromToolSearchResult(t *testing.T) {
+	t.Parallel()
+
+	tools, err := openAIToolsFromAnthropic([]json.RawMessage{
+		json.RawMessage(`{"name":"bash","input_schema":{"type":"object"}}`),
+		json.RawMessage(`{"name":"gsheets","defer_loading":true,"input_schema":{"type":"object"}}`),
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
+	}
+
+	// Without this the model is told the tool is loaded, asks for it, and the provider
+	// never sees it in the tool list — so the call lands on some other tool entirely.
+	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+		Role: "user",
+		Content: []any{map[string]any{
+			"type":        "tool_result",
+			"tool_use_id": "toolu_1",
+			"content": []any{map[string]any{
+				"type":      "tool_reference",
+				"tool_name": "gsheets",
+			}},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v", err)
+	}
+	if len(active) != 2 || active[1].Function.Name != "gsheets" {
+		t.Fatalf("active tools after ToolSearch result = %#v, want bash and gsheets", active)
+	}
+}
+
+func TestOpenAIToolChangesIgnoreToolSearchResultForUndeclaredTool(t *testing.T) {
+	t.Parallel()
+
+	tools, err := openAIToolsFromAnthropic([]json.RawMessage{
+		json.RawMessage(`{"name":"bash","input_schema":{"type":"object"}}`),
+		json.RawMessage(`{"name":"gsheets","defer_loading":true,"input_schema":{"type":"object"}}`),
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
+	}
+
+	// Must activate nothing rather than fail the request.
+	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+		Role: "user",
+		Content: []any{map[string]any{
+			"type": "tool_result",
+			"content": []any{map[string]any{
+				"type":      "tool_reference",
+				"tool_name": "not_declared_here",
+			}},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v", err)
+	}
+	if len(active) != 1 || active[0].Function.Name != "bash" {
+		t.Fatalf("active tools = %#v, want only bash", active)
+	}
+}
+
+func TestOpenAIToolChangesRemovalAfterToolSearchResultStillWins(t *testing.T) {
+	t.Parallel()
+
+	tools, err := openAIToolsFromAnthropic([]json.RawMessage{
+		json.RawMessage(`{"name":"bash","input_schema":{"type":"object"}}`),
+		json.RawMessage(`{"name":"gsheets","defer_loading":true,"input_schema":{"type":"object"}}`),
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
+	}
+
+	// Availability is chronological: a removal after an activation still removes.
+	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{
+		{Role: "user", Content: []any{map[string]any{
+			"type":    "tool_result",
+			"content": []any{map[string]any{"type": "tool_reference", "tool_name": "gsheets"}},
+		}}},
+		{Role: "system", Content: []any{map[string]any{
+			"type": "tool_removal",
+			"tool": map[string]any{"type": "tool_reference", "name": "gsheets"},
+		}}},
+	})
+	if err != nil {
+		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v", err)
+	}
+	if len(active) != 1 || active[0].Function.Name != "bash" {
+		t.Fatalf("active tools after later removal = %#v, want only bash", active)
+	}
+}
