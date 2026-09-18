@@ -76,9 +76,14 @@ func openAIToolsAfterAnthropicChanges(tools []openAITool, messages []anthropicMe
 	}
 	for _, change := range changes {
 		if !defined[change.toolName] {
+			// A ToolSearch result may name a tool from another turn's set; that activates
+			// nothing rather than failing the request.
+			if change.typeName == "tool_reference" {
+				continue
+			}
 			return nil, fmt.Errorf("system %s references unknown tool %q", change.typeName, change.toolName)
 		}
-		active[change.toolName] = change.typeName == "tool_addition"
+		active[change.toolName] = change.typeName != "tool_removal"
 	}
 
 	filtered := make([]openAITool, 0, len(tools))
@@ -94,6 +99,7 @@ func openAIToolChangesFromAnthropic(messages []anthropicMessage) ([]openAIToolCh
 	changes := make([]openAIToolChange, 0)
 	for _, message := range messages {
 		if message.Role != "system" {
+			changes = appendOpenAIToolResultReferences(changes, message)
 			continue
 		}
 		blocks, ok := message.Content.([]any)
@@ -117,6 +123,52 @@ func openAIToolChangesFromAnthropic(messages []anthropicMessage) ([]openAIToolCh
 		}
 	}
 	return changes, nil
+}
+
+// ToolSearch reports the tools it loaded as tool_reference blocks inside a tool_result.
+// Unread, a deferred tool stays filtered out of the upstream request after the model has
+// been told it is callable, and its call silently lands on some other tool.
+func appendOpenAIToolResultReferences(changes []openAIToolChange, message anthropicMessage) []openAIToolChange {
+	blocks, ok := message.Content.([]any)
+	if !ok {
+		return changes
+	}
+	for _, item := range blocks {
+		for _, name := range openAIToolResultReferenceNames(item) {
+			// Appended in message order, so availability stays chronological.
+			changes = append(changes, openAIToolChange{typeName: "tool_reference", toolName: name})
+		}
+	}
+	return changes
+}
+
+func openAIToolResultReferenceNames(item any) []string {
+	block, ok := item.(map[string]any)
+	if !ok {
+		return nil
+	}
+	if blockType, _ := block["type"].(string); blockType != "tool_result" {
+		return nil
+	}
+	contents, ok := block["content"].([]any)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(contents))
+	for _, rawContent := range contents {
+		content, ok := rawContent.(map[string]any)
+		if !ok {
+			continue
+		}
+		if contentType, _ := content["type"].(string); contentType != "tool_reference" {
+			continue
+		}
+		name, _ := content["tool_name"].(string)
+		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func openAIToolChangeFromAnthropic(block map[string]any) (openAIToolChange, error) {
