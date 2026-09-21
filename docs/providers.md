@@ -353,6 +353,13 @@ compatibility degradation through
 `X-CCR-Ignored-Anthropic-Fields: cache_control`; all other unsupported
 tool-change fields remain rejected.
 
+The same header reports top-level Anthropic platform hints that translated
+routes accept without forwarding: `context_management` (except `compact_*`
+edits, which stay rejected) and `safeguards`, the server-side tool-use
+classifier request that Claude Code auto mode sends. A response without
+`safeguard_results` makes Claude Code classify tool use locally for the rest
+of the session. Unknown top-level fields are still rejected with 501.
+
 On Windows, database paths use SQLite's drive-letter URI form. UNC database
 paths are rejected explicitly because the default SQLite URI parser does not
 accept arbitrary URI authorities; use a local drive path for the CCR database.
