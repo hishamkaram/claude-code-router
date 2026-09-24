@@ -3,22 +3,6 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
-## v0.6.6
-
-- Route provider-backed startup aliases with the configured provider's
-  credentials in automatic auth mode, even when Claude Code subscription auth
-  is detected. Preserve Claude auth for launches without a model and for
-  first-party Anthropic aliases that have no provider credential.
-- Forward incoming Claude credentials only to the official Anthropic endpoint;
-  provider-backed aliases continue to use their configured provider auth.
-
-## v0.6.5
-
-- Isolate selected model and Claude profile state per CCR-launched Claude Code
-  session, without changing native Claude Code sessions.
-- Route eligible Agent, Task, and Workflow child requests through the active
-  alias and visibly reject unsafe or expired child routing.
-
 ## v0.6.4
 
 - Activate declared deferred tools from ToolSearch `tool_reference` results on
