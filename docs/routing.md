@@ -17,21 +17,33 @@ allowlist for that launch:
 Without `--model`, Claude Code keeps its normal startup model when Claude auth
 is available. In resolved preserve mode, IDs beginning with `anthropic.` become
 custom rows in the visual picker, so registered models appear beside the
-permitted Anthropic models without authenticated gateway discovery. If
-`--model <alias>` selects a provider-backed route, default `--auth-mode auto`
-resolves to provider-only local gateway auth regardless of detected Claude
-login. A first-party Anthropic route without a configured provider credential
-uses Claude auth. Provider-only launches do not have subscription auth for
-first-party routes; use `--auth-mode preserve` with a working Claude login when
-both route families are needed. A no-model launch without Claude auth fails
-before Claude Code starts instead of selecting a provider implicitly. Pass
-`--model <alias>` when you want that alias to be the startup model, or when it is
-`chat-only` and needs tools disabled for the whole launch. See Claude Code's
+permitted Anthropic models without authenticated gateway discovery. If Claude
+auth is absent, pass `--model <alias>` to start directly on a registered
+provider alias; default `--auth-mode auto` resolves that launch to provider-only
+local gateway auth. A no-model launch without Claude auth fails before Claude
+Code starts instead of selecting a provider implicitly. Pass `--model <alias>`
+when you want that alias to be the startup model, or when it is `chat-only` and
+needs tools disabled for the whole launch. See Claude Code's
 [`availableModels` documentation](https://code.claude.com/docs/en/model-config).
 Because the allowlist is launch-scoped, capability refreshes and local
 overrides affect new launches. Relaunch Claude Code after `ccr model refresh`,
 `ccr model update`, or alias changes when the `/model` picker needs updated
 rows or `[1m]` markers.
+
+When `--model <alias>` selects a CCR route, the launch-only settings overlay
+also maps Claude Code's `opus`, `sonnet`, and `haiku` family defaults to
+private CCR routing identifiers. The gateway resolves those identifiers
+against the active alias for the Claude session, so agents and skills that
+declare a family model use the selected provider. A later `/model` selection
+updates that active alias; selecting a first-party Claude model resolves the
+family request back to that native family. Launches without a CCR startup
+alias do not receive these overrides, so native Claude settings and behavior
+remain unchanged.
+
+When Claude Code sends its `safeguards` request marker through a translated
+OpenAI-compatible route, CCR omits that provider-unsupported marker and adds
+`safeguards` to `X-CCR-Ignored-Anthropic-Fields`. CCR does not claim that the
+translated provider executed Anthropic safeguard semantics.
 
 Claude Code treats the strings `sonnet`, `opus`, and `haiku` inside custom IDs
 as native model-family signals. CCR selectively percent-escapes those substrings
@@ -135,14 +147,11 @@ ccr launch
 ccr launch --model coding-model
 ```
 
-When no startup alias is selected, `auto` detects whether Claude Code
-subscription or Anthropic API-key auth is available. If it is, auth resolves to
-`preserve`, so first-party Claude models and registered provider aliases can be
-used side by side from the `/model` picker. When `--model <alias>` selects a
-provider-backed route, `auto` resolves to `provider-only` regardless of detected
-Claude auth, so Claude Code startup does not require a subscription login. A
-first-party Anthropic route without a configured provider credential still
-requires preserved Claude auth. If Claude auth is absent and no alias is
+CCR detects whether the current shell has usable Claude Code subscription or
+Anthropic API-key auth. If it does, `auto` resolves to `preserve`, so first-party
+Claude models and registered provider aliases can be used side by side. If
+Claude auth is absent and `--model <alias>` names a registered provider alias,
+`auto` resolves to `provider-only`. If Claude auth is absent and no alias is
 selected, CCR fails before starting Claude Code and prints an explicit
 `ccr launch --model <alias>` example from the configured routable aliases.
 On macOS, CCR obtains only the signed-in boolean from `claude auth status --json`;

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 
 	"github.com/spf13/cobra"
@@ -18,6 +17,79 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/session"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
+
+const launchCommandLongHelp = `Launch Claude Code through the local router.
+
+CCR owns --model, --auth-mode, --claude-account, --permission-mode, --print/-p,
+and --db. All other options and positional arguments are passed to Claude Code
+unchanged unless they would override CCR's selected model, generated model
+allowlist, or tool-safety restrictions. For example ccr launch --chrome starts
+Claude Code with its Chrome integration.
+
+Use -- to end CCR option parsing and pass Claude Code options, for example:
+  ccr launch --model <alias> -p -- --output-format stream-json --verbose
+CCR consumes this separator and validates the forwarded options. CCR-owned
+options, including --no-history, --no-lifecycle, --no-statusline and --ccr-cua-*
+options, must precede it. A second -- is forwarded as Claude Code's literal
+prompt boundary: ccr launch -p -- -- --prompt-starting-with-a-dash
+
+Claude's fallback and background modes are rejected because they cannot preserve
+CCR's selected route and local gateway ownership. Use CCR-owned detached jobs:
+  ccr launch --model <alias> --detach -p --prompt-file prompt.txt
+  ccr status <job_id> --json
+  ccr cancel <job_id>
+Use --submission-id=<persisted-token> to recover the original admission after a
+lost receipt; ccr status --submission-id=<token> --json never starts work.
+Use --resume=<sid> --expected-parent-job=<job> for a new job in the same registered
+session, with --output-format=stream-json --verbose. Resolve its authoritative
+head with ccr status --session-id=<sid> --json. Busy or unresolved heads refuse
+continuation. CCR session options must precede the option separator.
+Detached launch returns a durable job/session/submission receipt. Job status reports cleanup
+coverage separately from workload exit; partial coverage does not exclude escape.
+Detached Claude options cannot contain another standalone --; use --name=value
+for option values and --prompt-file for literal prompt text.
+
+By default, --auth-mode auto preserves a working Claude subscription or API-key
+login so first-party Claude models and registered CCR providers work side by
+side. If no Claude auth is available and --model <alias> selects a registered
+provider alias, CCR uses provider-only local gateway auth so that provider can
+run without a Claude subscription. Without --model and without Claude auth, CCR
+fails before starting Claude Code and tells you which provider alias to select.
+CCR never chooses a provider implicitly for first-party Claude requests.
+
+Use --auth-mode provider-only with --model <alias> to force provider-only local
+gateway auth. The older spelling --auth-mode gateway-token is accepted for
+compatibility.
+
+Use --auth-mode subscription-pool to route first-party model requests through a
+registered local Claude account. Claude authenticates only to the loopback
+gateway; account OAuth tokens remain in CCR memory. On a confirmed account-wide
+first-party quota response, the gateway cools the exhausted account, selects the
+next usable account, and retries the same buffered request before returning any
+response to Claude. The Claude process, gateway, session, tools, and browser
+connection stay open. An explicit --claude-account pins one account. If no
+replacement is usable, CCR forwards Anthropic's original limit response and
+keeps Claude Code running.
+
+When no status line is configured, CCR adds a launch-only account-aware line
+with account=<name> and limits=unknown. An existing statusLine keeps its command
+and output. Subscription-pool launches use a launch-only credential-isolation
+wrapper: the command can read CCR_CLAUDE_ACCOUNT, but OAuth, API-key, gateway,
+refresh, scope, and observer credentials are removed from its environment.
+CCR_CLAUDE_ACCOUNT is resolved from the gateway on each status-line invocation,
+so it follows in-process account rotation.
+Generated launch settings are held in a private temporary file rather than
+process arguments and are removed after Claude exits. An explicit statusLine:
+null in a higher-precedence Claude settings file remains disabled.
+On Windows, CCR visibly falls back to its account-aware line because the POSIX
+credential-isolation wrapper is unavailable.
+CCR does not use Claude Code's private advisory quota service for routing or
+reuse shared-profile values. Run ccr claude-account test <name> --live for an
+explicit best-effort quota check. Use --no-statusline only when you
+intentionally want to opt out of CCR injection.
+
+Use ccr launch --help for router-specific help. To ask Claude Code for its own
+help, use ccr launch -- --help.`
 
 func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *cobra.Command {
 	cmd := &cobra.Command{
@@ -92,23 +164,19 @@ type resolvedLaunch struct {
 }
 
 type launchExecution struct {
-	store               *store.Store
-	launchID            int64
-	server              *gateway.Server
-	finalizer           *launchFinalizer
-	token               string
-	observerToken       string
-	resolved            resolvedLaunch
-	invocation          launchInvocation
-	recorder            *observability.Recorder
-	managedCUA          *managedCUALaunch
-	cuaProject          string
-	claudeAccount       *selectedClaudeAccount
-	subscriptionPool    *subscriptionPoolController
-	profilePrepared     func(string) error
-	claudeConfigDir     string
-	profileStorageRoot  string
-	profileDegradations []string
+	store            *store.Store
+	launchID         int64
+	server           *gateway.Server
+	finalizer        *launchFinalizer
+	token            string
+	observerToken    string
+	resolved         resolvedLaunch
+	invocation       launchInvocation
+	recorder         *observability.Recorder
+	managedCUA       *managedCUALaunch
+	cuaProject       string
+	claudeAccount    *selectedClaudeAccount
+	subscriptionPool *subscriptionPoolController
 }
 
 func runLaunchAttempt(
@@ -152,8 +220,7 @@ func runLaunchAttempt(
 		}
 	}
 	execution, err := createLaunchExecution(
-		ctx, s, invocation, resolved, selectedAccount, subscriptionPool, deps.launchProfilePrepared,
-		deps.ClaudeConfigDir, deps.ClaudeProfileStorageRoot,
+		ctx, s, invocation, resolved, selectedAccount, subscriptionPool,
 	)
 	if err != nil {
 		return err
@@ -178,9 +245,9 @@ func runLaunchAttempt(
 
 	claudeSettings, err := launchClaudeSettingsArg(ctx, s, launchSettingsOptions{
 		IncludeToolDisabled: resolved.disableTools, LifecycleEnabled: !invocation.noLifecycle,
+		FamilyRoutingEnabled:         resolved.modelAlias != "",
 		StatuslineEnabled:            !invocation.noStatusline,
 		IsolateStatuslineCredentials: selectedAccount != nil,
-		ClaudeConfigDir:              execution.claudeConfigDir,
 		GatewayURL:                   execution.server.URL(),
 		StatuslineExecutable:         deps.ExecutablePath,
 	})
@@ -225,7 +292,7 @@ func preflightLaunchWithStore(
 	if err != nil {
 		return resolvedLaunch{}, err
 	}
-	if passthroughErr := validateResolvedLaunchPassthroughArgs(ctx, s, invocation, resolved, deps.ClaudeConfigDir); passthroughErr != nil {
+	if passthroughErr := validateResolvedLaunchPassthroughArgs(ctx, s, invocation, resolved); passthroughErr != nil {
 		return resolvedLaunch{}, passthroughErr
 	}
 	if cuaErr := validateManagedCUALaunch(ctx, s, deps, invocation, resolved); cuaErr != nil {
@@ -241,9 +308,6 @@ func createLaunchExecution(
 	resolved resolvedLaunch,
 	selectedAccount *selectedClaudeAccount,
 	subscriptionPool *subscriptionPoolController,
-	profilePrepared func(string) error,
-	claudeConfigDir string,
-	profileStorageRoot string,
 ) (*launchExecution, error) {
 	lifecycleState, statuslineState := launchObservationStates(invocation)
 	accountName := ""
@@ -260,8 +324,6 @@ func createLaunchExecution(
 		store: s, launchID: launchID, finalizer: &launchFinalizer{store: s, launchID: launchID},
 		resolved: resolved, invocation: invocation,
 		claudeAccount: selectedAccount, subscriptionPool: subscriptionPool,
-		profilePrepared: profilePrepared,
-		claudeConfigDir: claudeConfigDir, profileStorageRoot: profileStorageRoot,
 	}
 	if subscriptionPool != nil {
 		subscriptionPool.bindLaunch(s, launchID)
@@ -294,21 +356,21 @@ func startLaunchManagedCUA(ctx context.Context, cmd *cobra.Command, deps Depende
 	return nil
 }
 
-func validateResolvedLaunchPassthroughArgs(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch, configDirOverride string) error {
+func validateResolvedLaunchPassthroughArgs(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch) error {
 	if err := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, false); err != nil {
 		return err
 	}
 	if findLaunchOption(invocation.claudeArgs, "--settings") == "" {
 		return nil
 	}
-	hasSettings, err := launchWillInjectSettings(ctx, s, invocation, resolved, configDirOverride)
+	hasSettings, err := launchWillInjectSettings(ctx, s, invocation, resolved)
 	if err != nil {
 		return err
 	}
 	return validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, hasSettings)
 }
 
-func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch, configDirOverride string) (bool, error) {
+func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch) (bool, error) {
 	if !invocation.noLifecycle {
 		return true, nil
 	}
@@ -316,7 +378,7 @@ func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation la
 		if resolved.authMode == launchAuthModeSubscriptionPool {
 			return true, nil
 		}
-		_, state, err := claudeStatuslineSettingForConfigDir(configDirOverride)
+		_, state, err := claudeStatuslineSetting()
 		if err != nil {
 			return false, err
 		}
@@ -325,7 +387,8 @@ func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation la
 		}
 	}
 	settings := make(map[string]any, 1)
-	if err := addLaunchAvailableModels(ctx, s, resolved.disableTools, configDirOverride, settings); err != nil {
+	addLaunchFamilyRouting(settings, resolved.modelAlias != "")
+	if err := addLaunchAvailableModels(ctx, s, resolved.disableTools, settings); err != nil {
 		return false, err
 	}
 	return len(settings) > 0, nil
@@ -441,175 +504,6 @@ func gatewaySubscriptionPool(
 	return controller
 }
 
-type claudeLaunchProcessSetup struct {
-	args    []string
-	env     ClaudeEnvironment
-	cleanup func() error
-}
-
-type claudeLaunchProfilePlan struct {
-	args          []string
-	destination   string
-	resumeSession string
-}
-
-func resolveClaudeLaunchProfilePlan(invocation launchInvocation) (claudeLaunchProfilePlan, error) {
-	return resolveClaudeLaunchProfilePlanWithOptions(invocation, "", "")
-}
-
-func resolveClaudeLaunchProfilePlanWithOptions(invocation launchInvocation, claudeConfigDir, profileStorageRoot string) (claudeLaunchProfilePlan, error) {
-	plan := claudeLaunchProfilePlan{
-		args:          append([]string(nil), invocation.claudeArgs...),
-		destination:   strings.TrimSpace(invocation.claudeProfileDir),
-		resumeSession: strings.TrimSpace(invocation.resumeSession),
-	}
-	if err := validateClaudeLaunchProfileArgs(plan.args); err != nil {
-		return claudeLaunchProfilePlan{}, err
-	}
-	var err error
-	plan.resumeSession, err = resolveClaudeLaunchResumeSession(plan.args, plan.resumeSession)
-	if err != nil {
-		return claudeLaunchProfilePlan{}, err
-	}
-	if err := validateClaudeLaunchProfileSession(plan.args, plan.resumeSession); err != nil {
-		return claudeLaunchProfilePlan{}, err
-	}
-	if err := resolveClaudeLaunchProfileDestination(&plan, claudeConfigDir, profileStorageRoot); err != nil {
-		return claudeLaunchProfilePlan{}, err
-	}
-	return plan, nil
-}
-
-func validateClaudeLaunchProfileArgs(args []string) error {
-	if findEnabledLaunchBooleanOption(args, "--fork-session") != "" {
-		return fmt.Errorf("--fork-session is not supported through ccr because the new Claude session ID cannot be assigned a stable isolated profile")
-	}
-	if findLaunchOption(args, "--teleport") != "" {
-		return errors.New("--teleport is not supported through ccr because teleport does not expose a stable local Claude session identity")
-	}
-	if findLaunchOption(args, "--from-pr") != "" {
-		return errors.New("--from-pr is not supported through ccr because Claude's linked PR session identity cannot be mapped to a stable isolated profile")
-	}
-	return nil
-}
-
-func resolveClaudeLaunchResumeSession(args []string, requested string) (string, error) {
-	if strings.TrimSpace(requested) != "" {
-		return strings.TrimSpace(requested), nil
-	}
-	return nativeClaudeResumeSession(args)
-}
-
-func validateClaudeLaunchProfileSession(args []string, resumeSession string) error {
-	if resumeSession == "" {
-		return nil
-	}
-	sessionID, err := nativeClaudeSessionID(args)
-	if err != nil {
-		return err
-	}
-	if sessionID != "" {
-		return errors.New("--resume cannot be combined with --session-id through ccr because they define conflicting Claude session identities")
-	}
-	if claudeLaunchDisablesSessionPersistence(args) {
-		return fmt.Errorf("--resume cannot be combined with --no-session-persistence through CCR")
-	}
-	return nil
-}
-
-func resolveClaudeLaunchProfileDestination(plan *claudeLaunchProfilePlan, claudeConfigDir, profileStorageRoot string) error {
-	if plan.destination != "" || claudeLaunchDisablesSessionPersistence(plan.args) {
-		return nil
-	}
-	if plan.resumeSession != "" {
-		var err error
-		plan.destination, err = foregroundClaudeProfileDestinationWithOptions(plan.resumeSession, claudeConfigDir, profileStorageRoot)
-		return err
-	}
-	sessionID, err := nativeClaudeSessionID(plan.args)
-	if err != nil {
-		return err
-	}
-	if sessionID == "" {
-		sessionID = generatedNativeClaudeSessionID()
-		plan.args = append([]string{"--session-id", sessionID}, plan.args...)
-	}
-	plan.destination, err = foregroundClaudeProfileDestinationWithOptions(sessionID, claudeConfigDir, profileStorageRoot)
-	return err
-}
-
-func prepareClaudeLaunchProcess(
-	ctx context.Context,
-	execution *launchExecution,
-	claudeSettings string,
-) (setup claudeLaunchProcessSetup, resultErr error) {
-	invocation := execution.invocation
-	resolved := execution.resolved
-	claudeSettingsPath, cleanupSettings, err := writePrivateLaunchSettings(claudeSettings)
-	if err != nil {
-		return claudeLaunchProcessSetup{}, err
-	}
-	profileCleanup := func() error { return nil }
-	var cleanupOnce sync.Once
-	var cleanupErr error
-	cleanup := func() error {
-		cleanupOnce.Do(func() {
-			cleanupErr = errors.Join(profileCleanup(), cleanupSettings())
-		})
-		return cleanupErr
-	}
-	defer func() {
-		if resultErr != nil {
-			resultErr = errors.Join(resultErr, cleanup())
-		}
-	}()
-
-	plan, err := resolveClaudeLaunchProfilePlanWithOptions(invocation, execution.claudeConfigDir, execution.profileStorageRoot)
-	if err != nil {
-		return claudeLaunchProcessSetup{}, err
-	}
-	providerSecretEnvNames, err := configuredProviderSecretEnvNames(ctx, execution.store)
-	if err != nil {
-		return claudeLaunchProcessSetup{}, fmt.Errorf("reading configured provider secret environment names: %w", err)
-	}
-	profile, err := prepareClaudeLaunchProfileAtForSessionWithOptions(plan.destination, plan.resumeSession, claudeProfileCopyOptions{
-		preserveAnthropicAPIKey: resolved.authMode == launchAuthModePreserve,
-		providerSecretEnvNames:  providerSecretEnvNames,
-		degradations:            &execution.profileDegradations,
-		sourceDir:               execution.claudeConfigDir,
-		storageRoot:             execution.profileStorageRoot,
-	})
-	if err != nil {
-		return claudeLaunchProcessSetup{}, err
-	}
-	profileCleanup = profile.cleanup
-	execution.profileDegradations = profile.degradations
-	if seedErr := seedClaudeGatewayModelCache(profile.configDir, execution.server.URL(), claudeSettings); seedErr != nil {
-		return claudeLaunchProcessSetup{}, seedErr
-	}
-	oauth, err := preservedClaudeOAuthEnvironment(resolved.authMode, execution.claudeConfigDir)
-	if err != nil {
-		return claudeLaunchProcessSetup{}, err
-	}
-	if execution.profilePrepared != nil {
-		if err := execution.profilePrepared(profile.configDir); err != nil {
-			return claudeLaunchProcessSetup{}, fmt.Errorf("committing prepared Claude profile ownership: %w", err)
-		}
-	}
-	claudeArgs := launchClaudeArgs(resolved.claudeModelID, invocation.printMode, resolved.disableTools,
-		claudeSettingsPath, invocation.permissionMode, plan.args)
-	env := launchClaudeEnv(launchEnvironmentOptions{
-		GatewayURL: execution.server.URL(), ClaudeConfigDir: profile.configDir, Token: execution.token,
-		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
-		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
-		DisableTools: resolved.disableTools, AuthMode: resolved.authMode,
-		ClaudeAccountName:      selectedClaudeAccountName(execution.claudeAccount),
-		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
-		OAuthToken: oauth.AccessToken, OAuthRefreshToken: oauth.RefreshToken, OAuthScopes: oauth.ScopesJSON,
-	})
-	return claudeLaunchProcessSetup{args: claudeArgs, env: env, cleanup: cleanup}, nil
-}
-
 func runClaudeLaunchProcess(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -619,17 +513,31 @@ func runClaudeLaunchProcess(
 ) (resultErr error) {
 	invocation := execution.invocation
 	resolved := execution.resolved
-	setup, err := prepareClaudeLaunchProcess(ctx, execution, claudeSettings)
+	claudeSettingsPath, cleanupSettings, err := writePrivateLaunchSettings(claudeSettings)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, setup.cleanup())
+		resultErr = errors.Join(resultErr, cleanupSettings())
 	}()
+	claudeArgs := launchClaudeArgs(resolved.claudeModelID, invocation.printMode, resolved.disableTools,
+		claudeSettingsPath, invocation.permissionMode, invocation.claudeArgs)
+	providerSecretEnvNames, err := configuredProviderSecretEnvNames(ctx, execution.store)
+	if err != nil {
+		return fmt.Errorf("reading configured provider secret environment names: %w", err)
+	}
+	env := launchClaudeEnv(launchEnvironmentOptions{
+		GatewayURL: execution.server.URL(), Token: execution.token,
+		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
+		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
+		DisableTools: resolved.disableTools, AuthMode: resolved.authMode,
+		ClaudeAccountName:      selectedClaudeAccountName(execution.claudeAccount),
+		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
+	})
 	outputLock := &sync.Mutex{}
 	out := launchProcessWriter(cmd.OutOrStdout(), outputLock)
 	errOut := launchProcessWriter(cmd.ErrOrStderr(), outputLock)
-	process, err := deps.Launcher.Start(ctx, setup.args, setup.env, cmd.InOrStdin(), out, errOut)
+	process, err := deps.Launcher.Start(ctx, claudeArgs, env, cmd.InOrStdin(), out, errOut)
 	if err != nil {
 		return fmt.Errorf("launching Claude Code through the gateway: %w", err)
 	}
@@ -644,7 +552,7 @@ func runClaudeLaunchProcess(
 		summaryOut = errOut
 	}
 	writeLaunchSummary(ctx, summaryOut, execution.store, execution.server.URL(), execution.launchID,
-		process.PID(), resolved.modelAlias, resolved.disableTools, resolved.authMode, invocation.permissionMode, execution.profileDegradations)
+		process.PID(), resolved.modelAlias, resolved.disableTools, resolved.authMode, invocation.permissionMode)
 	var notices <-chan string
 	if execution.subscriptionPool != nil {
 		notices = execution.subscriptionPool.Notices()
@@ -652,9 +560,11 @@ func runClaudeLaunchProcess(
 	waitErr, stopErr := waitForClaudeProcess(ctx, process, notices, errOut)
 	shutdownGateway(ctx, execution.server)
 	managedCUAErr := shutdownManagedCUA(ctx, &execution.managedCUA)
+	settingsCleanupErr := cleanupSettings()
+	cleanupSettings = func() error { return nil }
 	state, reason := launchExitState(ctx, waitErr)
 	finishErr := execution.finalizer.Finish(ctx, state, reason, launchExitCode(waitErr))
-	return errors.Join(waitErr, stopErr, managedCUAErr, finishErr)
+	return errors.Join(waitErr, stopErr, managedCUAErr, settingsCleanupErr, finishErr)
 }
 
 func validateLaunchInputs(modelAlias, authMode, claudeAccount, permissionMode string) error {

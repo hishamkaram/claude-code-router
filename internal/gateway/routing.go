@@ -38,37 +38,6 @@ type messageRoute struct {
 	capabilities        providers.Capabilities
 	modelCapabilities   modelcap.Values
 	responseModel       string
-	agentChildRollback  func()
-	agentChildRouted    bool
-}
-
-func (route messageRoute) agentChildSpawnAlias() string {
-	if route.firstPartyAnthropic {
-		return ""
-	}
-	return route.model.Alias
-}
-
-func (route messageRoute) usesClaudeSubscriptionAuth() bool {
-	if route.firstPartyAnthropic {
-		return true
-	}
-	return route.anthropicAuth == anthropicAuthIncoming &&
-		route.anthropicProvider != nil &&
-		providers.IsFirstPartyAnthropicEndpoint(route.anthropicProvider.BaseURL)
-}
-
-func (route *messageRoute) rollbackAgentChild() {
-	if route.agentChildRollback == nil {
-		return
-	}
-	rollback := route.agentChildRollback
-	route.agentChildRollback = nil
-	rollback()
-}
-
-func (route *messageRoute) commitAgentChild() {
-	route.agentChildRollback = nil
 }
 
 func validateRouteMessageCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {
@@ -222,19 +191,7 @@ func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel
 	}
 	if caps.Protocol == providers.ProtocolAnthropicCompatible {
 		rewrittenProvider := provider
-		authMode := anthropicAuthProviderSecret
-		if strings.TrimSpace(provider.SecretRef) == "" && providers.IsFirstPartyAnthropicEndpoint(provider.BaseURL) {
-			authMode = anthropicAuthIncoming
-		}
-		return messageRoute{
-			kind:              routeAnthropic,
-			model:             model,
-			anthropicProvider: &rewrittenProvider,
-			anthropicAuth:     authMode,
-			capabilities:      caps,
-			modelCapabilities: effectiveModel.Values,
-			responseModel:     responseModel,
-		}, nil
+		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, modelCapabilities: effectiveModel.Values, responseModel: responseModel}, nil
 	}
 	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q with protocol %q is not supported by the gateway path", provider.Type, caps.Protocol)}
 }
@@ -292,19 +249,6 @@ func isFirstPartyAnthropicModelRequest(id string) bool {
 	default:
 		return looksLikeAnthropicModelID(id) && !strings.HasPrefix(strings.TrimSpace(id), legacyDiscoveryAliasPrefix)
 	}
-}
-
-func isAgentChildToolName(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "agent", "task":
-		return true
-	default:
-		return false
-	}
-}
-
-func isChildSpawnToolName(name string) bool {
-	return isAgentChildToolName(name) || strings.EqualFold(strings.TrimSpace(name), "workflow")
 }
 
 func anthropicRequestUsesTools(req anthropicRequest) bool {

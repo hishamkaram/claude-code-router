@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 )
 
 func (s *Store) AddModel(ctx context.Context, model Model) error {
+	if modelrouting.IsFamilyOverride(model.Alias) {
+		return fmt.Errorf("store.AddModel: model alias %q is reserved for CCR model-family routing", model.Alias)
+	}
 	discoveredJSON, overridesJSON, err := encodeModelCapabilities(model)
 	if err != nil {
 		return fmt.Errorf("store.AddModel: encoding capabilities for model %q: %w", model.Alias, err)
@@ -59,6 +64,9 @@ WHERE models.alias = ?
 }
 
 func (s *Store) UpdateModel(ctx context.Context, model Model) error {
+	if modelrouting.IsFamilyOverride(model.Alias) {
+		return fmt.Errorf("store.UpdateModel: model alias %q is reserved for CCR model-family routing", model.Alias)
+	}
 	discoveredJSON, overridesJSON, err := encodeModelCapabilities(model)
 	if err != nil {
 		return fmt.Errorf("store.UpdateModel: encoding capabilities for model %q: %w", model.Alias, err)

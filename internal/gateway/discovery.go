@@ -53,11 +53,9 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	if len(entries) > 0 {
 		firstID, lastID = entries[0].ID, entries[len(entries)-1].ID
 	}
-	if err := writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"data": entries, "first_id": firstID, "last_id": lastID, "has_more": false,
-	}); err != nil {
-		return
-	}
+	})
 }
 
 func (h *handler) firstPartyAnthropicModelEntries() []gatewayModelEntry {

@@ -17,13 +17,9 @@ const (
 )
 
 func claudeStatuslineSetting() (setting map[string]any, state claudeStatuslineState, resultErr error) {
-	return claudeStatuslineSettingForConfigDir("")
-}
-
-func claudeStatuslineSettingForConfigDir(configDirOverride string) (setting map[string]any, state claudeStatuslineState, resultErr error) {
 	var effective map[string]any
 	effectiveState := claudeStatuslineAbsent
-	for _, path := range claudeSettingsPathsForConfigDir(configDirOverride) {
+	for _, path := range claudeSettingsPaths() {
 		setting, found, err := settingsFileStatusline(path)
 		if err != nil {
 			return nil, claudeStatuslineAbsent, err

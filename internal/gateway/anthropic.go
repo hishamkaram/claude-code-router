@@ -16,8 +16,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string, firstParty, stream bool, completion *routeCompletionState, route *messageRoute) observability.TokenUsage {
-	defer route.rollbackAgentChild()
+func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string, firstParty, stream bool, completion *routeCompletionState) observability.TokenUsage {
 	body, status, message := readAnthropicPassThroughBody(r, body)
 	if status != 0 {
 		writeAnthropicError(w, status, message)
@@ -54,13 +53,9 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 			resource,
 			providerSecret,
 			responseModel,
-			route.agentChildSpawnAlias(),
 			firstParty,
 		)
 		recordStreamCompletion(completion, result)
-		if result.TerminalPhase == "completed" || result.ChildToolsExposed {
-			route.commitAgentChild()
-		}
 		return usage
 	}
 	resp, err := h.executeAnthropicPassThrough(r, body, endpoint, provider, authMode, resource, providerSecret)
@@ -69,20 +64,7 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var onAgentTools func([]agentChildDescriptor) (func(), error)
-	if route.agentChildSpawnAlias() != "" {
-		onAgentTools = func(descriptors []agentChildDescriptor) (func(), error) {
-			return h.activeModel.registerAgentChildDescriptorsForNewWork(claudeCodeSessionID(r), descriptors)
-		}
-	}
-	usage, writeErr := h.writeAnthropicPassThroughResponse(w, r, resp, provider, authMode, resource, responseModel, firstParty, onAgentTools)
-	if writeErr != nil {
-		return usage
-	}
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		route.commitAgentChild()
-	}
-	return usage
+	return h.writeAnthropicPassThroughResponse(w, r, resp, provider, authMode, resource, responseModel, firstParty)
 }
 
 func readAnthropicPassThroughBody(r *http.Request, body []byte) (result []byte, status int, message string) {
@@ -129,19 +111,16 @@ func (h *handler) writeAnthropicPassThroughFailure(w http.ResponseWriter, r *htt
 	writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("requesting Anthropic provider %q: %v", provider.Name, err))
 }
 
-func (h *handler) writeAnthropicPassThroughResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, provider store.Provider, authMode anthropicAuthMode, resource, responseModel string, firstParty bool, onAgentTools func([]agentChildDescriptor) (func(), error)) (observability.TokenUsage, error) {
+func (h *handler) writeAnthropicPassThroughResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, provider store.Provider, authMode anthropicAuthMode, resource, responseModel string, firstParty bool) observability.TokenUsage {
 	h.observeClaudeAuthResponse(r.Context(), firstParty, resp.StatusCode)
 	if firstParty && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		writeAnthropicAuthenticationError(w, resp.StatusCode, claudeSubscriptionAuthFailureMessage())
-		return observability.TokenUsage{}, nil
+		return observability.TokenUsage{}
 	}
 	h.notifyAnthropicSubscriptionExhaustion(resp, provider, authMode, resource)
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		onAgentTools = nil
-	}
-	return copyProviderResponseBody(w, resp, responseModel, onAgentTools, firstParty)
+	return copyProviderResponseBody(w, resp, responseModel)
 }
 
 func (h *handler) newAnthropicPassThroughRequest(
@@ -176,6 +155,28 @@ func rewriteAnthropicRequestModel(body []byte, model string) ([]byte, error) {
 	rewritten, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("rewriting Anthropic request model: %w", err)
+	}
+	return rewritten, nil
+}
+
+func rewriteAnthropicRequestModelAndDropFields(body []byte, model string, fields ...string) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("rewriting translated Anthropic request: %w", err)
+	}
+	if model != "" {
+		encodedModel, err := json.Marshal(model)
+		if err != nil {
+			return nil, fmt.Errorf("rewriting translated Anthropic request model: %w", err)
+		}
+		payload["model"] = encodedModel
+	}
+	for _, field := range fields {
+		delete(payload, field)
+	}
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("rewriting translated Anthropic request: %w", err)
 	}
 	return rewritten, nil
 }
@@ -350,20 +351,35 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-func copyProviderResponseBody(w http.ResponseWriter, resp *http.Response, responseModel string, onAgentTools func([]agentChildDescriptor) (func(), error), preserveNativeChildInput bool) (observability.TokenUsage, error) {
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		_, err := io.Copy(w, resp.Body)
-		return observability.TokenUsage{}, err
+func copyProviderResponseBody(w http.ResponseWriter, resp *http.Response, responseModel string) observability.TokenUsage {
+	if responseModel == "" || resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		_, _ = io.Copy(w, resp.Body)
+		return observability.TokenUsage{}
 	}
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if strings.Contains(contentType, "text/event-stream") {
-		return copySSEProviderResponseBody(w, resp.Body, responseModel, onAgentTools, preserveNativeChildInput)
+	if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "+json") {
+		return copyJSONProviderResponseBody(w, resp.Body, responseModel)
 	}
-	// Successful Anthropic responses are JSON even when an upstream omits or
-	// misstates Content-Type. Buffering every non-SSE body keeps child descriptor
-	// registration and model rewriting on one path instead of allowing an
-	// unrecognized header to bypass routing state.
-	return copyJSONProviderResponseBody(w, resp.Body, responseModel, onAgentTools)
+	if strings.Contains(contentType, "text/event-stream") {
+		if flusher, ok := w.(http.Flusher); ok {
+			return copyAndRewriteSSE(w, resp.Body, flusher, responseModel)
+		}
+	}
+	_, _ = io.Copy(w, resp.Body)
+	return observability.TokenUsage{}
+}
+
+func copyJSONProviderResponseBody(dst io.Writer, src io.Reader, responseModel string) observability.TokenUsage {
+	raw, err := io.ReadAll(src)
+	if err != nil {
+		return observability.TokenUsage{}
+	}
+	usage := anthropicUsageFromJSON(raw)
+	if rewritten, ok := rewriteAnthropicResponseModel(raw, responseModel); ok {
+		raw = rewritten
+	}
+	_, _ = dst.Write(raw)
+	return usage
 }
 
 func copyAndRewriteSSE(dst io.Writer, src io.Reader, flusher http.Flusher, responseModel string) observability.TokenUsage {
@@ -482,7 +498,7 @@ func rewriteSSEDataLine(line []byte, responseModel string) []byte {
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 		return line
 	}
-	rewritten, ok := rewriteAnthropicResponse(data, responseModel)
+	rewritten, ok := rewriteAnthropicResponseModel(data, responseModel)
 	if !ok {
 		return line
 	}
@@ -494,7 +510,7 @@ func rewriteSSEDataLine(line []byte, responseModel string) []byte {
 	return out
 }
 
-func rewriteAnthropicResponse(raw []byte, responseModel string) ([]byte, bool) {
+func rewriteAnthropicResponseModel(raw []byte, responseModel string) ([]byte, bool) {
 	if strings.TrimSpace(responseModel) == "" {
 		return nil, false
 	}
@@ -503,18 +519,14 @@ func rewriteAnthropicResponse(raw []byte, responseModel string) ([]byte, bool) {
 		return nil, false
 	}
 	changed := false
-	if strings.TrimSpace(responseModel) != "" {
-		if _, ok := payload["model"]; ok {
-			payload["model"] = responseModel
-			changed = true
-		}
+	if _, ok := payload["model"]; ok {
+		payload["model"] = responseModel
+		changed = true
 	}
 	if message, ok := payload["message"].(map[string]any); ok {
-		if strings.TrimSpace(responseModel) != "" {
-			if _, hasModel := message["model"]; hasModel {
-				message["model"] = responseModel
-				changed = true
-			}
+		if _, hasModel := message["model"]; hasModel {
+			message["model"] = responseModel
+			changed = true
 		}
 	}
 	if !changed {

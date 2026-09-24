@@ -46,14 +46,14 @@ func TestLiveConfiguredProviderAutoModeAgentWebFetch(t *testing.T) {
 	if _, err := liveclaude.Check(ctx); err != nil {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
-	prompt := `Use the Agent tool to launch one general-purpose subagent. The subagent must use WebFetch on https://example.com and report its result. Wait for the subagent to finish, then briefly confirm completion. Do not use Bash or shell.`
+	prompt := `Use the Agent tool to launch one general-purpose subagent. The subagent must use WebFetch on https://example.com and then return exactly CCR_LIVE_REAL_WEBFETCH_CHILD_OK. After the subagent finishes, reply exactly CCR_LIVE_REAL_WEBFETCH_PARENT_OK. Do not use Bash or shell.`
 	auth := configuredLiveRealFirstPartyAuth()
-	claudeArgs := auth.accountArgs()
-	claudeArgs = append(claudeArgs, "--verbose", "--output-format", "stream-json", "--forward-subagent-text")
 	out, errOut, modelAlias := runConfiguredProviderProbeWithAuthMode(
-		t, ctx, auth.mode, prompt, claudeArgs...,
+		t, ctx, auth.mode, prompt, auth.accountArgs()...,
 	)
-	assertConfiguredProviderAgentWebFetchProbe(t, ctx, out, errOut, modelAlias, auth.mode)
+	assertConfiguredProviderProbeWithAuthMode(
+		t, out, errOut, modelAlias, auth.mode, "CCR_LIVE_REAL_WEBFETCH_PARENT_OK",
+	)
 }
 
 func TestLiveConfiguredProviderAutoModeWorkflow(t *testing.T) {
@@ -190,7 +190,6 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 		return []string{
 			"Provider-only auth is active for this launch",
 			"Original Anthropic subscription login and Anthropic API-key auth are not active in provider-only mode",
-			"First-party Claude subscription routes are unavailable in this launch",
 		}
 	case launchAuthModeSubscriptionPool:
 		return []string{
@@ -200,9 +199,8 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 		}
 	default:
 		return []string{
-			"Gateway accepts only the generated local X-CCR-Session-Token",
+			"Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN",
 			"Original Anthropic subscription login and Anthropic API-key auth are not active",
-			"First-party Claude subscription routes are unavailable in this launch",
 		}
 	}
 }
@@ -356,7 +354,7 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 	)
 	var launchID int64
 	run := startLiveCompactionCommand(t, ctx, Dependencies{StartGateway: liveRealGatewayStarter(&launchID)}, args)
-	check := func(label, model string) {
+	check := func(label, model, sentinel string) {
 		selection, err := liveRealTurn(ctx, run, liveStreamInput(t, "/model "+model))
 		if err != nil {
 			t.Fatalf("%s model selection: %v", label, err)
@@ -365,23 +363,21 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 			t.Errorf("%s: Claude Code rejected model selection (output withheld)", label)
 			return
 		}
-		result, err := liveRealTurn(ctx, run, liveStreamInput(t, "Reply with one short sentence confirming you are ready."))
-		if err != nil {
-			t.Errorf("%s: expected a successful turn, error=%v", label, err)
-		} else if strings.TrimSpace(result) == "" {
-			t.Errorf("%s: successful turn returned empty output", label)
+		result, err := liveRealTurn(ctx, run, liveStreamInput(t, "Reply with only this exact marker, without punctuation or commentary:\n"+sentinel))
+		if err != nil || strings.TrimSpace(result) != sentinel {
+			t.Errorf("%s: expected turn marker %q, result_bytes=%d, error=%v", label, sentinel, len(result), err)
 		} else {
-			t.Logf("%s: completed non-empty turn", label)
+			t.Logf("%s: completed expected turn", label)
 		}
 	}
-	check("initial Anthropic", "sonnet")
-	for _, model := range models {
+	check("initial Anthropic", "sonnet", "CCR_LIVE_REAL_ANTHROPIC_INITIAL")
+	for index, model := range models {
 		discoveryID, err := gateway.DiscoveryIDForModel(model)
 		if err != nil {
 			t.Fatalf("DiscoveryIDForModel(%s) error = %v", model.Alias, err)
 		}
-		check(model.Alias, discoveryID)
-		check("return from "+model.Alias, "sonnet")
+		check(model.Alias, discoveryID, fmt.Sprintf("CCR_LIVE_REAL_ALIAS_%d", index))
+		check("return from "+model.Alias, "sonnet", fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index))
 	}
 	out, errOut, err := run.finish(ctx)
 	if err != nil {
@@ -449,16 +445,17 @@ func TestConfiguredLiveRealFirstPartyAuth(t *testing.T) {
 
 func runLiveRealChatOnlyAlias(t *testing.T, ctx context.Context, dbPath string, model store.Model) int64 {
 	t.Helper()
+	sentinel := "CCR_LIVE_REAL_CHAT_" + strings.ToUpper(strings.ReplaceAll(model.Alias, "-", "_"))
 	var launchID int64
 	out, errOut, err := runLiveCommand(
-		ctx, Dependencies{In: strings.NewReader("Reply with one short sentence confirming you are ready.\n"), StartGateway: liveRealGatewayStarter(&launchID)},
+		ctx, Dependencies{In: strings.NewReader("Reply exactly " + sentinel + ".\n"), StartGateway: liveRealGatewayStarter(&launchID)},
 		"--db", dbPath, "launch", "--model", model.Alias, "--print", "--auth-mode", "gateway-token",
 	)
 	if err != nil {
 		failLiveRealCommand(t, fmt.Sprintf("real chat-only alias %q", model.Alias), err, out, errOut)
 	}
-	if strings.TrimSpace(out) == "" {
-		failLiveRealOutput(t, fmt.Sprintf("real chat-only alias %q returned empty output", model.Alias), out, errOut)
+	if !strings.Contains(out, sentinel) {
+		failLiveRealOutput(t, fmt.Sprintf("real chat-only alias %q output missing %q", model.Alias, sentinel), out, errOut)
 	}
 	return launchID
 }
@@ -499,9 +496,7 @@ func assertLiveRealRoutes(t *testing.T, ctx context.Context, dbPath string, laun
 	if err != nil {
 		t.Fatalf("ListTraceEvents() error = %v", err)
 	}
-	for _, mismatch := range liveRealRouteMismatches(events, models) {
-		t.Error(mismatch)
-	}
+	seenAliases := make(map[string]bool, len(models))
 	seenAnthropic := false
 	for _, event := range events {
 		if event.Kind != "route" || event.Status != "succeeded" {
@@ -510,93 +505,16 @@ func assertLiveRealRoutes(t *testing.T, ctx context.Context, dbPath string, laun
 		if event.Route.RouteKind == "first-party-anthropic" {
 			seenAnthropic = true
 		}
-	}
-	if requireAnthropic && !seenAnthropic {
-		t.Fatalf("real matrix trace missing first-party Anthropic route (launch=%d, events=%d)", launchID, len(events))
-	}
-}
-
-func liveRealRouteMismatches(events []store.TraceEvent, models []store.Model) []string {
-	expectedByAlias := make(map[string]store.Model, len(models))
-	for _, model := range models {
-		expectedByAlias[model.Alias] = model
-	}
-	seenAliases := make(map[string]bool, len(models))
-	var mismatches []string
-	for _, event := range events {
-		if event.Kind != "route" || event.Status != "succeeded" || event.Route.RouteKind != "registered" {
-			continue
-		}
-		model, configured := expectedByAlias[event.Route.ModelAlias]
-		if !configured {
-			continue
-		}
-		seenAliases[model.Alias] = true
-		if event.Route.ProviderName != model.ProviderName || event.Route.ProviderModel != model.ProviderModel {
-			mismatches = append(mismatches, fmt.Sprintf(
-				"real matrix alias %q routed to %q/%q; configured route is %q/%q",
-				model.Alias, event.Route.ProviderName, event.Route.ProviderModel, model.ProviderName, model.ProviderModel,
-			))
+		if event.Route.RouteKind == "registered" {
+			seenAliases[event.Route.ModelAlias] = true
 		}
 	}
 	for _, model := range models {
 		if !seenAliases[model.Alias] {
-			mismatches = append(mismatches, fmt.Sprintf("real matrix trace missing successful alias %q", model.Alias))
+			t.Errorf("real matrix trace missing successful alias %q (launch=%d, events=%d)", model.Alias, launchID, len(events))
 		}
 	}
-	return mismatches
-}
-
-func TestLiveRealRouteMismatches(t *testing.T) {
-	t.Parallel()
-	model := store.Model{Alias: "glm", ProviderName: "litellm", ProviderModel: "glm-5.1-openrouter"}
-	configuredRoute := store.TraceEvent{
-		Kind: "route", Status: "succeeded",
-		Route: store.RouteEvent{
-			RouteKind: "registered", ModelAlias: model.Alias,
-			ProviderName: model.ProviderName, ProviderModel: model.ProviderModel,
-		},
-	}
-	for _, test := range []struct {
-		name  string
-		event store.TraceEvent
-		want  string
-	}{
-		{name: "configured provider route", event: configuredRoute},
-		{
-			name: "wrong provider", event: store.TraceEvent{
-				Kind: "route", Status: "succeeded",
-				Route: store.RouteEvent{RouteKind: "registered", ModelAlias: model.Alias, ProviderName: "other", ProviderModel: model.ProviderModel},
-			},
-			want: `routed to "other"/"glm-5.1-openrouter"`,
-		},
-		{
-			name: "wrong provider model", event: store.TraceEvent{
-				Kind: "route", Status: "succeeded",
-				Route: store.RouteEvent{RouteKind: "registered", ModelAlias: model.Alias, ProviderName: model.ProviderName, ProviderModel: "wrong-model"},
-			},
-			want: `routed to "litellm"/"wrong-model"`,
-		},
-		{
-			name: "unsuccessful route", event: store.TraceEvent{
-				Kind: "route", Status: "failed",
-				Route: store.RouteEvent{RouteKind: "registered", ModelAlias: model.Alias, ProviderName: model.ProviderName, ProviderModel: model.ProviderModel},
-			},
-			want: `missing successful alias "glm"`,
-		},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			mismatches := liveRealRouteMismatches([]store.TraceEvent{test.event}, []store.Model{model})
-			if test.want == "" {
-				if len(mismatches) != 0 {
-					t.Fatalf("liveRealRouteMismatches() = %q, want no mismatches", mismatches)
-				}
-				return
-			}
-			if len(mismatches) != 1 || !strings.Contains(mismatches[0], test.want) {
-				t.Fatalf("liveRealRouteMismatches() = %q, want one mismatch containing %q", mismatches, test.want)
-			}
-		})
+	if requireAnthropic && !seenAnthropic {
+		t.Fatalf("real matrix trace missing first-party Anthropic route (launch=%d, events=%d)", launchID, len(events))
 	}
 }

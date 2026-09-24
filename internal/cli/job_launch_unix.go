@@ -81,11 +81,7 @@ func launchDetached(ctx context.Context, cmd *cobra.Command, opts *options, deps
 	}
 	defer func() { _ = lock.Close() }()
 	admission := jobAdmission{
-		// parseLaunchInvocation has already removed CCR-owned options and
-		// preserved Claude option/value boundaries. Passing that normalized
-		// representation prevents a Claude option value such as "--resume"
-		// from being reinterpreted as CCR admission state by the detached owner.
-		Root: s.Root, ID: record.JobID, DB: execution.Database, Args: detachedOwnerArgs(invocation), Prompt: []byte(prompt),
+		Root: s.Root, ID: record.JobID, DB: execution.Database, Args: foregroundJobArgs(args), Prompt: []byte(prompt),
 		SubmissionID: bound.SubmissionID, ExecutionDigest: bound.ExecutionDigest,
 	}
 	if err := startJobOwner(ctx, executable, lock, lease, record, admission); err != nil {

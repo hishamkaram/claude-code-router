@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	osuser "os/user"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -191,16 +190,6 @@ func setTestClaudeHome(t *testing.T) string {
 
 func runCommandWithDeps(t *testing.T, deps Dependencies, args ...string) (string, string, error) {
 	t.Helper()
-	// Command tests use fake launchers, so they must never copy or mutate the
-	// developer's real Claude profile. Preserve tests that deliberately set a
-	// temporary HOME/CLAUDE_CONFIG_DIR, while isolating the default environment
-	// without mutating process-global variables (many callers run in parallel).
-	if deps.ClaudeConfigDir == "" && strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")) == "" && testUsesDefaultClaudeHome() {
-		deps.ClaudeConfigDir = t.TempDir()
-	}
-	if deps.ClaudeProfileStorageRoot == "" {
-		deps.ClaudeProfileStorageRoot = t.TempDir()
-	}
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	if deps.In == nil {
@@ -218,18 +207,6 @@ func runCommandWithDeps(t *testing.T, deps Dependencies, args ...string) (string
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), errOut.String(), err
-}
-
-func testUsesDefaultClaudeHome() bool {
-	home := strings.TrimSpace(os.Getenv("HOME"))
-	if home == "" {
-		return true
-	}
-	account, err := osuser.Current()
-	if err != nil {
-		return false
-	}
-	return filepath.Clean(home) == filepath.Clean(account.HomeDir)
 }
 
 func newModelsServer(t *testing.T, models []string) *httptest.Server {

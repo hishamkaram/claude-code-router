@@ -429,48 +429,6 @@ func TestOpenAIToolArgumentsNormalizesAgentInput(t *testing.T) {
 	}
 }
 
-func TestOpenAIToolArgumentsPreservesNativeAgentModel(t *testing.T) {
-	for _, toolName := range []string{"Agent", "Task"} {
-		got, ok := openAIToolArgumentsForTool(toolName, `{"prompt":"work","description":"work","model":"haiku"}`).(map[string]any)
-		if !ok {
-			t.Fatalf("openAIToolArgumentsForTool(%q) = %#v, want object", toolName, got)
-		}
-		if got["model"] != "haiku" {
-			t.Fatalf("%s model = %#v, want native Claude model", toolName, got["model"])
-		}
-	}
-}
-
-func TestCountAnthropicAgentToolsValueHandlesTypedContent(t *testing.T) {
-	t.Parallel()
-	type contentBlock struct {
-		Type  string         `json:"type"`
-		Name  string         `json:"name"`
-		Input map[string]any `json:"input"`
-	}
-	type response struct {
-		Content []contentBlock `json:"content"`
-	}
-	value := &response{Content: []contentBlock{
-		{Type: "tool_use", Name: "Agent", Input: map[string]any{"prompt": "work"}},
-		{Type: "tool_use", Name: "Task", Input: map[string]any{"prompt": "work"}},
-	}}
-	if got := countAnthropicAgentToolsValue(value); got != 2 {
-		t.Fatalf("countAnthropicAgentToolsValue(typed response) = %d, want 2", got)
-	}
-}
-
-func TestCountAgentToolCallsIncludesTask(t *testing.T) {
-	tools := []openAIToolCall{
-		{Function: openAIFunctionCall{Name: "Agent"}},
-		{Function: openAIFunctionCall{Name: "Task"}},
-		{Function: openAIFunctionCall{Name: "Bash"}},
-	}
-	if got := countAgentToolCalls(tools); got != 2 {
-		t.Fatalf("countAgentToolCalls() = %d, want 2", got)
-	}
-}
-
 func TestOpenAIToolArgumentsDoesNotNormalizeNonAgentInput(t *testing.T) {
 	raw := `{"prompt":"find latest chatgpt news","agent_type":"general-purpose","extra":"kept"}`
 	got, ok := openAIToolArgumentsForTool("Bash", raw).(map[string]any)
@@ -516,6 +474,57 @@ func TestGatewayRejectsUnsupportedAnthropicFieldsOnOpenAIPath(t *testing.T) {
 	}
 	if called {
 		t.Fatalf("provider was called for unsupported Anthropic field")
+	}
+}
+
+func TestGatewayDropsSafeguardsOnTranslatedOpenAIPath(t *testing.T) {
+	ctx := context.Background()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		if _, present := payload["safeguards"]; present {
+			t.Fatalf("provider received Anthropic safeguards field")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-safeguards","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer provider.Close()
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	body := `{"model":"gpt","safeguards":{"mode":"auto"},"messages":[{"role":"user","content":"hello"}]}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get(ccrIgnoredFieldsHeader); got != "safeguards" {
+		t.Fatalf("%s = %q, want safeguards", ccrIgnoredFieldsHeader, got)
+	}
+}
+
+func TestResponsesPathAcceptsSafeguardsAsIgnored(t *testing.T) {
+	fields := map[string]json.RawMessage{"safeguards": json.RawMessage(`{"mode":"auto"}`)}
+	req := anthropicRequest{Fields: fields}
+	if validationErr := (&handler{}).validateOpenAIMessageRequest(&req); validationErr != nil {
+		t.Fatalf("validateOpenAIMessageRequest() = %#v, want accepted field", validationErr)
+	}
+	if validationErr := validateResponsesMessageRequest(&req); validationErr != nil {
+		t.Fatalf("validateResponsesMessageRequest() = %#v, want accepted field", validationErr)
+	}
+	if got := ignoredOpenAIRequestFields(req); len(got) != 1 || got[0] != "safeguards" {
+		t.Fatalf("ignoredOpenAIRequestFields() = %#v, want safeguards", got)
 	}
 }
 
@@ -568,7 +577,6 @@ func TestGatewayIgnoresUnknownAcceptedOptionFields(t *testing.T) {
 	tests := []string{
 		`{"model":"gpt","metadata":{"trace_id":"abc"},"messages":[{"role":"user","content":"hello"}]}`,
 		`{"model":"gpt","output_config":{"verbosity":"high"},"messages":[{"role":"user","content":"hello"}]}`,
-		`{"model":"gpt","safeguards":{"enabled":true},"messages":[{"role":"user","content":"hello"}]}`,
 	}
 	for _, body := range tests {
 		body := body

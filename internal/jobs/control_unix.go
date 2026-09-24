@@ -34,13 +34,6 @@ func (o *Owner) ExpectedModel(model string) error {
 	return o.store.Write(o.record)
 }
 
-func (o *Owner) ClaudeProfileDir(directory string) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.record.ClaudeProfileDir = directory
-	return o.store.Write(o.record)
-}
-
 func (o *Owner) Backend(backend string) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()

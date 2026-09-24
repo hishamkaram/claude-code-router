@@ -11,6 +11,13 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/cua"
 )
 
+func TestValidateModelAliasRejectsFamilyOverride(t *testing.T) {
+	t.Parallel()
+	if err := validateName("model alias", "ccr-family-SONNET"); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("validateName() error = %v, want reserved family identifier rejection", err)
+	}
+}
+
 func TestParseLaunchInvocationParsesCUAFlags(t *testing.T) {
 	t.Parallel()
 
@@ -69,180 +76,6 @@ func TestParseLaunchInvocationDefaultsAuthModeAuto(t *testing.T) {
 	}
 	if invocation.authMode != launchAuthModeAuto || !invocation.authModeSet {
 		t.Fatalf("explicit auth mode = %q set=%t, want auto true", invocation.authMode, invocation.authModeSet)
-	}
-}
-
-func TestNativeClaudeResumeSessionRejectsDuplicateOptions(t *testing.T) {
-	t.Parallel()
-	first := "550e8400-e29b-41d4-a716-446655440000"
-	second := "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
-	for _, args := range [][]string{
-		{"--resume", first, "--resume", second},
-		{"--resume=" + first, "-r", second},
-		{"-r" + first, "--resume=" + second},
-	} {
-		if _, err := nativeClaudeResumeSession(args); err == nil || !strings.Contains(err.Error(), "duplicate") {
-			t.Fatalf("nativeClaudeResumeSession(%q) error = %v, want duplicate-option refusal", args, err)
-		}
-	}
-}
-
-func TestClaudeSessionScannersSkipValueTakingPassthroughOptions(t *testing.T) {
-	t.Parallel()
-	const sessionID = "11111111-1111-4111-8111-111111111111"
-	args := []string{"--system-prompt", "--session-id", sessionID}
-	if got, err := nativeClaudeResumeSession(args); err != nil || got != "" {
-		t.Fatalf("nativeClaudeResumeSession(%#v) = %q, %v; want no session control", args, got, err)
-	}
-	if got, err := nativeClaudeSessionID(args); err != nil || got != "" {
-		t.Fatalf("nativeClaudeSessionID(%#v) = %q, %v; want no session control", args, got, err)
-	}
-	if option := detachedNativeSessionOption(args); option != "" {
-		t.Fatalf("detachedNativeSessionOption(%#v) = %q, want no session control", args, option)
-	}
-}
-
-func TestParseLaunchInvocationPreservesClaudeOptionValuesThatLookLikeCCRFlags(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		args       []string
-		wantClaude []string
-		wantDetach bool
-		wantModel  string
-		wantPrint  bool
-	}{
-		{
-			name:       "system prompt consumes model and detach",
-			args:       []string{"--system-prompt", "--model", "--detach"},
-			wantClaude: []string{"--system-prompt", "--model"},
-			wantDetach: true,
-		},
-		{
-			name:       "system prompt consumes help",
-			args:       []string{"--system-prompt", "--help", "--no-history"},
-			wantClaude: []string{"--system-prompt", "--help"},
-		},
-		{
-			name:       "owned model still parses before Claude values",
-			args:       []string{"--model", "gpt", "--system-prompt", "--detach", "--print"},
-			wantClaude: []string{"--system-prompt", "--detach"},
-			wantModel:  "gpt",
-			wantPrint:  true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			invocation, err := parseLaunchInvocation(tt.args)
-			if err != nil {
-				t.Fatalf("parseLaunchInvocation() error = %v", err)
-			}
-			if !slices.Equal(invocation.claudeArgs, tt.wantClaude) {
-				t.Fatalf("claude args = %#v, want %#v", invocation.claudeArgs, tt.wantClaude)
-			}
-			if invocation.detach != tt.wantDetach {
-				t.Fatalf("detach = %t, want %t", invocation.detach, tt.wantDetach)
-			}
-			if invocation.modelAlias != tt.wantModel {
-				t.Fatalf("model alias = %q, want %q", invocation.modelAlias, tt.wantModel)
-			}
-			if invocation.printMode != tt.wantPrint {
-				t.Fatalf("print mode = %t, want %t", invocation.printMode, tt.wantPrint)
-			}
-		})
-	}
-}
-
-func TestResolveClaudeLaunchProfilePlanRejectsResumeWithoutPersistence(t *testing.T) {
-	_, err := resolveClaudeLaunchProfilePlan(launchInvocation{
-		claudeArgs: []string{
-			"--resume", "11111111-1111-4111-8111-111111111111",
-			"--no-session-persistence",
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "--resume cannot be combined with --no-session-persistence") {
-		t.Fatalf("resolveClaudeLaunchProfilePlan() error = %v, want explicit persistence conflict", err)
-	}
-}
-
-func TestResolveClaudeLaunchProfilePlanRejectsConflictingResumeAndSessionID(t *testing.T) {
-	_, err := resolveClaudeLaunchProfilePlan(launchInvocation{
-		claudeArgs: []string{
-			"--resume", "11111111-1111-4111-8111-111111111111",
-			"--session-id", "22222222-2222-4222-8222-222222222222",
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "--resume cannot be combined with --session-id") {
-		t.Fatalf("resolveClaudeLaunchProfilePlan() error = %v, want conflicting session identity refusal", err)
-	}
-}
-
-func TestParseLaunchInvocationRejectsConflictingResumeAndSessionID(t *testing.T) {
-	_, err := parseLaunchInvocation([]string{
-		"--resume", "11111111-1111-4111-8111-111111111111",
-		"--session-id", "22222222-2222-4222-8222-222222222222",
-	})
-	if err == nil || !strings.Contains(err.Error(), "--resume cannot be combined with --session-id") {
-		t.Fatalf("parseLaunchInvocation() error = %v, want conflicting session identity refusal", err)
-	}
-}
-
-func TestParseLaunchInvocationRejectsResumeWithoutPersistenceBeforeStartup(t *testing.T) {
-	_, err := parseLaunchInvocation([]string{
-		"--resume", "11111111-1111-4111-8111-111111111111",
-		"--no-session-persistence",
-	})
-	if err == nil || !strings.Contains(err.Error(), "--resume cannot be combined with --no-session-persistence") {
-		t.Fatalf("parseLaunchInvocation() error = %v, want pre-startup persistence conflict", err)
-	}
-}
-
-func TestResolveClaudeLaunchProfilePlanRejectsForkedSession(t *testing.T) {
-	_, err := resolveClaudeLaunchProfilePlan(launchInvocation{
-		claudeArgs: []string{
-			"--resume", "11111111-1111-4111-8111-111111111111",
-			"--fork-session",
-		},
-	})
-	if err == nil || !strings.Contains(err.Error(), "--fork-session is not supported through ccr") {
-		t.Fatalf("resolveClaudeLaunchProfilePlan() error = %v, want explicit fork-session refusal", err)
-	}
-}
-
-func TestParseLaunchInvocationRejectsPRLinkedSessionBeforeStartup(t *testing.T) {
-	_, err := parseLaunchInvocation([]string{"--from-pr", "123"})
-	if err == nil || !strings.Contains(err.Error(), "--from-pr is not supported through ccr") {
-		t.Fatalf("parseLaunchInvocation() error = %v, want explicit PR-session refusal", err)
-	}
-}
-
-func TestResolveClaudeLaunchProfilePlanRejectsPRLinkedSession(t *testing.T) {
-	_, err := resolveClaudeLaunchProfilePlan(launchInvocation{claudeArgs: []string{"--from-pr", "123"}})
-	if err == nil || !strings.Contains(err.Error(), "--from-pr is not supported through ccr") {
-		t.Fatalf("resolveClaudeLaunchProfilePlan() error = %v, want explicit PR-session refusal", err)
-	}
-}
-
-func TestParseLaunchInvocationRejectsForkedSessionBeforeStartup(t *testing.T) {
-	_, err := parseLaunchInvocation([]string{"--fork-session"})
-	if err == nil || !strings.Contains(err.Error(), "--fork-session is not supported through ccr") {
-		t.Fatalf("parseLaunchInvocation() error = %v, want preflight fork-session refusal", err)
-	}
-}
-
-func TestParseLaunchInvocationRejectsTeleportBeforeProfilePlanning(t *testing.T) {
-	for _, args := range [][]string{{"--teleport"}, {"--teleport", "cloud-session"}, {"--teleport=cloud-session"}} {
-		_, err := parseLaunchInvocation(args)
-		if err == nil || !strings.Contains(err.Error(), "--teleport is not supported through ccr") {
-			t.Fatalf("parseLaunchInvocation(%#v) error = %v, want explicit teleport refusal", args, err)
-		}
-	}
-}
-
-func TestResolveClaudeLaunchProfilePlanRejectsTeleportBeforeGeneratingSessionID(t *testing.T) {
-	_, err := resolveClaudeLaunchProfilePlan(launchInvocation{claudeArgs: []string{"--teleport", "cloud-session"}})
-	if err == nil || !strings.Contains(err.Error(), "--teleport is not supported through ccr") {
-		t.Fatalf("resolveClaudeLaunchProfilePlan() error = %v, want explicit teleport refusal", err)
 	}
 }
 
@@ -355,11 +188,6 @@ func TestParseLaunchInvocationRejectsInvalidCUAExternalExecutorFlags(t *testing.
 		{
 			name:    "external token environment rejects Claude OAuth scopes",
 			args:    []string{"--ccr-cua-mode=managed", "--ccr-cua-executor=external:browser", "--ccr-cua-external-url=https://executor.example/cua", "--ccr-cua-external-token-env=CLAUDE_CODE_OAUTH_SCOPES"},
-			wantErr: "reserved by CCR or Claude Code",
-		},
-		{
-			name:    "external token environment rejects Claude config directory",
-			args:    []string{"--ccr-cua-mode=managed", "--ccr-cua-executor=external:browser", "--ccr-cua-external-url=https://executor.example/cua", "--ccr-cua-external-token-env=CLAUDE_CONFIG_DIR"},
 			wantErr: "reserved by CCR or Claude Code",
 		},
 		{
@@ -498,77 +326,5 @@ func TestLaunchCUAFlagErrorsFailBeforeDatabaseOpen(t *testing.T) {
 				t.Fatalf("database exists after CUA parse error: stat err=%v", statErr)
 			}
 		})
-	}
-}
-
-func TestNativeClaudeResumeSessionRequiresExplicitSessionID(t *testing.T) {
-	t.Parallel()
-	const sessionID = "11111111-1111-4111-8111-111111111111"
-	for _, test := range []struct {
-		name string
-		args []string
-		want string
-	}{
-		{name: "long", args: []string{"--resume", sessionID}, want: sessionID},
-		{name: "long inline", args: []string{"--resume=" + sessionID}, want: sessionID},
-		{name: "short inline", args: []string{"-r" + sessionID}, want: sessionID},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := nativeClaudeResumeSession(test.args)
-			if err != nil || got != test.want {
-				t.Fatalf("nativeClaudeResumeSession(%#v) = %q, %v; want %q", test.args, got, err, test.want)
-			}
-		})
-	}
-	for _, args := range [][]string{{"--resume"}, {"--resume="}, {"--resume", "--output-format"}, {"-r="}, {"-r", "--output-format"}, {"--continue"}, {"-c"}} {
-		if _, err := nativeClaudeResumeSession(args); err == nil {
-			t.Fatalf("nativeClaudeResumeSession(%#v) succeeded, want explicit isolation error", args)
-		}
-	}
-}
-
-func TestNativeClaudeResumeSessionStopsAtForwardedClaudeSeparator(t *testing.T) {
-	t.Parallel()
-	for _, args := range [][]string{{"--", "--resume", "session-id"}, {"--", "--continue"}} {
-		if got, err := nativeClaudeResumeSession(args); err != nil || got != "" {
-			t.Fatalf("nativeClaudeResumeSession(%#v) = %q, %v; forwarded prompt was interpreted as CCR launch options", args, got, err)
-		}
-	}
-}
-
-func TestNativeClaudeSessionIDValidatesExplicitIdentity(t *testing.T) {
-	t.Parallel()
-	const sessionID = "11111111-1111-4111-8111-111111111111"
-	for _, args := range [][]string{
-		{"--session-id", sessionID},
-		{"--session-id=" + sessionID},
-	} {
-		got, err := nativeClaudeSessionID(args)
-		if err != nil || got != sessionID {
-			t.Fatalf("nativeClaudeSessionID(%#v) = %q, %v; want %q", args, got, err, sessionID)
-		}
-	}
-	for _, args := range [][]string{
-		{"--session-id"},
-		{"--session-id="},
-		{"--session-id", "not-a-uuid"},
-		{"--session-id", sessionID, "--session-id", sessionID},
-	} {
-		if _, err := nativeClaudeSessionID(args); err == nil {
-			t.Fatalf("nativeClaudeSessionID(%#v) succeeded, want validation error", args)
-		}
-	}
-}
-
-func TestClaudeLaunchDisablesSessionPersistenceOnlyForExplicitFlag(t *testing.T) {
-	t.Parallel()
-	if !claudeLaunchDisablesSessionPersistence([]string{"--no-session-persistence"}) {
-		t.Fatal("--no-session-persistence was not recognized")
-	}
-	if !claudeLaunchDisablesSessionPersistence([]string{"--no-session-persistence=true"}) {
-		t.Fatal("--no-session-persistence=true was not recognized")
-	}
-	if claudeLaunchDisablesSessionPersistence([]string{"--no-session-persistence=false"}) {
-		t.Fatal("--no-session-persistence=false disabled persistence")
 	}
 }

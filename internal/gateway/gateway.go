@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/cua"
@@ -52,17 +51,15 @@ type Config struct {
 }
 
 type Server struct {
-	httpServer       *http.Server
-	listener         net.Listener
-	url              string
-	upstream         *upstreamTransport
-	cancelRequests   context.CancelFunc
-	serveDone        chan struct{}
-	childCleanupDone <-chan struct{}
-	shutdownMu       sync.Mutex
-	shutdownErr      error
-	shutdownStarted  atomic.Bool
-	serveErr         error // Written by Serve; read only after serveDone closes.
+	httpServer     *http.Server
+	listener       net.Listener
+	url            string
+	upstream       *upstreamTransport
+	cancelRequests context.CancelFunc
+	serveDone      chan struct{}
+	shutdownMu     sync.Mutex
+	shutdownErr    error
+	serveErr       error // Written by Serve; read only after serveDone closes.
 }
 
 func NewToken() (string, error) {
@@ -109,36 +106,25 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		upstreamOwned: upstream != nil,
 		activeModel:   newActiveModelSelection(cfg.DefaultModelAlias),
 	}
-	childCleanupDone := handler.activeModel.startAgentChildCleanup(requestContext)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return requestContext },
 	}
 	gateway := &Server{
-		httpServer:       server,
-		listener:         listener,
-		url:              "http://" + listener.Addr().String(),
-		upstream:         upstream,
-		cancelRequests:   cancelRequests,
-		serveDone:        make(chan struct{}),
-		childCleanupDone: childCleanupDone,
+		httpServer:     server,
+		listener:       listener,
+		url:            "http://" + listener.Addr().String(),
+		upstream:       upstream,
+		cancelRequests: cancelRequests,
+		serveDone:      make(chan struct{}),
 	}
 	go func() {
 		defer close(gateway.serveDone)
-		serveErr := server.Serve(listener)
-		if !errors.Is(serveErr, http.ErrServerClosed) {
+		if serveErr := server.Serve(listener); !errors.Is(serveErr, http.ErrServerClosed) {
 			gateway.serveErr = serveErr
 			gateway.releaseUpstream()
 			_ = server.Close()
-			return
-		}
-		// A normal Shutdown deliberately lets active handlers drain before the
-		// request context is canceled. If Serve stopped for another reason, no
-		// owner will reach Shutdown to release the child-cleanup worker, so close
-		// the owned lifecycle here.
-		if !gateway.shutdownStarted.Load() {
-			gateway.releaseUpstream()
 		}
 	}()
 
@@ -150,7 +136,6 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("gateway.Start: context canceled while starting: %w", ctx.Err())
 	case <-gateway.serveDone:
 		gateway.releaseUpstream()
-		gateway.waitForChildCleanup()
 		if gateway.serveErr != nil {
 			return nil, fmt.Errorf("gateway.Start: serving: %w", gateway.serveErr)
 		}
@@ -172,7 +157,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s == nil || s.httpServer == nil {
 		return nil
 	}
-	s.shutdownStarted.Store(true)
 	err := s.httpServer.Shutdown(ctx)
 	if err != nil {
 		if s.cancelRequests != nil {
@@ -184,7 +168,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.serveDone != nil {
 		<-s.serveDone
 	}
-	s.waitForChildCleanup()
 	s.shutdownMu.Lock()
 	defer s.shutdownMu.Unlock()
 	if s.shutdownErr == nil && err != nil {
@@ -199,12 +182,6 @@ func (s *Server) releaseUpstream() {
 	}
 	if s.upstream != nil {
 		s.upstream.close()
-	}
-}
-
-func (s *Server) waitForChildCleanup() {
-	if s.childCleanupDone != nil {
-		<-s.childCleanupDone
 	}
 }
 
@@ -295,12 +272,10 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var outputErr *requestValidationError
 	req, outputClamp, outputErr = normalizeModelOutputLimit(route, req)
 	if outputErr != nil {
-		route.rollbackAgentChild()
 		writeAnthropicError(w, outputErr.status, outputErr.message)
 		return
 	}
 	if capabilityErr := h.validateManagedRouteMessageCapabilities(route, req); capabilityErr != nil {
-		route.rollbackAgentChild()
 		writeAnthropicError(w, capabilityErr.status, capabilityErr.message)
 		return
 	}
@@ -316,36 +291,32 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 				!explicitlyFalse(route.modelCapabilities.SupportsToolChoice),
 		)
 		if err != nil {
-			route.rollbackAgentChild()
 			writeAnthropicError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if outputClamp != nil {
 			passBody, err = rewriteAnthropicRequestMaxTokens(passBody, outputClamp.applied)
 			if err != nil {
-				route.rollbackAgentChild()
 				writeAnthropicError(w, http.StatusBadRequest, err.Error())
 				return
 			}
 		}
-		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.usesClaudeSubscriptionAuth(), req.Stream, &completion, &route)
+		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, req.Stream, &completion)
 		return
 	case routeOpenAIResponses:
-		usage = h.handleOpenAIResponses(w, r, req, &route, &completion)
+		usage = h.handleOpenAIResponses(w, r, req, route, &completion)
 		return
 	case routeOpenAI:
-		usage = h.handleOpenAIChat(w, r, req, &route, &completion)
+		usage = h.handleOpenAIChat(w, r, req, route, &completion)
 		return
 	default:
-		route.rollbackAgentChild()
 		writeAnthropicError(w, http.StatusInternalServerError, "gateway selected an unknown route")
 		return
 	}
 }
 
-func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req anthropicRequest, route *messageRoute, completion *routeCompletionState) observability.TokenUsage {
+func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute, completion *routeCompletionState) observability.TokenUsage {
 	var usage observability.TokenUsage
-	defer route.rollbackAgentChild()
 	if err := h.validateOpenAIMessageRequest(&req); err != nil {
 		writeAnthropicError(w, err.status, err.message)
 		return usage
@@ -377,43 +348,30 @@ func (h *handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request, req a
 		return usage
 	}
 	if req.Stream {
-		return h.handleOpenAIChatStream(w, r, route, completion, apiKey, openAIReq, messageID)
-	}
-	return h.handleOpenAIChatResponse(w, r, route, apiKey, openAIReq, messageID)
-}
-
-func (h *handler) handleOpenAIChatStream(w http.ResponseWriter, r *http.Request, route *messageRoute, completion *routeCompletionState, apiKey string, openAIReq openAIChatRequest, messageID string) observability.TokenUsage {
-	adapter := newOpenAIChatStreamAdapter(route.responseModel, apiKey, messageID)
-	adapter.agentChildMarker = h.activeModel.agentChildMarker(claudeCodeSessionID(r), route.agentChildSpawnAlias())
-	adapter.inputTokens = estimateTranslatedInputTokens(openAIReq)
-	result := runTranslatedProviderStream(
-		r.Context(),
-		w,
-		func(ctx context.Context, events chan<- upstreamStreamEvent) {
-			h.produceOpenAIChatStream(ctx, route.provider, apiKey, openAIReq, events)
-		},
-		adapter,
-	)
-	recordStreamCompletion(completion, result)
-	if result.TerminalPhase == "completed" {
-		route.commitAgentChild()
-	}
-	if !result.Committed {
-		status := result.HTTPStatus
-		if status < http.StatusBadRequest || status > 599 {
-			status = http.StatusBadGateway
+		adapter := newOpenAIChatStreamAdapter(route.responseModel, apiKey, messageID)
+		adapter.inputTokens = estimateTranslatedInputTokens(openAIReq)
+		result := runTranslatedProviderStream(
+			r.Context(),
+			w,
+			func(ctx context.Context, events chan<- upstreamStreamEvent) {
+				h.produceOpenAIChatStream(ctx, route.provider, apiKey, openAIReq, events)
+			},
+			adapter,
+		)
+		recordStreamCompletion(completion, result)
+		if !result.Committed {
+			status := result.HTTPStatus
+			if status < http.StatusBadRequest || status > 599 {
+				status = http.StatusBadGateway
+			}
+			message := result.Message
+			if message == "" {
+				message = "OpenAI-compatible provider stream failed"
+			}
+			writeAnthropicError(w, status, message)
 		}
-		message := result.Message
-		if message == "" {
-			message = "OpenAI-compatible provider stream failed"
-		}
-		writeAnthropicError(w, status, message)
+		return result.Usage
 	}
-	return result.Usage
-}
-
-func (h *handler) handleOpenAIChatResponse(w http.ResponseWriter, r *http.Request, route *messageRoute, apiKey string, openAIReq openAIChatRequest, messageID string) observability.TokenUsage {
-	var usage observability.TokenUsage
 	resp, err := h.callOpenAICompatible(r.Context(), route.provider, apiKey, openAIReq)
 	if err != nil {
 		var statusErr *openAIProviderStatusError
@@ -431,26 +389,7 @@ func (h *handler) handleOpenAIChatResponse(w http.ResponseWriter, r *http.Reques
 		writeAnthropicError(w, http.StatusBadGateway, err.Error())
 		return usage
 	}
-	translated := toAnthropicResponse(route.responseModel, messageID, resp, finishReason)
-	var rollbackAgentChildren func()
-	var registrationErr error
-	if route.agentChildSpawnAlias() != "" {
-		rollbackAgentChildren, registrationErr = h.activeModel.registerAgentChildDescriptorsForNewWork(
-			claudeCodeSessionID(r),
-			agentChildDescriptorsFromValue(translated),
-		)
-	}
-	if registrationErr != nil {
-		writeAnthropicError(w, http.StatusServiceUnavailable, registrationErr.Error())
-		return usage
-	}
-	if err := writeJSON(w, http.StatusOK, translated); err != nil {
-		if rollbackAgentChildren != nil {
-			rollbackAgentChildren()
-		}
-		return usage
-	}
-	route.commitAgentChild()
+	writeJSON(w, http.StatusOK, toAnthropicResponse(route.responseModel, messageID, resp, finishReason))
 	return usage
 }
 
@@ -585,22 +524,17 @@ func writeAnthropicAuthenticationError(w http.ResponseWriter, status int, messag
 }
 
 func writeAnthropicErrorType(w http.ResponseWriter, status int, errorType, message string) {
-	if err := writeJSON(w, status, map[string]any{
+	writeJSON(w, status, map[string]any{
 		"type": "error",
 		"error": map[string]string{
 			"type":    errorType,
 			"message": message,
 		},
-	}); err != nil {
-		return
-	}
+	})
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) error {
+func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		return fmt.Errorf("writing JSON response: %w", err)
-	}
-	return nil
+	_ = json.NewEncoder(w).Encode(payload)
 }

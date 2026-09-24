@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/store"
@@ -108,6 +109,9 @@ func resolveProviderCapabilities(providerType string) providers.Capabilities {
 func validateName(label, value string) error {
 	if strings.TrimSpace(value) == "" {
 		return fmt.Errorf("%s is required", label)
+	}
+	if label == "model alias" && modelrouting.IsFamilyOverride(value) {
+		return fmt.Errorf("model alias %q is reserved for CCR model-family routing", value)
 	}
 	matched, err := regexp.MatchString(`^[a-z][a-z0-9_-]{1,63}$`, value)
 	if err != nil {

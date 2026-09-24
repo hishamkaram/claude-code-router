@@ -162,32 +162,6 @@ func TestAnthropicResponseFromResponsesNormalizesAgentInput(t *testing.T) {
 	}
 }
 
-func TestAnthropicResponseFromResponsesNormalizesTaskInput(t *testing.T) {
-	t.Parallel()
-
-	response, err := AnthropicResponseFromResponsesJSON([]byte(`{
-  "id":"resp_task",
-  "model":"gpt",
-  "output":[{
-    "type":"function_call",
-    "call_id":"call_task",
-    "name":"Task",
-    "arguments":"{\"prompt\":\"run the task\",\"agent_type\":\"general-purpose\",\"model\":\"haiku\",\"extra\":\"ignored\"}"
-  }]
-}`))
-	if err != nil {
-		t.Fatalf("AnthropicResponseFromResponsesJSON() error = %v", err)
-	}
-	input, ok := response.Content[0].Input.(map[string]any)
-	if !ok || input["prompt"] != "run the task" || input["description"] != "run the task" ||
-		input["subagent_type"] != "general-purpose" || input["model"] != "haiku" {
-		t.Fatalf("Task input = %#v", response.Content[0].Input)
-	}
-	if _, found := input["extra"]; found {
-		t.Fatalf("Task input retained unknown field: %#v", input)
-	}
-}
-
 func TestAnthropicResponseFromResponsesTurnsInvalidAgentInputIntoCompatibilityText(t *testing.T) {
 	t.Parallel()
 
@@ -210,71 +184,6 @@ func TestAnthropicResponseFromResponsesTurnsInvalidAgentInputIntoCompatibilityTe
 	if !strings.Contains(response.Content[0].Text, "invalid Agent tool input") ||
 		!strings.Contains(response.Content[0].Text, "prompt and description") {
 		t.Fatalf("compatibility text = %q", response.Content[0].Text)
-	}
-}
-
-func TestAnthropicResponseFromResponsesTurnsInvalidTaskInputIntoCompatibilityText(t *testing.T) {
-	t.Parallel()
-
-	response, err := AnthropicResponseFromResponsesJSON([]byte(`{
-  "id":"resp_task_invalid",
-  "model":"gpt",
-  "output":[{
-    "type":"function_call",
-    "call_id":"call_task_invalid",
-    "name":"Task",
-    "arguments":"{}"
-  }]
-}`))
-	if err != nil {
-		t.Fatalf("AnthropicResponseFromResponsesJSON() error = %v", err)
-	}
-	if response.StopReason != "end_turn" || len(response.Content) != 1 || response.Content[0].Type != "text" {
-		t.Fatalf("response = %#v", response)
-	}
-	if !strings.Contains(response.Content[0].Text, "invalid Task tool input") {
-		t.Fatalf("compatibility text = %q, want Task label", response.Content[0].Text)
-	}
-}
-
-func TestAnthropicResponseFromResponsesTurnsInvalidWorkflowInputIntoCompatibilityText(t *testing.T) {
-	t.Parallel()
-
-	response, err := AnthropicResponseFromResponsesJSON([]byte(`{
-  "id":"resp_workflow",
-  "model":"gpt",
-  "output":[{
-    "type":"function_call",
-    "call_id":"call_workflow",
-    "name":"Workflow",
-    "arguments":"{}"
-  }]
-}`))
-	if err != nil {
-		t.Fatalf("AnthropicResponseFromResponsesJSON() error = %v", err)
-	}
-	if response.StopReason != "end_turn" || len(response.Content) != 1 || response.Content[0].Type != "text" {
-		t.Fatalf("response = %#v", response)
-	}
-	if !strings.Contains(response.Content[0].Text, "invalid Workflow tool input") ||
-		!strings.Contains(response.Content[0].Text, "workflow was not started") {
-		t.Fatalf("compatibility text = %q", response.Content[0].Text)
-	}
-}
-
-func TestAnthropicResponseFromResponsesRejectsMixedMalformedChildAndToolTurn(t *testing.T) {
-	t.Parallel()
-
-	_, err := AnthropicResponseFromResponsesJSON([]byte(`{
-  "id":"resp_mixed_child",
-  "model":"gpt",
-  "output":[
-    {"type":"function_call","call_id":"call_agent","name":"Agent","arguments":"{}"},
-    {"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"query\":\"routing\"}"}
-  ]
-}`))
-	if !errors.Is(err, ErrMalformedProviderOutput) || !strings.Contains(err.Error(), "malformed Agent") {
-		t.Fatalf("AnthropicResponseFromResponsesJSON() error = %v, want mixed child/tool rejection", err)
 	}
 }
 
@@ -344,21 +253,6 @@ func TestAnthropicResponseFromResponsesPreservesIncompleteAndRefusalSemantics(t 
 				t.Fatalf("response = %#v", response)
 			}
 		})
-	}
-}
-
-func TestAnthropicResponseFromResponsesPreservesNativeAgentModel(t *testing.T) {
-	var raw Response
-	if err := json.Unmarshal([]byte(`{"id":"resp_agent","model":"gpt","output":[{"type":"function_call","call_id":"call_agent","name":"Agent","arguments":"{\"prompt\":\"work\",\"description\":\"work\",\"model\":\"sonnet\"}"}]}`), &raw); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	response, err := AnthropicResponseFromResponses(&raw)
-	if err != nil {
-		t.Fatalf("AnthropicResponseFromResponses() error = %v", err)
-	}
-	input, ok := response.Content[0].Input.(map[string]any)
-	if !ok || input["model"] != "sonnet" {
-		t.Fatalf("Agent model = %#v, want native Claude model", response.Content[0].Input)
 	}
 }
 

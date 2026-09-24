@@ -134,43 +134,6 @@ func TestAnthropicContentBlocksRejectsInvalidAgentToolInput(t *testing.T) {
 	}
 }
 
-func TestAnthropicContentBlocksRejectsDescriptionOnlyAgentToolInput(t *testing.T) {
-	var resp openAIChatResponse
-	raw := `{"id":"chatcmpl-description-only","choices":[{"message":{"tool_calls":[{"id":"call-description-only","type":"function","function":{"name":"Agent","arguments":"{\"description\":\"child task\"}"}}]},"finish_reason":"tool_calls"}]}`
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-
-	blocks, stopReason := anthropicContentBlocksFromOpenAI(resp, "tool_use")
-	if stopReason != "end_turn" || len(blocks) != 1 || blocks[0]["type"] != "text" {
-		t.Fatalf("blocks=%#v stopReason=%q, want visible text", blocks, stopReason)
-	}
-	text, _ := blocks[0]["text"].(string)
-	if !strings.Contains(text, "missing required prompt") {
-		t.Fatalf("text=%q, want missing-prompt compatibility error", text)
-	}
-}
-
-func TestAnthropicContentBlocksRejectsInvalidWorkflowToolInput(t *testing.T) {
-	var resp openAIChatResponse
-	raw := `{"id":"chatcmpl-test","choices":[{"message":{"tool_calls":[{"id":"call-empty-workflow","type":"function","function":{"name":"Workflow","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-
-	blocks, stopReason := anthropicContentBlocksFromOpenAI(resp, "tool_use")
-	if stopReason != "end_turn" {
-		t.Fatalf("stopReason = %q, want end_turn", stopReason)
-	}
-	if len(blocks) != 1 || blocks[0]["type"] != "text" {
-		t.Fatalf("blocks = %#v, want one text block", blocks)
-	}
-	text, _ := blocks[0]["text"].(string)
-	if !strings.Contains(text, "invalid Workflow tool input") || !strings.Contains(text, "workflow was not started") {
-		t.Fatalf("text = %q, want visible Workflow compatibility error", text)
-	}
-}
-
 func TestAnthropicContentBlocksKeepsValidAgentToolInput(t *testing.T) {
 	var resp openAIChatResponse
 	raw := `{"id":"chatcmpl-test","choices":[{"message":{"tool_calls":[{"id":"call-valid-agent","type":"function","function":{"name":"Agent","arguments":"{\"prompt\":\"find latest chatgpt news\",\"subagent_type\":\"general-purpose\"}"}}]},"finish_reason":"tool_calls"}]}`

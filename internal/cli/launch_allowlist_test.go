@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -68,97 +69,6 @@ func TestLaunchExtendsExistingClaudeAvailableModelsForCCRAliases(t *testing.T) {
 	}
 	if slices.Contains(payload.AvailableModels, "anthropic.ccr.legacy-control") {
 		t.Fatalf("availableModels includes legacy LiteLLM control alias: %#v", payload.AvailableModels)
-	}
-}
-
-func TestLaunchModelPickerMapsCCRAliasWithoutOverwritingNativeOptions(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	claudeDir := filepath.Join(home, ".claude")
-	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	settings := `{"modelPicker":{"options":[{"model":"native-model","label":"Native"},{"model":"anthropic.ccr.gpt","label":"stale"}],"replaceBuiltInOptions":true}}`
-	if err := os.WriteFile(filepath.Join(claudeDir, "settings.json"), []byte(settings), 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	got, err := launchModelPickerOptions([]store.Model{{Alias: "gpt", ProviderModel: "gpt-5"}})
-	if err != nil {
-		t.Fatalf("launchModelPickerOptions() error = %v", err)
-	}
-	encoded, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	var picker struct {
-		Options               []claudeModelPickerOption `json:"options"`
-		ReplaceBuiltInOptions bool                      `json:"replaceBuiltInOptions"`
-	}
-	if err := json.Unmarshal(encoded, &picker); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if !picker.ReplaceBuiltInOptions {
-		t.Fatal("replaceBuiltInOptions = false, want native setting preserved")
-	}
-	if len(picker.Options) != 2 {
-		t.Fatalf("model picker options = %#v, want native row plus one CCR row", picker.Options)
-	}
-	if picker.Options[0].Model != "native-model" || picker.Options[0].Label != "Native" {
-		t.Fatalf("native picker option = %#v, want preserved native option", picker.Options[0])
-	}
-	gotCCR := picker.Options[1]
-	if gotCCR.Model != "anthropic.ccr.gpt" || gotCCR.Label != "CCR gpt" || gotCCR.Description != "CCR-routed provider model gpt-5" || gotCCR.BehavesAs != claudeCCRModelBehavesAs {
-		t.Fatalf("CCR picker option = %#v, want explicit CCR mapping", gotCCR)
-	}
-}
-
-func TestLaunchModelPickerPreservesReplacementAcrossLayeredSettings(t *testing.T) {
-	configDir := t.TempDir()
-	workspace := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-	t.Chdir(workspace)
-	if err := os.MkdirAll(filepath.Join(workspace, ".claude"), 0o700); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"modelPicker":{"replaceBuiltInOptions":true}}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(global) error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(workspace, ".claude", "settings.json"), []byte(`{"modelPicker":{"options":[{"model":"workspace-native","label":"Workspace"}]}}`), 0o600); err != nil {
-		t.Fatalf("WriteFile(workspace) error = %v", err)
-	}
-
-	got, err := launchModelPickerOptions([]store.Model{{Alias: "gpt", ProviderModel: "gpt-5"}})
-	if err != nil {
-		t.Fatalf("launchModelPickerOptions() error = %v", err)
-	}
-	encoded, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("Marshal() error = %v", err)
-	}
-	var picker struct {
-		ReplaceBuiltInOptions bool `json:"replaceBuiltInOptions"`
-	}
-	if err := json.Unmarshal(encoded, &picker); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if !picker.ReplaceBuiltInOptions {
-		t.Fatalf("replaceBuiltInOptions = false, want earlier layered setting preserved; payload=%s", encoded)
-	}
-}
-
-func TestClaudeSettingsPathsDeduplicateConfiguredWorkspaceDirectory(t *testing.T) {
-	workspace := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(workspace, ".claude"))
-	t.Chdir(workspace)
-
-	paths := claudeSettingsPaths()
-	want := []string{
-		filepath.Join(workspace, ".claude", "settings.json"),
-		filepath.Join(workspace, ".claude", "settings.local.json"),
-	}
-	if !slices.Equal(paths, want) {
-		t.Fatalf("claudeSettingsPaths() = %#v, want %#v", paths, want)
 	}
 }
 
@@ -400,69 +310,6 @@ func TestLaunchReadsAvailableModelsFromCustomClaudeConfigDir(t *testing.T) {
 	}
 }
 
-func TestLaunchSettingsUseDependencyClaudeConfigDirOverEnvironment(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	environmentConfigDir := filepath.Join(t.TempDir(), "environment-claude")
-	dependencyConfigDir := filepath.Join(t.TempDir(), "dependency-claude")
-	for _, fixture := range []struct {
-		dir      string
-		settings string
-	}{
-		{dir: environmentConfigDir, settings: `{"availableModels":["environment-model"],"modelPicker":{"options":[{"model":"environment-picker"}]}}`},
-		{dir: dependencyConfigDir, settings: `{"availableModels":["dependency-model"],"modelPicker":{"options":[{"model":"dependency-picker"}]}}`},
-	} {
-		if err := os.MkdirAll(fixture.dir, 0o700); err != nil {
-			t.Fatalf("MkdirAll(%s) error = %v", fixture.dir, err)
-		}
-		if err := os.WriteFile(filepath.Join(fixture.dir, "settings.json"), []byte(fixture.settings), 0o600); err != nil {
-			t.Fatalf("WriteFile(%s) error = %v", fixture.dir, err)
-		}
-	}
-	t.Setenv("CLAUDE_CONFIG_DIR", environmentConfigDir)
-
-	server := newModelsServer(t, []string{"gpt-5"})
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
-		t.Fatalf("provider add error = %v", err)
-	}
-	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
-		t.Fatalf("model add error = %v", err)
-	}
-
-	launcher := &fakeLauncher{pid: os.Getpid()}
-	if _, _, err := runCommandWithDeps(t, Dependencies{
-		ClaudeConfigDir: dependencyConfigDir,
-		Launcher:        launcher,
-	}, "--db", dbPath, "launch"); err != nil {
-		t.Fatalf("launch error = %v", err)
-	}
-	settingsJSON, ok := launcher.settingsArgValue()
-	if !ok {
-		t.Fatalf("launch args missing --settings: %#v", launcher.args)
-	}
-	var payload struct {
-		AvailableModels []string `json:"availableModels"`
-		ModelPicker     struct {
-			Options []struct {
-				Model string `json:"model"`
-			} `json:"options"`
-		} `json:"modelPicker"`
-	}
-	if err := json.Unmarshal([]byte(settingsJSON), &payload); err != nil {
-		t.Fatalf("settings JSON %q did not parse: %v", settingsJSON, err)
-	}
-	if !slices.Contains(payload.AvailableModels, "dependency-model") || slices.Contains(payload.AvailableModels, "environment-model") {
-		t.Fatalf("availableModels = %#v, want dependency profile only", payload.AvailableModels)
-	}
-	pickerModels := make([]string, 0, len(payload.ModelPicker.Options))
-	for _, option := range payload.ModelPicker.Options {
-		pickerModels = append(pickerModels, option.Model)
-	}
-	if !slices.Contains(pickerModels, "dependency-picker") || slices.Contains(pickerModels, "environment-picker") {
-		t.Fatalf("model picker models = %#v, want dependency profile only", pickerModels)
-	}
-}
-
 func TestLaunchSelectivelyEscapesAnthropicFamilyNamesInCCRAliases(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -558,6 +405,9 @@ func TestLaunchExtendsClaudeAvailableModelsWithoutStartupModel(t *testing.T) {
 		t.Fatalf("launch args = %#v, want Claude Code default startup model", launcher.args)
 	}
 	payload := launchSettingsPayload(t, launcher)
+	if len(payload.Env) != 0 {
+		t.Fatalf("family routing environment = %#v, want no override for native default launch", payload.Env)
+	}
 	for _, want := range []string{"sonnet", "anthropic.ccr.gpt", "anthropic.ccr.qwen"} {
 		if !slices.Contains(payload.AvailableModels, want) {
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
@@ -598,6 +448,34 @@ func TestLaunchRegistersStartupModelWhenClaudeAvailableModelsUnset(t *testing.T)
 	for _, want := range []string{"sonnet", "opus", "anthropic.ccr.gpt"} {
 		if !slices.Contains(payload.AvailableModels, want) {
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
+		}
+	}
+}
+
+func TestLaunchProviderModelSetsClaudeFamilyRoutingDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	payload := launchSettingsPayload(t, launcher)
+	want := modelrouting.DefaultModelEnvironment()
+	if !slices.Equal(mapKeys(payload.Env), mapKeys(want)) {
+		t.Fatalf("family environment keys = %#v, want %#v", payload.Env, want)
+	}
+	for key, wantValue := range want {
+		if payload.Env[key] != wantValue {
+			t.Fatalf("family environment[%q] = %q, want %q", key, payload.Env[key], wantValue)
 		}
 	}
 }
@@ -678,7 +556,8 @@ func TestLaunchCreatesFirstPartyAllowlistWhenAllAliasesNeedToolsDisabled(t *test
 }
 
 type launchSettings struct {
-	AvailableModels []string `json:"availableModels"`
+	AvailableModels []string          `json:"availableModels"`
+	Env             map[string]string `json:"env"`
 }
 
 func launchSettingsPayload(t *testing.T, launcher *fakeLauncher) launchSettings {
@@ -692,4 +571,13 @@ func launchSettingsPayload(t *testing.T, launcher *fakeLauncher) launchSettings 
 		t.Fatalf("settings JSON %q did not parse: %v", settings, err)
 	}
 	return payload
+}
+
+func mapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
