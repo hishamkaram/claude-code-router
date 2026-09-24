@@ -74,7 +74,6 @@ func TestProviderOnlyEnvironmentRemovesInheritedClaudeAuth(t *testing.T) {
 			}
 			applied := environmentEntries(applyClaudeEnvironment(base, env))
 			for _, name := range []string{
-				"ANTHROPIC_CUSTOM_HEADERS",
 				"CLAUDE_CODE_OAUTH_TOKEN",
 				"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
 				"CLAUDE_CODE_OAUTH_SCOPES",
@@ -84,8 +83,17 @@ func TestProviderOnlyEnvironmentRemovesInheritedClaudeAuth(t *testing.T) {
 					t.Fatalf("%s preserved inherited %s", authMode, name)
 				}
 			}
-			if applied["ANTHROPIC_AUTH_TOKEN"] != "gateway-session-token" {
-				t.Fatalf("%s did not configure the generated local token", authMode)
+			if _, exists := applied["ANTHROPIC_AUTH_TOKEN"]; exists {
+				t.Fatalf("%s exposed a Claude gateway credential instead of a CCR-scoped credential", authMode)
+			}
+			if applied["ANTHROPIC_API_KEY"] != "gateway-session-token" {
+				t.Fatalf("%s did not configure the generated local discovery credential", authMode)
+			}
+			if !strings.Contains(applied["ANTHROPIC_CUSTOM_HEADERS"], "X-CCR-Session-Token: gateway-session-token") {
+				t.Fatalf("%s did not configure the generated CCR session header", authMode)
+			}
+			if strings.Contains(applied["ANTHROPIC_CUSTOM_HEADERS"], "stale-account") {
+				t.Fatalf("%s preserved inherited auth-bearing custom headers", authMode)
 			}
 		})
 	}

@@ -56,7 +56,9 @@ func (h *handler) handleRuntimeRequest(w http.ResponseWriter, r *http.Request) {
 				ActiveClaudeAccount: h.cfg.AnthropicSubscriptionPool.ActiveAccount(),
 			}
 		}
-		writeJSON(w, http.StatusOK, status)
+		if err := writeJSON(w, http.StatusOK, status); err != nil {
+			return
+		}
 	case "/internal/v1/hooks":
 		h.handleHookRequest(w, r)
 	default:
@@ -99,6 +101,7 @@ func (h *handler) handleHookRequest(w http.ResponseWriter, r *http.Request) {
 		writeRuntimeError(w, http.StatusServiceUnavailable, "lifecycle persistence unavailable")
 		return
 	}
+	h.activeModel.observeAgentChildLifecycle(event.SessionID, event.HookEventName)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -141,8 +144,10 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func writeRuntimeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]any{
+	if err := writeJSON(w, status, map[string]any{
 		"schema_version": 1,
 		"error":          message,
-	})
+	}); err != nil {
+		return
+	}
 }

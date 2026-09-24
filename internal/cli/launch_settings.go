@@ -19,6 +19,7 @@ type launchSettingsOptions struct {
 	LifecycleEnabled             bool
 	StatuslineEnabled            bool
 	IsolateStatuslineCredentials bool
+	ClaudeConfigDir              string
 	GatewayURL                   string
 	StatuslineExecutable         string
 }
@@ -26,6 +27,15 @@ type launchSettingsOptions struct {
 type launchSettingsResult struct {
 	JSON            string
 	StatuslineState string
+}
+
+const claudeCCRModelBehavesAs = "sonnet"
+
+type claudeModelPickerOption struct {
+	Model       string `json:"model"`
+	Label       string `json:"label,omitempty"`
+	Description string `json:"description,omitempty"`
+	BehavesAs   string `json:"behavesAs,omitempty"`
 }
 
 type claudeHookHandler struct {
@@ -43,7 +53,7 @@ type claudeHookMatcher struct {
 func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launchSettingsOptions) (launchSettingsResult, error) {
 	settings := make(map[string]any, 3)
 	result := launchSettingsResult{}
-	if err := addLaunchAvailableModels(ctx, s, options.IncludeToolDisabled, settings); err != nil {
+	if err := addLaunchAvailableModels(ctx, s, options.IncludeToolDisabled, options.ClaudeConfigDir, settings); err != nil {
 		return launchSettingsResult{}, err
 	}
 	if options.LifecycleEnabled {
@@ -72,7 +82,7 @@ func addLaunchStatusline(settings map[string]any, options launchSettingsOptions)
 	if !options.StatuslineEnabled {
 		return "disabled", nil
 	}
-	statusline, statuslineState, err := claudeStatuslineSetting()
+	statusline, statuslineState, err := claudeStatuslineSettingForConfigDir(options.ClaudeConfigDir)
 	if err != nil {
 		return "", err
 	}
@@ -107,8 +117,8 @@ func addCCRStatusline(settings map[string]any, state, executable string) (string
 	return state, nil
 }
 
-func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDisabled bool, settings map[string]any) error {
-	existing, configured, err := claudeAvailableModels()
+func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDisabled bool, configDirOverride string, settings map[string]any) error {
+	existing, configured, err := claudeAvailableModelsForConfigDir(configDirOverride)
 	if err != nil {
 		return err
 	}
@@ -128,7 +138,64 @@ func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDi
 		return fmt.Errorf("building Claude Code model IDs: %w", err)
 	}
 	settings["availableModels"] = ids
+	picker, err := launchModelPickerOptionsForConfigDir(configDirOverride, models)
+	if err != nil {
+		return fmt.Errorf("building Claude Code model picker mappings: %w", err)
+	}
+	settings["modelPicker"] = picker
 	return nil
+}
+
+func launchModelPickerOptions(models []store.Model) (map[string]any, error) {
+	return launchModelPickerOptionsForConfigDir("", models)
+}
+
+func launchModelPickerOptionsForConfigDir(configDirOverride string, models []store.Model) (map[string]any, error) {
+	existing, replaceBuiltInOptions, err := claudeModelPickerSettingsForConfigDir(configDirOverride)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]struct{}, len(models))
+	for index := range models {
+		id, err := gateway.DiscoveryIDForModel(models[index])
+		if err != nil {
+			return nil, err
+		}
+		ids[id] = struct{}{}
+	}
+	options := make([]any, 0, len(existing)+len(models))
+	for _, raw := range existing {
+		var row struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal(raw, &row); err != nil {
+			return nil, fmt.Errorf("parsing Claude Code modelPicker row: %w", err)
+		}
+		if _, replace := ids[strings.TrimSpace(row.Model)]; replace {
+			continue
+		}
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return nil, fmt.Errorf("parsing Claude Code modelPicker row value: %w", err)
+		}
+		options = append(options, value)
+	}
+	for index := range models {
+		id, err := gateway.DiscoveryIDForModel(models[index])
+		if err != nil {
+			return nil, err
+		}
+		options = append(options, claudeModelPickerOption{
+			Model: id, Label: "CCR " + models[index].Alias,
+			Description: "CCR-routed provider model " + models[index].ProviderModel,
+			BehavesAs:   claudeCCRModelBehavesAs,
+		})
+	}
+	result := map[string]any{
+		"options":               options,
+		"replaceBuiltInOptions": replaceBuiltInOptions,
+	}
+	return result, nil
 }
 
 func mergedClaudeModelIDs(baseIDs []string, models []store.Model) ([]string, error) {

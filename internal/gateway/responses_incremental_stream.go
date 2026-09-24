@@ -131,6 +131,7 @@ func responsesStreamTerminal(eventType string) bool {
 type responsesStreamAdapter struct {
 	alias            string
 	messageID        string
+	agentChildMarker func([]agentChildDescriptor) (func(), error)
 	inputTokens      int
 	usage            observability.TokenUsage
 	textBlocks       map[responsesTextBlockKey]*responsesTextBlock
@@ -533,16 +534,40 @@ func (a *responsesStreamAdapter) finishTerminalResponse(writer *anthropicSSEWrit
 	if message := invalidStreamAgentToolInput(tools); message != "" {
 		return a.finishInvalidAgentToolInput(writer, message)
 	}
+	rollback, registrationErr := a.registerAgentChildren()
+	if registrationErr != nil {
+		return a.usage, registrationErr
+	}
 	if err := a.ensureVisibleTerminalContent(writer, tools); err != nil {
+		if rollback != nil {
+			rollback()
+		}
 		return observability.TokenUsage{}, err
 	}
 	if err := a.closeAllTextBlocks(writer); err != nil {
+		if rollback != nil {
+			rollback()
+		}
 		return observability.TokenUsage{}, err
 	}
 	if err := a.writeTerminalToolBlocks(writer, tools); err != nil {
+		if rollback != nil {
+			rollback()
+		}
 		return observability.TokenUsage{}, err
 	}
-	return a.finishMessage(writer, a.terminalStopReason(tools))
+	usage, err := a.finishMessage(writer, a.terminalStopReason(tools))
+	if err != nil && rollback != nil {
+		rollback()
+	}
+	return usage, err
+}
+
+func (a *responsesStreamAdapter) registerAgentChildren() (func(), error) {
+	if a.agentChildMarker == nil {
+		return nil, nil
+	}
+	return a.agentChildMarker(agentChildDescriptorsFromOpenAITools(a.orderedFunctionCalls()))
 }
 
 func validateResponsesStreamTools(tools []openAIToolCall) error {

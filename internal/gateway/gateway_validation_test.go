@@ -429,6 +429,48 @@ func TestOpenAIToolArgumentsNormalizesAgentInput(t *testing.T) {
 	}
 }
 
+func TestOpenAIToolArgumentsPreservesNativeAgentModel(t *testing.T) {
+	for _, toolName := range []string{"Agent", "Task"} {
+		got, ok := openAIToolArgumentsForTool(toolName, `{"prompt":"work","description":"work","model":"haiku"}`).(map[string]any)
+		if !ok {
+			t.Fatalf("openAIToolArgumentsForTool(%q) = %#v, want object", toolName, got)
+		}
+		if got["model"] != "haiku" {
+			t.Fatalf("%s model = %#v, want native Claude model", toolName, got["model"])
+		}
+	}
+}
+
+func TestCountAnthropicAgentToolsValueHandlesTypedContent(t *testing.T) {
+	t.Parallel()
+	type contentBlock struct {
+		Type  string         `json:"type"`
+		Name  string         `json:"name"`
+		Input map[string]any `json:"input"`
+	}
+	type response struct {
+		Content []contentBlock `json:"content"`
+	}
+	value := &response{Content: []contentBlock{
+		{Type: "tool_use", Name: "Agent", Input: map[string]any{"prompt": "work"}},
+		{Type: "tool_use", Name: "Task", Input: map[string]any{"prompt": "work"}},
+	}}
+	if got := countAnthropicAgentToolsValue(value); got != 2 {
+		t.Fatalf("countAnthropicAgentToolsValue(typed response) = %d, want 2", got)
+	}
+}
+
+func TestCountAgentToolCallsIncludesTask(t *testing.T) {
+	tools := []openAIToolCall{
+		{Function: openAIFunctionCall{Name: "Agent"}},
+		{Function: openAIFunctionCall{Name: "Task"}},
+		{Function: openAIFunctionCall{Name: "Bash"}},
+	}
+	if got := countAgentToolCalls(tools); got != 2 {
+		t.Fatalf("countAgentToolCalls() = %d, want 2", got)
+	}
+}
+
 func TestOpenAIToolArgumentsDoesNotNormalizeNonAgentInput(t *testing.T) {
 	raw := `{"prompt":"find latest chatgpt news","agent_type":"general-purpose","extra":"kept"}`
 	got, ok := openAIToolArgumentsForTool("Bash", raw).(map[string]any)
@@ -526,6 +568,7 @@ func TestGatewayIgnoresUnknownAcceptedOptionFields(t *testing.T) {
 	tests := []string{
 		`{"model":"gpt","metadata":{"trace_id":"abc"},"messages":[{"role":"user","content":"hello"}]}`,
 		`{"model":"gpt","output_config":{"verbosity":"high"},"messages":[{"role":"user","content":"hello"}]}`,
+		`{"model":"gpt","safeguards":{"enabled":true},"messages":[{"role":"user","content":"hello"}]}`,
 	}
 	for _, body := range tests {
 		body := body

@@ -14,8 +14,9 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 )
 
-func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute, completion *routeCompletionState) observability.TokenUsage {
+func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, req anthropicRequest, route *messageRoute, completion *routeCompletionState) observability.TokenUsage {
 	var usage observability.TokenUsage
+	defer route.rollbackAgentChild()
 	if validationErr := validateResponsesMessageRequest(&req); validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return usage
@@ -31,7 +32,7 @@ func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, 
 		writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("provider secret %s could not be resolved", secret.RedactRef(route.provider.SecretRef)))
 		return usage
 	}
-	providerRequest, err := h.toResponsesRequest(r.Context(), req, route)
+	providerRequest, err := h.toResponsesRequest(r.Context(), req, *route)
 	if err != nil {
 		writeAnthropicError(w, http.StatusNotImplemented, err.Error())
 		return usage
@@ -76,14 +77,39 @@ func (h *handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request, 
 		return usage
 	}
 	antResponse.Model = route.responseModel
-	writeJSON(w, http.StatusOK, antResponse)
+	if err := h.writeOpenAIResponsesResponse(w, r, route, antResponse); err != nil {
+		return usage
+	}
 	return usage
+}
+
+func (h *handler) writeOpenAIResponsesResponse(w http.ResponseWriter, r *http.Request, route *messageRoute, response *openairesponses.AnthropicResponse) error {
+	var rollbackAgentChildren func()
+	var registrationErr error
+	if route.agentChildSpawnAlias() != "" {
+		rollbackAgentChildren, registrationErr = h.activeModel.registerAgentChildDescriptorsForNewWork(
+			claudeCodeSessionID(r),
+			agentChildDescriptorsFromValue(response),
+		)
+	}
+	if registrationErr != nil {
+		writeAnthropicError(w, http.StatusServiceUnavailable, registrationErr.Error())
+		return nil
+	}
+	if err := writeJSON(w, http.StatusOK, response); err != nil {
+		if rollbackAgentChildren != nil {
+			rollbackAgentChildren()
+		}
+		return err
+	}
+	route.commitAgentChild()
+	return nil
 }
 
 func (h *handler) streamOpenAIResponses(
 	w http.ResponseWriter,
 	r *http.Request,
-	route messageRoute,
+	route *messageRoute,
 	completion *routeCompletionState,
 	client *openairesponses.Client,
 	providerRequest *openairesponses.Request,
@@ -91,6 +117,7 @@ func (h *handler) streamOpenAIResponses(
 	messageID string,
 ) observability.TokenUsage {
 	adapter := newResponsesStreamAdapter(route.responseModel, messageID)
+	adapter.agentChildMarker = h.activeModel.agentChildMarker(claudeCodeSessionID(r), route.agentChildSpawnAlias())
 	adapter.inputTokens = estimateTranslatedInputTokens(providerRequest)
 	producer := func(ctx context.Context, events chan<- upstreamStreamEvent) {
 		produceResponsesStream(ctx, client, route.provider.Name, providerRequest, events)
@@ -102,6 +129,9 @@ func (h *handler) streamOpenAIResponses(
 	}
 	result := runTranslatedProviderStream(r.Context(), w, producer, adapter)
 	recordStreamCompletion(completion, result)
+	if result.TerminalPhase == "completed" {
+		route.commitAgentChild()
+	}
 	if !result.Committed {
 		writeOpenAIResponsesStreamFailure(w, result)
 	}
@@ -122,7 +152,7 @@ func tokenUsageFromResponses(response *openairesponses.Response) observability.T
 func validateResponsesMessageRequest(req *anthropicRequest) *requestValidationError {
 	for field := range req.Fields {
 		switch field {
-		case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "metadata", "thinking", "output_config", "context_management":
+		case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "metadata", "thinking", "output_config", "context_management", "safeguards":
 		default:
 			return &requestValidationError{
 				status:  http.StatusNotImplemented,

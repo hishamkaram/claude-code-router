@@ -53,13 +53,22 @@ type translatedStreamAdapter interface {
 	Finish(*anthropicSSEWriter) (observability.TokenUsage, error)
 }
 
+type translatedStreamCleanupAdapter interface {
+	Cleanup()
+}
+
 type translatedStreamReadyAdapter interface {
 	Ready(*anthropicSSEWriter, http.Header) error
 }
 
 type translatedStreamResult struct {
-	Usage                  observability.TokenUsage
-	Committed              bool
+	Usage     observability.TokenUsage
+	Committed bool
+	// ChildToolsExposed records the protocol boundary independently from the
+	// provider transport outcome. Claude Code can start a child as soon as its
+	// terminal message_stop is exposed; a later provider error must not revoke
+	// the child route that was already made visible to Claude.
+	ChildToolsExposed      bool
 	HTTPStatus             int
 	UpstreamHTTPStatus     int
 	ErrorClass             string
@@ -214,7 +223,15 @@ func runTranslatedProviderStreamWithTiming(
 		startedAt:    time.Now(),
 		readyStreams: make(map[int]struct{}),
 	}
-	return coordinator.run(events, startup.C, heartbeat.C, heartbeatWindow)
+	result := coordinator.run(events, startup.C, heartbeat.C, heartbeatWindow)
+	if exposure, ok := adapter.(translatedStreamChildExposureAdapter); ok {
+		result.ChildToolsExposed = exposure.ExposedChildTools()
+	}
+	return result
+}
+
+type translatedStreamChildExposureAdapter interface {
+	ExposedChildTools() bool
 }
 
 type translatedStreamCoordinator struct {
@@ -236,6 +253,14 @@ func (c *translatedStreamCoordinator) run(
 	heartbeat <-chan time.Time,
 	heartbeatWindow time.Duration,
 ) translatedStreamResult {
+	defer func() {
+		if c.result.TerminalPhase == "completed" {
+			return
+		}
+		if cleanup, ok := c.adapter.(translatedStreamCleanupAdapter); ok {
+			cleanup.Cleanup()
+		}
+	}()
 	for {
 		select {
 		case <-c.ctx.Done():

@@ -16,7 +16,8 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string, firstParty, stream bool, completion *routeCompletionState) observability.TokenUsage {
+func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Request, body []byte, providerOverride *store.Provider, authMode anthropicAuthMode, responseModel string, firstParty, stream bool, completion *routeCompletionState, route *messageRoute) observability.TokenUsage {
+	defer route.rollbackAgentChild()
 	body, status, message := readAnthropicPassThroughBody(r, body)
 	if status != 0 {
 		writeAnthropicError(w, status, message)
@@ -53,9 +54,13 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 			resource,
 			providerSecret,
 			responseModel,
+			route.agentChildSpawnAlias(),
 			firstParty,
 		)
 		recordStreamCompletion(completion, result)
+		if result.TerminalPhase == "completed" || result.ChildToolsExposed {
+			route.commitAgentChild()
+		}
 		return usage
 	}
 	resp, err := h.executeAnthropicPassThrough(r, body, endpoint, provider, authMode, resource, providerSecret)
@@ -64,7 +69,20 @@ func (h *handler) handleAnthropicPassThrough(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return h.writeAnthropicPassThroughResponse(w, r, resp, provider, authMode, resource, responseModel, firstParty)
+	var onAgentTools func([]agentChildDescriptor) (func(), error)
+	if route.agentChildSpawnAlias() != "" {
+		onAgentTools = func(descriptors []agentChildDescriptor) (func(), error) {
+			return h.activeModel.registerAgentChildDescriptorsForNewWork(claudeCodeSessionID(r), descriptors)
+		}
+	}
+	usage, writeErr := h.writeAnthropicPassThroughResponse(w, r, resp, provider, authMode, resource, responseModel, firstParty, onAgentTools)
+	if writeErr != nil {
+		return usage
+	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		route.commitAgentChild()
+	}
+	return usage
 }
 
 func readAnthropicPassThroughBody(r *http.Request, body []byte) (result []byte, status int, message string) {
@@ -111,16 +129,19 @@ func (h *handler) writeAnthropicPassThroughFailure(w http.ResponseWriter, r *htt
 	writeAnthropicError(w, http.StatusBadGateway, fmt.Sprintf("requesting Anthropic provider %q: %v", provider.Name, err))
 }
 
-func (h *handler) writeAnthropicPassThroughResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, provider store.Provider, authMode anthropicAuthMode, resource, responseModel string, firstParty bool) observability.TokenUsage {
+func (h *handler) writeAnthropicPassThroughResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, provider store.Provider, authMode anthropicAuthMode, resource, responseModel string, firstParty bool, onAgentTools func([]agentChildDescriptor) (func(), error)) (observability.TokenUsage, error) {
 	h.observeClaudeAuthResponse(r.Context(), firstParty, resp.StatusCode)
 	if firstParty && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		writeAnthropicAuthenticationError(w, resp.StatusCode, claudeSubscriptionAuthFailureMessage())
-		return observability.TokenUsage{}
+		return observability.TokenUsage{}, nil
 	}
 	h.notifyAnthropicSubscriptionExhaustion(resp, provider, authMode, resource)
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	return copyProviderResponseBody(w, resp, responseModel)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		onAgentTools = nil
+	}
+	return copyProviderResponseBody(w, resp, responseModel, onAgentTools, firstParty)
 }
 
 func (h *handler) newAnthropicPassThroughRequest(
@@ -329,35 +350,20 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-func copyProviderResponseBody(w http.ResponseWriter, resp *http.Response, responseModel string) observability.TokenUsage {
-	if responseModel == "" || resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		_, _ = io.Copy(w, resp.Body)
-		return observability.TokenUsage{}
+func copyProviderResponseBody(w http.ResponseWriter, resp *http.Response, responseModel string, onAgentTools func([]agentChildDescriptor) (func(), error), preserveNativeChildInput bool) (observability.TokenUsage, error) {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		_, err := io.Copy(w, resp.Body)
+		return observability.TokenUsage{}, err
 	}
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if strings.Contains(contentType, "application/json") || strings.Contains(contentType, "+json") {
-		return copyJSONProviderResponseBody(w, resp.Body, responseModel)
-	}
 	if strings.Contains(contentType, "text/event-stream") {
-		if flusher, ok := w.(http.Flusher); ok {
-			return copyAndRewriteSSE(w, resp.Body, flusher, responseModel)
-		}
+		return copySSEProviderResponseBody(w, resp.Body, responseModel, onAgentTools, preserveNativeChildInput)
 	}
-	_, _ = io.Copy(w, resp.Body)
-	return observability.TokenUsage{}
-}
-
-func copyJSONProviderResponseBody(dst io.Writer, src io.Reader, responseModel string) observability.TokenUsage {
-	raw, err := io.ReadAll(src)
-	if err != nil {
-		return observability.TokenUsage{}
-	}
-	usage := anthropicUsageFromJSON(raw)
-	if rewritten, ok := rewriteAnthropicResponseModel(raw, responseModel); ok {
-		raw = rewritten
-	}
-	_, _ = dst.Write(raw)
-	return usage
+	// Successful Anthropic responses are JSON even when an upstream omits or
+	// misstates Content-Type. Buffering every non-SSE body keeps child descriptor
+	// registration and model rewriting on one path instead of allowing an
+	// unrecognized header to bypass routing state.
+	return copyJSONProviderResponseBody(w, resp.Body, responseModel, onAgentTools)
 }
 
 func copyAndRewriteSSE(dst io.Writer, src io.Reader, flusher http.Flusher, responseModel string) observability.TokenUsage {
@@ -476,7 +482,7 @@ func rewriteSSEDataLine(line []byte, responseModel string) []byte {
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 		return line
 	}
-	rewritten, ok := rewriteAnthropicResponseModel(data, responseModel)
+	rewritten, ok := rewriteAnthropicResponse(data, responseModel)
 	if !ok {
 		return line
 	}
@@ -488,7 +494,7 @@ func rewriteSSEDataLine(line []byte, responseModel string) []byte {
 	return out
 }
 
-func rewriteAnthropicResponseModel(raw []byte, responseModel string) ([]byte, bool) {
+func rewriteAnthropicResponse(raw []byte, responseModel string) ([]byte, bool) {
 	if strings.TrimSpace(responseModel) == "" {
 		return nil, false
 	}
@@ -497,14 +503,18 @@ func rewriteAnthropicResponseModel(raw []byte, responseModel string) ([]byte, bo
 		return nil, false
 	}
 	changed := false
-	if _, ok := payload["model"]; ok {
-		payload["model"] = responseModel
-		changed = true
+	if strings.TrimSpace(responseModel) != "" {
+		if _, ok := payload["model"]; ok {
+			payload["model"] = responseModel
+			changed = true
+		}
 	}
 	if message, ok := payload["message"].(map[string]any); ok {
-		if _, hasModel := message["model"]; hasModel {
-			message["model"] = responseModel
-			changed = true
+		if strings.TrimSpace(responseModel) != "" {
+			if _, hasModel := message["model"]; hasModel {
+				message["model"] = responseModel
+				changed = true
+			}
 		}
 	}
 	if !changed {

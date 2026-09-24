@@ -18,9 +18,20 @@ import (
 )
 
 type Dependencies struct {
+	// ClaudeConfigDir overrides the native Claude profile source for an
+	// embedding or an isolated test. Production callers should leave it empty
+	// so Claude's normal CLAUDE_CONFIG_DIR/HOME resolution remains authoritative.
+	ClaudeConfigDir string
+	// ClaudeProfileStorageRoot overrides the durable CCR profile root for an
+	// embedding or an isolated test. Production callers should leave it empty
+	// so CCR selects an approved durable user-data root.
+	ClaudeProfileStorageRoot string
 	// launchPrepared binds detached observation to the same successful resolution
 	// used by the gateway and child. It runs synchronously before execution starts.
-	launchPrepared         func(resolvedLaunch) error
+	launchPrepared func(resolvedLaunch) error
+	// launchProfilePrepared commits durable detached profile ownership only after
+	// the private Claude profile has been fully initialized and is ready for use.
+	launchProfilePrepared  func(string) error
 	RequestAccounting      *gateway.RequestAccounting
 	In                     io.Reader
 	Out                    io.Writer

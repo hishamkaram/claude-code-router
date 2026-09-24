@@ -53,16 +53,16 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 		"Opus",
 		"Sonnet",
 		"Haiku",
-		"anthropic.ccr.gpt",
-		"anthropic.ccr.s%6fnnet",
-		"anthropic.ccr.%6fpus",
-		"anthropic.ccr.h%61iku",
+		"CCR gpt",
+		"CCR s%6fnnet",
+		"CCR %6fpus",
+		"CCR h%61iku",
 	)
 
 	run.write(t, "\x1b", "closing /model picker")
 	time.Sleep(500 * time.Millisecond)
 	run.write(t, "/model anthropic.ccr.gpt\r", "selecting registered model by ID")
-	run.waitForText(t, ctx, "Set model to anthropic.ccr.gpt")
+	run.waitForText(t, ctx, "Set model to CCR gpt")
 	run.write(t, "Reply with the routed test response.\r", "sending routed prompt")
 	run.assertRoutedModel(t, ctx, routedModel, "gpt-5")
 	time.Sleep(500 * time.Millisecond)
@@ -109,6 +109,10 @@ func newLivePickerProvider(t *testing.T) (chan string, *httptest.Server) {
 }
 
 func startLivePickerRun(t *testing.T, ctx context.Context, dbPath string) *livePickerRun {
+	return startLivePickerRunWithArgs(t, ctx, dbPath, "--bare")
+}
+
+func startLivePickerRunWithArgs(t *testing.T, ctx context.Context, dbPath string, launchArgs ...string) *livePickerRun {
 	t.Helper()
 
 	launcher := &livePickerLauncher{started: make(chan livePickerSession, 1)}
@@ -122,7 +126,8 @@ func startLivePickerRun(t *testing.T, ctx context.Context, dbPath string) *liveP
 			Err:      commandErr,
 			Launcher: launcher,
 		})
-		cmd.SetArgs([]string{"--db", dbPath, "launch", "--bare"})
+		args := append([]string{"--db", dbPath, "launch"}, launchArgs...)
+		cmd.SetArgs(args)
 		commandDone <- cmd.Execute()
 	}()
 
@@ -235,6 +240,7 @@ func configureIsolatedLivePickerClaude(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
 	t.Setenv("DISABLE_AUTOUPDATER", "1")
 	t.Setenv("DISABLE_TELEMETRY", "1")
+	t.Setenv("CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT", "1")
 }
 
 func writeLivePickerJSON(t *testing.T, path string, value any) {
