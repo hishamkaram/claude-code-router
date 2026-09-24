@@ -27,7 +27,7 @@ func openAIToolArgumentsForTool(toolName, raw string) any {
 	if !ok {
 		return map[string]any{"value": decoded}
 	}
-	if strings.EqualFold(strings.TrimSpace(toolName), "Agent") {
+	if isAgentChildToolName(toolName) {
 		return agentinput.Normalize(decodedObject)
 	}
 	return decoded

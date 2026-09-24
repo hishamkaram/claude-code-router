@@ -51,6 +51,7 @@ func (c *Cleanup) Normalize() {
 
 type Record struct {
 	ExpectedModel          string          `json:"expected_model,omitempty"`
+	ClaudeProfileDir       string          `json:"claude_profile_dir,omitempty"`
 	SubmissionID           string          `json:"submission_id,omitempty"`
 	RequestedResumeSession string          `json:"requested_resume_session,omitempty"`
 	ResumedFrom            string          `json:"resumed_from,omitempty"`

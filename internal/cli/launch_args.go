@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -12,32 +13,35 @@ import (
 )
 
 type launchInvocation struct {
-	modelAlias     string
-	printMode      bool
-	submissionID   string
-	expectedParent string
-	resumeSession  string
-	detach         bool
-	promptFile     string
-	authMode       string
-	authModeSet    bool
-	claudeAccount  string
-	permissionMode string
-	dbPath         string
-	dbPathSet      bool
-	noHistory      bool
-	noLifecycle    bool
-	noStatusline   bool
-	cuaConfig      cua.Config
-	cuaExternalURL string
-	cuaTokenEnv    string
-	cuaModeSet     bool
-	cuaExecutorSet bool
-	cuaLimitsSet   bool
-	cuaURLSet      bool
-	cuaTokenEnvSet bool
-	help           bool
-	claudeArgs     []string
+	modelAlias          string
+	printMode           bool
+	submissionID        string
+	expectedParent      string
+	resumeSession       string
+	detach              bool
+	promptFile          string
+	authMode            string
+	authModeSet         bool
+	claudeAccount       string
+	permissionMode      string
+	dbPath              string
+	dbPathSet           bool
+	noHistory           bool
+	noLifecycle         bool
+	noStatusline        bool
+	cuaConfig           cua.Config
+	cuaExternalURL      string
+	cuaTokenEnv         string
+	cuaModeSet          bool
+	cuaExecutorSet      bool
+	cuaLimitsSet        bool
+	cuaURLSet           bool
+	cuaTokenEnvSet      bool
+	help                bool
+	claudeArgs          []string
+	claudeArgsSeparated bool
+	claudeArgsSeparator int
+	claudeProfileDir    string
 }
 
 func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
@@ -66,33 +70,101 @@ func (invocation launchInvocation) cuaOptionsConfigured() bool {
 }
 
 func parseLaunchInvocation(args []string) (launchInvocation, error) {
-	invocation := launchInvocation{authMode: launchAuthModeAuto}
-	for index := 0; index < len(args); index++ {
-		arg := args[index]
-		if arg == "--" {
-			// Consume CCR's separator; a subsequent separator belongs to Claude Code.
-			invocation.claudeArgs = append(invocation.claudeArgs, args[index+1:]...)
-			break
-		}
-		if arg == "--help" || arg == "-h" {
-			invocation.help = true
-			continue
-		}
-		handled, err := parseLaunchOwnedOption(&invocation, args, &index)
-		if err != nil {
-			return launchInvocation{}, err
-		}
-		if !handled {
-			invocation.claudeArgs = append(invocation.claudeArgs, arg)
-		}
-	}
-	if err := normalizeLaunchCUAOptions(&invocation); err != nil {
+	invocation := launchInvocation{authMode: launchAuthModeAuto, claudeArgsSeparator: -1}
+	if err := parseLaunchArguments(&invocation, args); err != nil {
 		return launchInvocation{}, err
 	}
-	if err := normalizeAdmissionOptions(&invocation); err != nil {
+	if err := normalizeLaunchInvocation(&invocation); err != nil {
+		return launchInvocation{}, err
+	}
+	if err := validateLaunchInvocation(invocation); err != nil {
 		return launchInvocation{}, err
 	}
 	return invocation, nil
+}
+
+func parseLaunchArguments(invocation *launchInvocation, args []string) error {
+	for index := 0; index < len(args); index++ {
+		stop, err := parseLaunchArgument(invocation, args, &index)
+		if err != nil {
+			return err
+		}
+		if stop {
+			break
+		}
+	}
+	return nil
+}
+
+func parseLaunchArgument(invocation *launchInvocation, args []string, index *int) (bool, error) {
+	arg := args[*index]
+	if arg == "--" {
+		// Consume CCR's separator; a subsequent separator belongs to Claude Code.
+		invocation.claudeArgsSeparated = true
+		invocation.claudeArgsSeparator = len(invocation.claudeArgs)
+		invocation.claudeArgs = append(invocation.claudeArgs, args[*index+1:]...)
+		return true, nil
+	}
+	handled, err := parseLaunchOwnedOption(invocation, args, index)
+	if err != nil || handled {
+		return false, err
+	}
+	if arg == "--help" || arg == "-h" {
+		invocation.help = true
+		return false, nil
+	}
+	appendLaunchPassthroughArgument(invocation, args, index)
+	return false, nil
+}
+
+func appendLaunchPassthroughArgument(invocation *launchInvocation, args []string, index *int) {
+	invocation.claudeArgs = append(invocation.claudeArgs, args[*index])
+	if !claudePassthroughOptionConsumesNextValue(args, *index) {
+		return
+	}
+	invocation.claudeArgs = append(invocation.claudeArgs, args[*index+1])
+	*index++
+}
+
+func normalizeLaunchInvocation(invocation *launchInvocation) error {
+	if err := normalizeLaunchCUAOptions(invocation); err != nil {
+		return err
+	}
+	return normalizeAdmissionOptions(invocation)
+}
+
+func validateLaunchInvocation(invocation launchInvocation) error {
+	if findEnabledLaunchBooleanOption(invocation.claudeArgs, "--fork-session") != "" {
+		return fmt.Errorf("--fork-session is not supported through ccr because the new Claude session ID cannot be assigned a stable isolated profile")
+	}
+	if findLaunchOption(invocation.claudeArgs, "--teleport") != "" {
+		return errors.New("--teleport is not supported through ccr because teleport does not expose a stable local Claude session identity")
+	}
+	if findLaunchOption(invocation.claudeArgs, "--from-pr") != "" {
+		return errors.New("--from-pr is not supported through ccr because Claude's linked PR session identity cannot be mapped to a stable isolated profile")
+	}
+	return validateNativeLaunchSession(invocation)
+}
+
+func validateNativeLaunchSession(invocation launchInvocation) error {
+	if invocation.detach {
+		return nil
+	}
+	resumeSession, err := nativeClaudeResumeSession(invocation.claudeArgs)
+	if err != nil {
+		return err
+	}
+	if resumeSession != "" && claudeLaunchDisablesSessionPersistence(invocation.claudeArgs) {
+		return fmt.Errorf("--resume cannot be combined with --no-session-persistence through CCR")
+	}
+	sessionID, err := nativeClaudeSessionID(invocation.claudeArgs)
+	if err != nil {
+		return err
+	}
+	if resumeSession != "" && sessionID != "" {
+		return errors.New("--resume cannot be combined with --session-id through ccr because they define conflicting Claude session identities")
+	}
+	return nil
 }
 
 func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *int) (bool, error) {
@@ -264,6 +336,7 @@ func reservedLaunchExternalTokenEnvName(value string) bool {
 	switch value {
 	case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
 		"ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
+		"CLAUDE_CONFIG_DIR",
 		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
 		"CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_USE_GATEWAY",
@@ -460,13 +533,17 @@ func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, pe
 }
 
 func validateLaunchPassthroughArgs(args []string) error {
-	for _, arg := range args {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
 		if arg == "--" {
 			break
 		}
 		option, _, _ := strings.Cut(arg, "=")
 		if isLaunchCUAOption(option) {
 			return fmt.Errorf("%s is managed by ccr launch; pass it before --", option)
+		}
+		if claudePassthroughOptionConsumesNextValue(args, index) {
+			index++
 		}
 	}
 	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline", "--detach", "--prompt-file", "--submission-id", "--expected-parent-job"); option != "" {
@@ -494,7 +571,8 @@ func validateDynamicLaunchPassthroughArgs(args []string, disableTools, hasSettin
 }
 
 func findLaunchOption(args []string, options ...string) string {
-	for _, arg := range args {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
 		if arg == "--" {
 			break
 		}
@@ -503,12 +581,16 @@ func findLaunchOption(args []string, options ...string) string {
 				return option
 			}
 		}
+		if claudePassthroughOptionConsumesNextValue(args, index) {
+			index++
+		}
 	}
 	return ""
 }
 
 func findEnabledLaunchBooleanOption(args []string, options ...string) string {
-	for _, arg := range args {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
 		if arg == "--" {
 			break
 		}
@@ -524,6 +606,9 @@ func findEnabledLaunchBooleanOption(args []string, options ...string) string {
 			if err != nil || enabled {
 				return option
 			}
+		}
+		if claudePassthroughOptionConsumesNextValue(args, index) {
+			index++
 		}
 	}
 	return ""

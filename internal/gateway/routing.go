@@ -38,6 +38,28 @@ type messageRoute struct {
 	capabilities        providers.Capabilities
 	modelCapabilities   modelcap.Values
 	responseModel       string
+	agentChildRollback  func()
+	agentChildRouted    bool
+}
+
+func (route messageRoute) agentChildSpawnAlias() string {
+	if route.firstPartyAnthropic {
+		return ""
+	}
+	return route.model.Alias
+}
+
+func (route *messageRoute) rollbackAgentChild() {
+	if route.agentChildRollback == nil {
+		return
+	}
+	rollback := route.agentChildRollback
+	route.agentChildRollback = nil
+	rollback()
+}
+
+func (route *messageRoute) commitAgentChild() {
+	route.agentChildRollback = nil
 }
 
 func validateRouteMessageCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {
@@ -249,6 +271,19 @@ func isFirstPartyAnthropicModelRequest(id string) bool {
 	default:
 		return looksLikeAnthropicModelID(id) && !strings.HasPrefix(strings.TrimSpace(id), legacyDiscoveryAliasPrefix)
 	}
+}
+
+func isAgentChildToolName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "agent", "task":
+		return true
+	default:
+		return false
+	}
+}
+
+func isChildSpawnToolName(name string) bool {
+	return isAgentChildToolName(name) || strings.EqualFold(strings.TrimSpace(name), "workflow")
 }
 
 func anthropicRequestUsesTools(req anthropicRequest) bool {

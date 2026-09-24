@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -57,12 +56,8 @@ func TestLiveGatewayTokenLaunchDiscoversConfiguredAlias(t *testing.T) {
 	}
 
 	cachePath := filepath.Join(home, ".claude", "cache", "gateway-models.json")
-	cache, err := os.ReadFile(cachePath)
-	if err != nil {
-		t.Fatalf("reading Claude gateway discovery cache: %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
-	}
-	if !bytes.Contains(cache, []byte("anthropic.ccr.gpt")) {
-		t.Fatalf("gateway discovery cache does not include configured alias: %s", cache)
+	if _, err := os.Stat(cachePath); !os.IsNotExist(err) {
+		t.Fatalf("native Claude gateway discovery cache was modified: %v", err)
 	}
 }
 

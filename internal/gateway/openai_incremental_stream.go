@@ -178,18 +178,19 @@ func (c *openAIChatStreamEOFCompletion) complete() bool {
 }
 
 type openAIChatStreamAdapter struct {
-	alias        string
-	apiKey       string
-	messageID    string
-	inputTokens  int
-	usage        observability.TokenUsage
-	sawChoice    bool
-	finishReason string
-	textStarted  bool
-	textStopped  bool
-	toolCalls    map[int]*openAIToolCallAccumulator
-	functionCall *openAIFunctionCall
-	functionArgs strings.Builder
+	alias            string
+	apiKey           string
+	messageID        string
+	agentChildMarker func([]agentChildDescriptor) (func(), error)
+	inputTokens      int
+	usage            observability.TokenUsage
+	sawChoice        bool
+	finishReason     string
+	textStarted      bool
+	textStopped      bool
+	toolCalls        map[int]*openAIToolCallAccumulator
+	functionCall     *openAIFunctionCall
+	functionArgs     strings.Builder
 }
 
 func newOpenAIChatStreamAdapter(alias, apiKey, messageID string) *openAIChatStreamAdapter {
@@ -325,20 +326,47 @@ func (a *openAIChatStreamAdapter) Finish(writer *anthropicSSEWriter) (observabil
 	if message := invalidStreamAgentToolInput(tools); message != "" {
 		return a.finishInvalidAgentToolInput(writer, message)
 	}
+	rollback, registrationErr := a.registerAgentChildren()
+	if registrationErr != nil {
+		return a.usage, registrationErr
+	}
 	if err := a.ensureVisibleContent(writer, tools); err != nil {
+		if rollback != nil {
+			rollback()
+		}
 		return a.usage, err
 	}
 	if err := a.stopText(writer); err != nil {
+		if rollback != nil {
+			rollback()
+		}
 		return observability.TokenUsage{}, err
 	}
 	if err := a.writeToolBlocks(writer, tools); err != nil {
+		if rollback != nil {
+			rollback()
+		}
 		return observability.TokenUsage{}, err
 	}
 	stopReason, err := a.stopReason()
 	if err != nil {
+		if rollback != nil {
+			rollback()
+		}
 		return observability.TokenUsage{}, err
 	}
-	return a.finishMessage(writer, stopReason)
+	usage, err := a.finishMessage(writer, stopReason)
+	if err != nil && rollback != nil {
+		rollback()
+	}
+	return usage, err
+}
+
+func (a *openAIChatStreamAdapter) registerAgentChildren() (func(), error) {
+	if a.agentChildMarker == nil {
+		return nil, nil
+	}
+	return a.agentChildMarker(agentChildDescriptorsFromOpenAITools(a.streamTools()))
 }
 
 func (a *openAIChatStreamAdapter) streamTools() []openAIToolCall {
@@ -408,7 +436,7 @@ func (a *openAIChatStreamAdapter) orderedTools() []openAIToolCall {
 func invalidStreamAgentToolInput(tools []openAIToolCall) string {
 	for _, tool := range tools {
 		input := openAIToolArgumentsForTool(tool.Function.Name, tool.Function.Arguments)
-		if message := invalidAgentToolInputMessage(tool.Function.Name, input); message != "" {
+		if message := invalidChildToolInputMessage(tool.Function.Name, input); message != "" {
 			return message
 		}
 	}

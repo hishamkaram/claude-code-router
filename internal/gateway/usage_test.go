@@ -54,6 +54,17 @@ func TestCopyAndRewriteSSECapturesUsage(t *testing.T) {
 	}
 }
 
+func TestRewriteAnthropicResponsePreservesProviderAgentInput(t *testing.T) {
+	raw := []byte(`{"model":"provider-model","content":[{"type":"tool_use","name":"Agent","input":{"prompt":"work","description":"work","model":"sonnet"}}]}`)
+	rewritten, ok := rewriteAnthropicResponse(raw, "provider-model")
+	if !ok {
+		t.Fatal("rewriteAnthropicResponse() did not rewrite response model")
+	}
+	if !bytes.Contains(rewritten, []byte(`"model":"provider-model"`)) || !bytes.Contains(rewritten, []byte(`"model":"sonnet"`)) {
+		t.Fatalf("rewritten response = %s", rewritten)
+	}
+}
+
 func TestOpenAIUsagePresenceDistinguishesUnavailableFromZero(t *testing.T) {
 	t.Parallel()
 	var withUsage openAIChatResponse

@@ -83,6 +83,14 @@ of choosing a provider implicitly. CCR also prints each picker ID, such as
 context window of at least one million tokens are advertised with Claude Code's
 terminal `[1m]` marker. Picker rows are computed once per launch; after
 capability or alias changes, relaunch Claude Code to refresh the visible picker.
+CCR launches Claude Code with a private runtime profile, so model selection and
+session state created inside CCR are not written into the native Claude profile.
+The profile preserves supported Claude customizations and authentication while
+keeping OAuth credentials out of the temporary profile. Immutable customization
+trees such as skills, commands, agents, rules, and hooks are shared as native
+profile inputs when the filesystem supports directory links; mutable
+session and runtime state remains private. Installed plugin payloads are resolved
+from their native registry paths rather than copied into every CCR session.
 To start directly on one alias, including a `chat-only` alias that disables
 tools for the launch, pass it explicitly:
 
@@ -215,6 +223,15 @@ CCR reports that limitation instead of bypassing it.
 5. CCR checks provider capabilities before a request is sent. Unsupported or
    unsafe behavior is rejected with an explanation; it is never redirected to
    Claude or another configured provider.
+6. New Agent, skill, workflow, and teammate work inherits the active CCR model.
+   An explicit first-party child model such as `sonnet`, `haiku`, or `opus` does
+   not switch that child to the Anthropic subscription while a CCR alias is
+   active. Existing workers keep their spawn-time model. If the active alias
+   cannot safely satisfy a child request, CCR reports the incompatibility
+   instead of silently falling back.
+7. CCR and native Claude can run at the same time. They use separate Claude
+   runtime state and session-scoped gateway routing; closing CCR does not change
+   the model selected by a later native Claude session.
 
 Capability truth is explicit and inspectable. Effective values come from, in
 order, local overrides, provider discovery, and recognized provider-model hints.
@@ -445,10 +462,11 @@ the gate reads it without migrating it and creates separate test databases with
 only the required definitions and secret references. It launches the candidate
 CCR executable and real Claude CLI with isolated Claude configuration and
 default permission mode and preapproval limited to the fixture MCP image tool
-or Agent tool. Agent sessions pin `CLAUDE_CODE_SUBAGENT_MODEL` to the requested
-CCR alias and set `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` so generated Agent arguments
-cannot override that choice. They verify forwarded child output, two separate
-user turns, and deployment receipts. Classifier routing is exercised by the
+or Agent tool. The gateway records emitted Agent work and routes each native
+child request through the current session alias at request time, so later
+`/model` switches govern new child work without pinning the Claude process to
+its startup alias. They verify forwarded
+child output, two separate user turns, and deployment receipts. Classifier routing is exercised by the
 existing live suite; classifier fallbacks are separate from these model-specific
 acceptance sessions. The gate does not replace the installed CCR or stop existing
 sessions. Required failures are
