@@ -285,7 +285,7 @@ func TestAnthropicStreamErrorType(t *testing.T) {
 }
 
 func TestAnthropicSSEScannerRetainsNativeErrorPayload(t *testing.T) {
-	scanner := newAnthropicSSEScanner(strings.NewReader("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"provider-secret\"}}\n\n"))
+	scanner := newAnthropicSSEScanner(strings.NewReader("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"provider-secret\"}}\n\n"), maxAnthropicStreamBytes)
 
 	frame, ok, err := scanner.next()
 	if err != nil {
@@ -303,7 +303,7 @@ func TestAnthropicSSEScannerRetainsNativeErrorPayload(t *testing.T) {
 }
 
 func TestAnthropicSSEScannerSeparatesCRLFFrames(t *testing.T) {
-	scanner := newAnthropicSSEScanner(strings.NewReader("event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n"))
+	scanner := newAnthropicSSEScanner(strings.NewReader("event: message_start\r\ndata: {\"type\":\"message_start\"}\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n"), maxAnthropicStreamBytes)
 
 	for _, want := range []anthropicSSEFrame{
 		{event: "message_start", data: []byte("{\"type\":\"message_start\"}")},

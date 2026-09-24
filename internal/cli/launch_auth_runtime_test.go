@@ -102,13 +102,15 @@ func TestLaunchAutoProviderModelWithoutClaudeAuthUsesProviderOnly(t *testing.T) 
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
-	if launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") || !launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
-		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") {
-		t.Fatalf("provider-only launch env missing CCR-scoped local auth: %s", launcher.environmentSummary())
+	if !launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") {
+		t.Fatalf("provider-only launch env missing local token: %s", launcher.environmentSummary())
 	}
-	if !launcher.unsetsEnv("ANTHROPIC_API_KEY") || !launcher.unsetsEnv("ANTHROPIC_AUTH_TOKEN") || !launcher.unsetsEnv("CLAUDE_CODE_OAUTH_TOKEN") ||
+	if !launcher.unsetsEnv("ANTHROPIC_API_KEY") || !launcher.unsetsEnv("CLAUDE_CODE_OAUTH_TOKEN") ||
 		!launcher.unsetsEnv("CLAUDE_CODE_OAUTH_REFRESH_TOKEN") || !launcher.unsetsEnv("CCR_TEST_PROVIDER_TOKEN") {
 		t.Fatalf("provider-only launch env did not isolate credentials: %s", launcher.environmentSummary())
+	}
+	if launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=") {
+		t.Fatalf("provider-only launch should not set custom headers: %s", launcher.environmentSummary())
 	}
 	if !strings.Contains(out, "Provider-only auth is active") {
 		t.Fatalf("launch output missing provider-only summary:\n%s", out)
@@ -202,9 +204,7 @@ func TestLaunchProviderOnlyAuthModeForcesLocalToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
-	if launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") || !launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
-		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") ||
-		!launcher.unsetsEnv("ANTHROPIC_AUTH_TOKEN") || !launcher.unsetsEnv("ANTHROPIC_API_KEY") {
+	if !launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") || !launcher.unsetsEnv("ANTHROPIC_API_KEY") {
 		t.Fatalf("provider-only launch env = %s", launcher.environmentSummary())
 	}
 	if !strings.Contains(out, "Provider-only auth is active") ||

@@ -416,10 +416,8 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
-	if launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") || !launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
-		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") ||
-		!launcher.unsetsEnv("ANTHROPIC_AUTH_TOKEN") {
-		t.Fatalf("gateway-token launch env missing CCR-scoped local auth: %s", launcher.environmentSummary())
+	if !launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") {
+		t.Fatalf("gateway-token launch env missing ANTHROPIC_AUTH_TOKEN: %s", launcher.environmentSummary())
 	}
 	if !launcher.unsetsEnv("CLAUDE_CODE_USE_GATEWAY") || launcher.hasEnvPrefix("CLAUDE_CODE_USE_GATEWAY=") {
 		t.Fatalf("gateway-token launch env should unset CLAUDE_CODE_USE_GATEWAY: %s", launcher.environmentSummary())
@@ -432,6 +430,9 @@ func TestLaunchGatewayTokenAuthModeUsesLegacyAuthToken(t *testing.T) {
 	}
 	if launcher.hasEnvPrefix("CLAUDE_CODE_ENABLE_AUTO_MODE=") {
 		t.Fatalf("gateway-token launch env should not force legacy auto mode opt-in: %s", launcher.environmentSummary())
+	}
+	if launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=") {
+		t.Fatalf("gateway-token launch env should not set custom headers: %s", launcher.environmentSummary())
 	}
 	if !strings.Contains(out, "not active in --auth-mode gateway-token") {
 		t.Fatalf("launch output missing gateway-token warning:\n%s", out)

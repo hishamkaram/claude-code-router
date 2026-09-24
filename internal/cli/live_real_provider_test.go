@@ -199,7 +199,7 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 		}
 	default:
 		return []string{
-			"Gateway accepts only the generated local X-CCR-Session-Token",
+			"Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN",
 			"Original Anthropic subscription login and Anthropic API-key auth are not active",
 		}
 	}

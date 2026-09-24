@@ -58,72 +58,6 @@ func TestLiveLaunchMetadataCommandSkipsRouter(t *testing.T) {
 	}
 }
 
-func TestLiveLaunchKeepsNativeClaudeProfileUnchanged(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	if _, err := liveclaude.Check(ctx); err != nil {
-		t.Skipf("live Claude Code unavailable: %v", err)
-	}
-
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/models":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
-		case "/v1/chat/completions":
-			var payload liveOpenAIChatPayload
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				t.Errorf("provider decode error = %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
-				return
-			}
-			writeLiveOpenAITextFixture(w, payload, "chatcmpl-profile-isolation", "profile-isolation-ok", 4, 2)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer provider.Close()
-
-	nativeProfile := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", nativeProfile)
-	baseline := map[string]string{
-		"settings.json": `{"model":"native-model","permissions":{"allow":["Read"]}}`,
-		".claude.json":  `{"projects":{"/native":{"lastModel":"sonnet"}}}`,
-		"history.jsonl": `{"model":"sonnet","display":"native history"}`,
-	}
-	for path, contents := range baseline {
-		if err := os.WriteFile(filepath.Join(nativeProfile, path), []byte(contents), 0o600); err != nil {
-			t.Fatalf("WriteFile(%s) error = %v", path, err)
-		}
-	}
-
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
-	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "provider-only", "--", "profile isolation")
-	if err != nil {
-		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
-	}
-	if !strings.Contains(out, "profile-isolation-ok") {
-		t.Fatalf("launch output missing routed response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
-	}
-	for path, want := range baseline {
-		got, readErr := os.ReadFile(filepath.Join(nativeProfile, path))
-		if readErr != nil {
-			t.Fatalf("ReadFile(%s) error = %v", path, readErr)
-		}
-		if string(got) != want {
-			t.Fatalf("native Claude profile file %s changed from %q to %q", path, want, got)
-		}
-	}
-	entries, err := os.ReadDir(nativeProfile)
-	if err != nil {
-		t.Fatalf("ReadDir(native profile) error = %v", err)
-	}
-	if len(entries) != len(baseline) {
-		t.Fatalf("native Claude profile gained runtime entries: %#v", entries)
-	}
-}
-
 func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -195,30 +129,67 @@ func TestLiveLaunchRoutesThroughFakeOpenAIProvider(t *testing.T) {
 }
 
 func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	if _, err := liveclaude.Check(ctx); err != nil {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
 
-	configureIsolatedLivePickerClaude(t)
-	routedModel, provider := newLivePickerProvider(t)
+	chatCalled := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
+		case "/v1/chat/completions":
+			chatCalled = true
+			var payload liveOpenAIChatPayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Errorf("provider decode error = %v", err)
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if payload.Model != "gpt-5" {
+				t.Errorf("provider model = %q, want gpt-5", payload.Model)
+				http.Error(w, "bad model", http.StatusBadRequest)
+				return
+			}
+			writeLiveOpenAITextFixture(w, payload, "chatcmpl-no-startup", "no-startup-selection-ok", 4, 2)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
 	defer provider.Close()
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	addLivePickerModels(t, ctx, dbPath, provider.URL)
-	run := startLivePickerRun(t, ctx, dbPath)
-	defer run.close()
-	run.waitForText(t, ctx, "Detected a custom API key")
-	run.write(t, "\x1b[A\r", "accepting isolated placeholder API key")
-	run.waitForText(t, ctx, "Claude Code v")
-	run.write(t, "/model anthropic.ccr.gpt\r", "selecting configured model without startup alias")
-	run.waitForText(t, ctx, "Set model to CCR gpt")
-	run.write(t, "Reply with the routed test response.\r", "sending routed prompt after model selection")
-	run.assertRoutedModel(t, ctx, routedModel, "gpt-5")
-	run.waitForText(t, ctx, "picker-route-ok")
-	run.write(t, "/exit\r", "exiting Claude Code")
-	run.waitForExit(t, ctx)
+	for _, args := range [][]string{
+		{"--db", dbPath, "provider", "add", "litellm", "--base-url", provider.URL, "--no-api-key"},
+		{"--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"},
+	} {
+		if out, errOut, err := runLiveCommand(ctx, Dependencies{}, args...); err != nil {
+			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
+		}
+	}
+
+	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--print", "/model anthropic.ccr.gpt")
+	if err != nil {
+		if liveAutoLaunchAuthUnavailable(err) {
+			t.Skipf("live Claude Code Anthropic auth unavailable before model selection: %v", err)
+		}
+		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	}
+	if !chatCalled {
+		if liveAnthropicAuthUnavailable(out + errOut) {
+			t.Skipf("live Claude Code Anthropic auth unavailable before model selection:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+		}
+		t.Fatalf("fake OpenAI-compatible chat endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !strings.Contains(normalizeLiveClaudeText(out), normalizeLiveClaudeText("Set model to anthropic.ccr.gpt")) {
+		t.Fatalf("launch output missing model switch confirmation:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !strings.Contains(errOut, "No ccr startup model selected") {
+		t.Fatalf("launch stderr missing no-startup summary:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
 }
 
 func TestLiveLaunchPreserveAuthRoutesThroughFakeAnthropicCompatibleProvider(t *testing.T) {
@@ -433,7 +404,6 @@ func liveAnthropicAuthUnavailable(output string) bool {
 	normalized := strings.ToLower(output)
 	return strings.Contains(normalized, "not logged in") ||
 		strings.Contains(normalized, "failed to authenticate") ||
-		strings.Contains(normalized, "could not resolve authentication method") ||
 		strings.Contains(normalized, "oauth session expired") ||
 		strings.Contains(normalized, "oauth refresh token is no longer valid") ||
 		strings.Contains(normalized, "run /login to re-authenticate")
@@ -494,18 +464,6 @@ func openAIMessagesContainToolRole(messages []liveOpenAIChatMessage, needle stri
 		if message.Role == "tool" && strings.Contains(message.Content, needle) {
 			return true
 		}
-	}
-	return false
-}
-
-func liveLastOpenAIUserMessageIs(messages []liveOpenAIChatMessage, want string) bool {
-	want = strings.TrimSpace(want)
-	for index := len(messages) - 1; index >= 0; index-- {
-		if messages[index].Role != "user" {
-			continue
-		}
-		content := strings.TrimSpace(messages[index].Content)
-		return content == want || strings.HasSuffix(content, "\n"+want)
 	}
 	return false
 }

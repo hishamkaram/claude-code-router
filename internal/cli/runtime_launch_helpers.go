@@ -18,7 +18,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool, authMode, permissionMode string, profileDegradations []string) {
+func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool, authMode, permissionMode string) {
 	fmt.Fprintf(out, "Claude Code launched through %s (session=%d pid=%d)\n", gatewayURL, sessionID, pid)
 	if modelAlias != "" {
 		fmt.Fprintf(out, "Selected ccr model alias %q is exposed to Claude Code and used as the startup model.\n", modelAlias)
@@ -27,13 +27,8 @@ func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gate
 		if disableTools {
 			fmt.Fprintln(out, "Selected route does not support tools; Claude Code tools are disabled for this launch.")
 		}
-		fmt.Fprintln(out, "New Agent, skill, workflow, and teammate work inherits the active CCR model; explicit first-party child model overrides do not switch providers.")
 	} else {
 		fmt.Fprintln(out, "No ccr startup model selected; Claude Code will use its configured default model.")
-	}
-	fmt.Fprintln(out, "Claude runtime state is isolated for this CCR launch; native Claude model and session state are not modified.")
-	if len(profileDegradations) > 0 {
-		fmt.Fprintf(out, "Profile compatibility warning: skipped symlinked Claude customization paths (%s); those customizations are unavailable in this CCR launch.\n", strings.Join(profileDegradations, ", "))
 	}
 	writeLaunchAuthSummary(out, authMode)
 	writeAutoModeClassifierSummary(out, modelAlias, permissionMode)
@@ -82,7 +77,7 @@ func writeLaunchAuthSummary(out io.Writer, authMode string) {
 		fmt.Fprintln(out, "Provider-only auth is active for this launch; Claude Code authenticates only to CCR's loopback gateway with a generated local token.")
 		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in provider-only mode.")
 	case launchAuthModeGatewayToken:
-		fmt.Fprintln(out, "Gateway accepts only the generated local X-CCR-Session-Token for this process.")
+		fmt.Fprintln(out, "Gateway accepts only the generated local ANTHROPIC_AUTH_TOKEN for this process.")
 		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in --auth-mode gateway-token; use --auth-mode provider-only for the product-facing spelling.")
 	case launchAuthModeSubscriptionPool:
 		fmt.Fprintln(out, "Claude authenticates only to this process's loopback gateway with a generated local token.")

@@ -37,21 +37,20 @@ type admissionOptions struct {
 }
 
 type admissionRequest struct {
-	Version            int
-	Prompt             []byte
-	Options            admissionOptions
-	Forwarded          []string
-	ForwardedSeparated bool `json:",omitempty"`
-	RequestedSession   string
-	ExpectedParent     string
-	Context            admissionContext
+	Version          int
+	Prompt           []byte
+	Options          admissionOptions
+	Forwarded        []string
+	RequestedSession string
+	ExpectedParent   string
+	Context          admissionContext
 }
 
 func requestFingerprint(invocation launchInvocation, prompt []byte, execution admissionContext) (string, error) {
 	request := admissionRequest{
 		Version: 1, Prompt: prompt, Context: execution,
 		RequestedSession: invocation.resumeSession, ExpectedParent: invocation.expectedParent,
-		Forwarded: append([]string{}, invocation.claudeArgs...), ForwardedSeparated: invocation.claudeArgsSeparated,
+		Forwarded: append([]string{}, invocation.claudeArgs...),
 		Options: admissionOptions{
 			Model: invocation.modelAlias, Print: invocation.printMode,
 			AuthMode:      normalizedAdmissionAuthMode(invocation.authMode),

@@ -45,7 +45,7 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		completeRoute(span, ctx, observedWriter.Status(), usage, routeCompletionState{})
 		h.completeTransportObservation(ctx, span)
 	}(r.Context())
-	route, validationErr := h.selectRouteForTokenCountRequest(r.Context(), claudeCodeSessionID(r), req)
+	route, validationErr := h.selectRouteForRequest(r.Context(), claudeCodeSessionID(r), req)
 	if validationErr != nil {
 		writeAnthropicError(w, validationErr.status, validationErr.message)
 		return
@@ -75,7 +75,7 @@ func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Requ
 		return observability.TokenUsage{}
 	}
 	w.Header().Set(ccrTokenCountModeHeader, tokenCountModeProvider)
-	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, false, nil, &route)
+	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, false, nil)
 }
 
 func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) observability.TokenUsage {
@@ -176,9 +176,7 @@ func decodeCountTokensResponse(body io.Reader) (int, error) {
 
 func writeProviderTokenCount(w http.ResponseWriter, inputTokens int) {
 	w.Header().Set(ccrTokenCountModeHeader, tokenCountModeProvider)
-	if err := writeJSON(w, http.StatusOK, map[string]int{"input_tokens": inputTokens}); err != nil {
-		return
-	}
+	writeJSON(w, http.StatusOK, map[string]int{"input_tokens": inputTokens})
 }
 
 func writeEstimatedTokenCount(w http.ResponseWriter, body []byte, fallback string) {
@@ -186,9 +184,7 @@ func writeEstimatedTokenCount(w http.ResponseWriter, body []byte, fallback strin
 	if fallback != "" {
 		w.Header().Set(ccrTokenCountFallbackHeader, fallback)
 	}
-	if err := writeJSON(w, http.StatusOK, map[string]int{"input_tokens": estimatedTokenCount(body)}); err != nil {
-		return
-	}
+	writeJSON(w, http.StatusOK, map[string]int{"input_tokens": estimatedTokenCount(body)})
 }
 
 func writeTokenCountCanceled(w http.ResponseWriter, ctx context.Context) bool {

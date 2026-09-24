@@ -96,18 +96,13 @@ func proveLiveDetachedClaudeContinuation(t *testing.T, legacy string) {
 		}
 		t.Logf("%s job=%s session=%s parent=%s coverage=%s", phase, head.JobID, head.SessionID, head.ResumedFrom, head.Cleanup.Coverage)
 	}
-	// Changing the native profile must not replace the durable CCR profile. The
-	// detached session remains resumable because its conversation state belongs
-	// to the CCR job, not to the caller's current native profile.
+	// An isolated empty profile creates a real missing-history failure without
+	// production code inspecting Claude's transcript storage layout.
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	continued := launchLiveContinuation(t, ctx, binary, database, directory, "Continue the original session.", head, false)
-	if continued.Status != "completed" || !continued.Stopped() || continued.ResultEvidence == nil || continued.RequestedResumeSession != head.SessionID {
-		diagnostic, _ := os.ReadFile(continued.Log)
-		t.Fatalf("profile-isolated continuation after native profile change: %+v\n%s", continued, diagnostic)
-	}
-	result, err := jobs.ReadCommittedOutput(ctx, continued.Log, *continued.ResultEvidence)
-	if err != nil || result.Text != marker {
-		t.Fatalf("profile-isolated continuation lost history: %+v %v", result, err)
+	missing := launchLiveContinuation(t, ctx, binary, database, directory, "Continue the original session.", head, false)
+	if missing.Status != "failed" || missing.ReasonCode != jobs.ReasonStartupFailed || !missing.Stopped() || missing.RequestedResumeSession != head.SessionID {
+		diagnostic, _ := os.ReadFile(missing.Log)
+		t.Fatalf("missing history classification: %+v\n%s", missing, diagnostic)
 	}
 }
 

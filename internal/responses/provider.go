@@ -29,22 +29,15 @@ func AnthropicResponseFromResponses(resp *Response) (*AnthropicResponse, error) 
 	}
 	blocks := make([]AnthropicContentBlock, 0, len(resp.Output))
 	hasToolUse := false
-	hasMalformedChildTool := false
 	for index := range resp.Output {
-		converted, toolUse, malformedChildTool, err := anthropicBlocksFromOutputItem(resp.Output[index])
+		converted, toolUse, err := anthropicBlocksFromOutputItem(resp.Output[index])
 		if err != nil {
 			return nil, err
 		}
 		if toolUse {
 			hasToolUse = true
 		}
-		if malformedChildTool {
-			hasMalformedChildTool = true
-		}
 		blocks = append(blocks, converted...)
-	}
-	if hasMalformedChildTool && hasToolUse {
-		return nil, fmt.Errorf("%w: malformed Agent, Task, or Workflow tool input cannot be combined with another tool call", ErrMalformedProviderOutput)
 	}
 	if len(blocks) == 0 && resp.OutputText != "" {
 		blocks = append(blocks, AnthropicContentBlock{Type: "text", Text: resp.OutputText})
@@ -106,21 +99,20 @@ func anthropicStopReason(resp *Response, hasToolUse bool) string {
 	return "end_turn"
 }
 
-func anthropicBlocksFromOutputItem(item OutputItem) (blocks []AnthropicContentBlock, toolUse, malformedChildTool bool, err error) {
+func anthropicBlocksFromOutputItem(item OutputItem) ([]AnthropicContentBlock, bool, error) {
 	switch item.Type {
 	case "message":
-		blocks, err = textBlocksFromResponseMessage(item)
-		return blocks, false, false, err
+		blocks, err := textBlocksFromResponseMessage(item)
+		return blocks, false, err
 	case "function_call":
 		block, toolUse, err := functionToolUseBlock(item)
-		malformedChildTool := !toolUse && isChildSpawnToolName(item.Name) && err == nil
-		return []AnthropicContentBlock{block}, toolUse, malformedChildTool, err
+		return []AnthropicContentBlock{block}, toolUse, err
 	case "computer_call":
-		return nil, false, false, fmt.Errorf("%w: OpenAI Responses computer_call requires a CCR managed CUA executor", ErrMalformedProviderOutput)
+		return nil, false, fmt.Errorf("%w: OpenAI Responses computer_call requires a CCR managed CUA executor", ErrMalformedProviderOutput)
 	case "reasoning", "function_call_output", "computer_call_output", "tool_search_call", "tool_search_output":
-		return nil, false, false, nil
+		return nil, false, nil
 	default:
-		return nil, false, false, fmt.Errorf("%w: unsupported Responses output item type %q", ErrMalformedProviderOutput, item.Type)
+		return nil, false, fmt.Errorf("%w: unsupported Responses output item type %q", ErrMalformedProviderOutput, item.Type)
 	}
 }
 
@@ -163,14 +155,9 @@ func functionToolUseBlock(item OutputItem) (AnthropicContentBlock, bool, error) 
 			input = map[string]any{"value": value}
 		}
 	}
-	if isAgentChildToolName(item.Name) {
+	if strings.EqualFold(strings.TrimSpace(item.Name), "Agent") {
 		input = agentinput.Normalize(input)
-		if message := invalidAgentToolInputMessage(item.Name, input); message != "" {
-			return AnthropicContentBlock{Type: "text", Text: message}, false, nil
-		}
-	}
-	if isWorkflowToolName(item.Name) {
-		if message := invalidWorkflowToolInputMessage(input); message != "" {
+		if message := invalidAgentToolInputMessage(input); message != "" {
 			return AnthropicContentBlock{Type: "text", Text: message}, false, nil
 		}
 	}
@@ -182,32 +169,7 @@ func functionToolUseBlock(item OutputItem) (AnthropicContentBlock, bool, error) 
 	}, true, nil
 }
 
-func isAgentChildToolName(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "agent", "task":
-		return true
-	default:
-		return false
-	}
-}
-
-func isWorkflowToolName(name string) bool {
-	return strings.EqualFold(strings.TrimSpace(name), "workflow")
-}
-
-func isChildSpawnToolName(name string) bool {
-	return isAgentChildToolName(name) || isWorkflowToolName(name)
-}
-
-func invalidWorkflowToolInputMessage(input map[string]any) string {
-	script, ok := input["script"].(string)
-	if !ok || strings.TrimSpace(script) == "" {
-		return "CCR provider compatibility error: external provider returned invalid Workflow tool input. The workflow was not started."
-	}
-	return ""
-}
-
-func invalidAgentToolInputMessage(toolName string, input map[string]any) string {
+func invalidAgentToolInputMessage(input map[string]any) string {
 	missing := make([]string, 0, 2)
 	if trimmedStringField(input, "prompt") == "" {
 		missing = append(missing, "prompt")
@@ -218,14 +180,7 @@ func invalidAgentToolInputMessage(toolName string, input map[string]any) string 
 	if len(missing) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("CCR provider compatibility error: external provider returned invalid %s tool input (missing required %s). The subagent was not started.", childToolDisplayName(toolName), strings.Join(missing, " and "))
-}
-
-func childToolDisplayName(toolName string) string {
-	if strings.EqualFold(strings.TrimSpace(toolName), "task") {
-		return "Task"
-	}
-	return "Agent"
+	return fmt.Sprintf("CCR provider compatibility error: external provider returned invalid Agent tool input (missing required %s). The subagent was not started.", strings.Join(missing, " and "))
 }
 
 func trimmedStringField(input map[string]any, key string) string {

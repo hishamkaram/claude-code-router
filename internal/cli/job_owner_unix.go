@@ -12,8 +12,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -83,10 +81,15 @@ func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) err
 }
 
 func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies, admission jobAdmission, record jobs.Record, owner *jobs.Owner, registry *jobs.Registry, lease *jobs.SessionLease) error {
-	invocation, err := prepareOwnedClaudeInvocation(ctx, admission, &record)
+	invocation, err := parseLaunchInvocation(admission.Args)
 	if err != nil {
 		return owner.FinishAdmission(context.WithoutCancel(ctx), registry, jobs.FinalOutcome{RunError: err})
 	}
+	sessionFlag := "--session-id"
+	if record.RequestedResumeSession != "" {
+		sessionFlag = "--resume"
+	}
+	invocation.claudeArgs = append([]string{sessionFlag, record.SessionID}, invocation.claudeArgs...)
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	accounting := gateway.NewRequestAccounting()
@@ -116,10 +119,6 @@ func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies,
 		}
 		return observationErr
 	}
-	deps.launchProfilePrepared = func(profileDir string) error {
-		record.ClaudeProfileDir = profileDir
-		return owner.ClaudeProfileDir(profileDir)
-	}
 	runErr := runLaunch(runCtx, cmd, &options{dbPath: admission.DB}, deps, invocation)
 	if runErr != nil {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Detached job execution failed:", runErr)
@@ -129,144 +128,6 @@ func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies,
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer finishCancel()
 	return owner.FinishAdmission(finishCtx, registry, outcome)
-}
-
-func prepareOwnedClaudeInvocation(ctx context.Context, admission jobAdmission, record *jobs.Record) (launchInvocation, error) {
-	invocation, err := parseLaunchInvocation(admission.Args)
-	if err != nil {
-		return launchInvocation{}, err
-	}
-	sessionFlag := "--session-id"
-	if record.RequestedResumeSession != "" {
-		sessionFlag = "--resume"
-		invocation.resumeSession = record.RequestedResumeSession
-	}
-	invocation.claudeArgs = append([]string{sessionFlag, record.SessionID}, invocation.claudeArgs...)
-	// The detached session ID is the durable Claude profile identity. The profile
-	// path is persisted in the job record after profile initialization; continuations must
-	// reuse it, or migrate that owned profile before a broad native source can
-	// contain it. Recomputing a path from current environment state can strand
-	// the JSONL session that --resume needs.
-	source, err := currentClaudeConfigDir()
-	if err != nil {
-		return launchInvocation{}, err
-	}
-	persistedProfile := strings.TrimSpace(record.ClaudeProfileDir)
-	requireExistingProfile := record.RequestedResumeSession != "" && persistedProfile != ""
-	if record.RequestedResumeSession != "" && record.ResumedFrom != "" {
-		// The session authority has already validated and stopped the predecessor
-		// in ResumeHead. Read through the store so a genuine schema-1 predecessor
-		// can be migrated as well; Registry.JobStatus intentionally accepts only
-		// schema-2 records and would reject the compatibility case here.
-		predecessor, predecessorErr := (jobs.Store{Root: admission.Root}).StatusContext(ctx, record.ResumedFrom)
-		if predecessorErr != nil {
-			return launchInvocation{}, fmt.Errorf("reading predecessor job %s for detached Claude profile: %w", record.ResumedFrom, predecessorErr)
-		}
-		if predecessorProfile := strings.TrimSpace(predecessor.ClaudeProfileDir); predecessorProfile != "" {
-			persistedProfile = predecessorProfile
-			requireExistingProfile = true
-		}
-	}
-	invocation.claudeProfileDir, err = resolveDetachedClaudeProfileDestination(
-		admission.Root, source, record.SessionID, persistedProfile, requireExistingProfile,
-	)
-	if err != nil {
-		return launchInvocation{}, err
-	}
-	return invocation, nil
-}
-
-func detachedClaudeProfileDestination(root, sessionID string) string {
-	return filepath.Join(root, "claude-profiles", sessionID)
-}
-
-func detachedClaudeProfileDestinationForSource(root, source, sessionID string) (string, error) {
-	candidate := detachedClaudeProfileDestination(root, sessionID)
-	if !claudePathContains(source, candidate) && claudeProfileBaseWritable(root) {
-		return candidate, nil
-	}
-	for _, base := range claudePersistentProfileStorageBases() {
-		candidate = filepath.Join(base, "claude-code-router", "claude-profiles", "detached", sessionID)
-		if claudePathContains(source, candidate) || !claudeProfileBaseWritable(base) {
-			continue
-		}
-		return candidate, nil
-	}
-	return "", fmt.Errorf("locating detached CCR Claude profile outside source profile %s: no writable profile root is available", source)
-}
-
-func resolveDetachedClaudeProfileDestination(root, source, sessionID, persisted string, requireExisting bool) (string, error) {
-	persisted = strings.TrimSpace(persisted)
-	if persisted == "" {
-		return detachedClaudeProfileDestinationForSource(root, source, sessionID)
-	}
-	if !claudePathContains(source, persisted) {
-		return validatePersistedDetachedClaudeProfile(persisted, requireExisting)
-	}
-	return resolveDetachedClaudeProfileMigration(root, source, sessionID, persisted, requireExisting)
-}
-
-func validatePersistedDetachedClaudeProfile(persisted string, requireExisting bool) (string, error) {
-	if !requireExisting {
-		return persisted, nil
-	}
-	exists, err := validateClaudeProfileMigrationSource(persisted)
-	if err != nil {
-		return "", fmt.Errorf("reusing detached CCR Claude profile %s: %w", persisted, err)
-	}
-	if !exists {
-		return "", fmt.Errorf("reusing detached CCR Claude profile %s: profile is missing", persisted)
-	}
-	return persisted, nil
-}
-
-func resolveDetachedClaudeProfileMigration(root, source, sessionID, persisted string, requireExisting bool) (string, error) {
-	candidate, err := detachedClaudeProfileDestinationForSource(root, source, sessionID)
-	if err != nil {
-		return "", err
-	}
-	if filepath.Clean(persisted) == filepath.Clean(candidate) {
-		return candidate, nil
-	}
-	destinationExists, err := inspectClaudeProfileMigrationDestination(candidate)
-	if err != nil {
-		return "", err
-	}
-	if destinationExists {
-		return recoverDetachedClaudeProfileMigration(persisted, candidate)
-	}
-	sourceExists, sourceErr := validateClaudeProfileMigrationSource(persisted)
-	if sourceErr != nil {
-		return "", sourceErr
-	}
-	if !sourceExists {
-		if requireExisting {
-			return "", fmt.Errorf("reusing detached CCR Claude profile %s: profile is missing", persisted)
-		}
-		return candidate, nil
-	}
-	if err := migrateClaudeProfileDirectory(persisted, candidate); err != nil {
-		return "", err
-	}
-	return candidate, nil
-}
-
-func recoverDetachedClaudeProfileMigration(source, destination string) (string, error) {
-	// Migration commits the destination before the owner can persist its new
-	// path. If the owner crashes in that window, the next attempt must adopt
-	// the verified CCR-owned destination instead of treating the old record as
-	// unrecoverable. When both trees exist, the destination is already the
-	// committed copy; remove only the validated old CCR source.
-	sourceExists, err := validateClaudeProfileMigrationSource(source)
-	if err != nil {
-		return "", err
-	}
-	if sourceExists {
-		if removeErr := os.RemoveAll(source); removeErr != nil {
-			return "", fmt.Errorf("finishing detached Claude profile migration: %w", removeErr)
-		}
-	}
-	return destination, nil
 }
 
 type jobClaudeLauncher struct {

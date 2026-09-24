@@ -45,14 +45,6 @@ func ReadCurrentCredentials() (Credentials, error) {
 	if err != nil {
 		return Credentials{}, err
 	}
-	return ReadCredentialsAt(path)
-}
-
-// ReadCredentialsAt reads Claude's file-backed OAuth credentials from an
-// explicitly selected profile. Callers that support profile overrides must use
-// this entry point instead of ReadCurrentCredentials so the process environment
-// cannot select a different account behind their back.
-func ReadCredentialsAt(path string) (Credentials, error) {
 	return readCredentialsFile(path, runtime.GOOS)
 }
 

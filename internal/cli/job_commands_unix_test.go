@@ -9,7 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -45,54 +45,14 @@ func TestJobLaunchArguments(t *testing.T) {
 	if !inv.detach || !inv.printMode || inv.promptFile != "x" {
 		t.Fatalf("incorrect parser state: %+v", inv)
 	}
-	want := []string{"--model", "fixture", "--print", "--", "--output-format", "stream-json"}
-	if got := detachedOwnerArgs(inv); !slices.Equal(got, want) {
-		t.Fatalf("detached owner arguments: %v", got)
+	want := []string{"--model", "fixture", "-p", "--", "--output-format", "stream-json"}
+	if got := foregroundJobArgs(args); !reflect.DeepEqual(got, want) {
+		t.Fatalf("forwarding: %v", got)
 	}
 	for _, arg := range []string{"--detach", "--prompt-file"} {
 		if err := validateLaunchPassthroughArgs([]string{arg, "x"}); err == nil {
 			t.Fatalf("CCR option bypass: %s", arg)
 		}
-	}
-}
-
-func TestDetachedJobArgumentsPreserveClaudeOptionValues(t *testing.T) {
-	args := []string{
-		"--model", "fixture", "--detach", "-p", "--prompt-file=x", "--",
-		"--system-prompt", "--resume", "--output-format", "stream-json", "--verbose",
-	}
-	inv, err := parseLaunchInvocation(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"--system-prompt", "--resume", "--output-format", "stream-json", "--verbose"}
-	if !slices.Equal(inv.claudeArgs, want) {
-		t.Fatalf("forwarded Claude arguments: %v, want %v", inv.claudeArgs, want)
-	}
-	if got := detachedOwnerArgs(inv); !slices.Equal(got, append([]string{"--model", "fixture", "--print", "--"}, want...)) {
-		t.Fatalf("detached owner arguments: %v", got)
-	}
-	if inv.resumeSession != "" {
-		t.Fatalf("Claude option value was interpreted as detached resume: %q", inv.resumeSession)
-	}
-}
-
-func TestDetachedOwnerPreservesClaudeModelBoundary(t *testing.T) {
-	args := []string{"--model", "fixture", "--detach", "-p", "--", "--model", "native"}
-	invocation, err := parseLaunchInvocation(args)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ownerInvocation, err := parseLaunchInvocation(detachedOwnerArgs(invocation))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ownerInvocation.modelAlias != "fixture" {
-		t.Fatalf("owner model alias = %q, want fixture", ownerInvocation.modelAlias)
-	}
-	if !ownerInvocation.claudeArgsSeparated || !slices.Equal(ownerInvocation.claudeArgs, []string{"--model", "native"}) {
-		t.Fatalf("owner Claude arguments = %v (separated=%t), want separated --model native", ownerInvocation.claudeArgs, ownerInvocation.claudeArgsSeparated)
 	}
 }
 
@@ -190,9 +150,7 @@ func TestDetachedRejectsAmbiguousClaudeBoundary(t *testing.T) {
 	for _, tail := range [][]string{{"--"}, {"--system-prompt", "--", "--resume", "fixture"}, {"--system-prompt", "--", "--session-id", "fixture"}, {"--system-prompt", "--", "--no-session-persistence"}} {
 		cmd := NewRootCommand(context.Background(), Dependencies{})
 		cmd.SetArgs(append([]string{"launch", "--detach", "-p", "--prompt-file", prompt, "--"}, tail...))
-		if err := cmd.Execute(); err == nil ||
-			(!strings.Contains(err.Error(), "standalone -- is not supported") &&
-				!strings.Contains(err.Error(), "cannot be passed after Claude Code's forwarded option separator")) {
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "standalone -- is not supported") {
 			t.Errorf("expected boundary validation for %v, got %v", tail, err)
 		}
 	}

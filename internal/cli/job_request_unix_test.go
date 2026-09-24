@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/google/uuid"
 )
 
 func TestRequestFingerprintBindsPayloadAndExcludesLocatorsAndGeneratedIDs(t *testing.T) {
@@ -57,44 +55,6 @@ func TestRequestFingerprintBindsPayloadAndExcludesLocatorsAndGeneratedIDs(t *tes
 	}
 }
 
-func TestRequestFingerprintPreservesLegacyEncodingWithoutForwardedSeparator(t *testing.T) {
-	invocation, err := parseLaunchInvocation([]string{"--detach", "-p", "--model=alias", "--prompt-file=/prompt"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	execution := admissionContext{Directory: "/work", Database: "/db", JobRoot: "/jobs", User: 42, Profile: map[string]string{"HOME": "/home"}}
-	got, err := requestFingerprint(invocation, []byte("prompt"), execution)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy, err := admissionDigest(struct {
-		Version          int
-		Prompt           []byte
-		Options          admissionOptions
-		Forwarded        []string
-		RequestedSession string
-		ExpectedParent   string
-		Context          admissionContext
-	}{
-		Version: 1, Prompt: []byte("prompt"), Context: execution,
-		Forwarded: invocation.claudeArgs,
-		Options: admissionOptions{
-			Model: invocation.modelAlias, Print: invocation.printMode,
-			AuthMode: normalizedAdmissionAuthMode(invocation.authMode), ClaudeAccount: invocation.claudeAccount,
-			PermissionMode: invocation.permissionMode, NoHistory: invocation.noHistory,
-			NoLifecycle: invocation.noLifecycle, NoStatusline: invocation.noStatusline,
-			CUA: invocation.cuaConfig, CUAExternalURL: invocation.cuaExternalURL, CUATokenEnv: invocation.cuaTokenEnv,
-			CUAExplicit: [5]bool{invocation.cuaModeSet, invocation.cuaExecutorSet, invocation.cuaLimitsSet, invocation.cuaURLSet, invocation.cuaTokenEnvSet},
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != legacy {
-		t.Fatalf("request fingerprint changed legacy encoding: got %q, legacy %q", got, legacy)
-	}
-}
-
 func TestAdmissionCanonicalPathResolvesMissingChildrenThroughSymlink(t *testing.T) {
 	root := t.TempDir()
 	actual := filepath.Join(root, "actual")
@@ -127,147 +87,6 @@ func TestAdmissionContextPreservesExplicitEmptyProfile(t *testing.T) {
 	}
 	if got.User != os.Geteuid() || !filepath.IsAbs(got.Directory) {
 		t.Fatalf("incorrect effective execution context: %+v", got)
-	}
-}
-
-func TestDetachedClaudeProfileDestinationUsesSessionIdentity(t *testing.T) {
-	root := "/var/lib/ccr/jobs"
-	sessionID := "11111111-1111-4111-8111-111111111111"
-	got := detachedClaudeProfileDestination(root, sessionID)
-	want := "/var/lib/ccr/jobs/claude-profiles/11111111-1111-4111-8111-111111111111"
-	if got != want {
-		t.Fatalf("detachedClaudeProfileDestination() = %q, want %q", got, want)
-	}
-}
-
-func TestDetachedClaudeProfileDestinationAvoidsBroadNativeSource(t *testing.T) {
-	source := t.TempDir()
-	root := filepath.Join(source, "jobs")
-	sessionID := "11111111-1111-4111-8111-111111111111"
-	got, err := detachedClaudeProfileDestinationForSource(root, source, sessionID)
-	if err != nil {
-		t.Fatalf("detachedClaudeProfileDestinationForSource() error = %v", err)
-	}
-	if claudePathContains(source, got) {
-		t.Fatalf("detached profile %q is inside native source %q", got, source)
-	}
-	if got == detachedClaudeProfileDestination(root, sessionID) {
-		t.Fatalf("broad native source reused unsafe job-root profile %q", got)
-	}
-}
-
-func TestDetachedClaudeProfileDestinationMigratesPersistedProfileWhenSourceBroadens(t *testing.T) {
-	root := t.TempDir()
-	sessionID := uuid.NewString()
-	persisted := detachedClaudeProfileDestination(root, sessionID)
-	if err := os.MkdirAll(persisted, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(persisted, ".ccr-profile-ready"), []byte("ccr private Claude profile\nsource=previous\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(persisted, "projects.jsonl"), []byte("session history"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	broadSource := filepath.Dir(root)
-	got, err := resolveDetachedClaudeProfileDestination(root, broadSource, sessionID, persisted, true)
-	if err != nil {
-		t.Fatalf("resolveDetachedClaudeProfileDestination() error = %v", err)
-	}
-	if got == persisted || claudePathContains(broadSource, got) {
-		t.Fatalf("migrated profile = %q; want destination outside broad source %q", got, broadSource)
-	}
-	if _, statErr := os.Stat(persisted); !os.IsNotExist(statErr) {
-		t.Fatalf("persisted profile source still exists: %v", statErr)
-	}
-	history, err := os.ReadFile(filepath.Join(got, "projects.jsonl"))
-	if err != nil || string(history) != "session history" {
-		t.Fatalf("migrated session history = %q, %v", history, err)
-	}
-}
-
-func TestDetachedClaudeProfileDestinationRejectsUnownedPersistedProfile(t *testing.T) {
-	root := t.TempDir()
-	sessionID := uuid.NewString()
-	persisted := detachedClaudeProfileDestination(root, sessionID)
-	if err := os.MkdirAll(persisted, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	settings := filepath.Join(persisted, "settings.json")
-	if err := os.WriteFile(settings, []byte(`{"model":"native-model"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	broadSource := filepath.Dir(root)
-	if _, err := resolveDetachedClaudeProfileDestination(root, broadSource, sessionID, persisted, true); err == nil {
-		t.Fatal("resolveDetachedClaudeProfileDestination() accepted an unowned persisted directory")
-	}
-	if got, err := os.ReadFile(settings); err != nil || string(got) != `{"model":"native-model"}` {
-		t.Fatalf("unowned persisted profile changed after rejection: %q, %v", got, err)
-	}
-}
-
-func TestDetachedClaudeProfileDestinationRecoversCommittedMigration(t *testing.T) {
-	root := t.TempDir()
-	sessionID := uuid.NewString()
-	persisted := detachedClaudeProfileDestination(root, sessionID)
-	broadSource := filepath.Dir(root)
-	candidate, err := detachedClaudeProfileDestinationForSource(root, broadSource, sessionID)
-	if err != nil {
-		t.Fatalf("detachedClaudeProfileDestinationForSource() error = %v", err)
-	}
-	if candidate == persisted || claudePathContains(broadSource, candidate) {
-		t.Fatalf("recovery candidate = %q; want outside source %q and distinct from %q", candidate, broadSource, persisted)
-	}
-	if mkdirErr := os.MkdirAll(candidate, 0o700); mkdirErr != nil {
-		t.Fatal(mkdirErr)
-	}
-	if writeErr := os.WriteFile(filepath.Join(candidate, ".ccr-profile-ready"), []byte("ccr private Claude profile\nsource=previous\n"), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-	if writeErr := os.WriteFile(filepath.Join(candidate, "projects.jsonl"), []byte("committed session history"), 0o600); writeErr != nil {
-		t.Fatal(writeErr)
-	}
-
-	got, err := resolveDetachedClaudeProfileDestination(root, broadSource, sessionID, persisted, true)
-	if err != nil {
-		t.Fatalf("resolveDetachedClaudeProfileDestination() recovery error = %v", err)
-	}
-	if got != candidate {
-		t.Fatalf("recovered profile = %q, want %q", got, candidate)
-	}
-	history, err := os.ReadFile(filepath.Join(got, "projects.jsonl"))
-	if err != nil || string(history) != "committed session history" {
-		t.Fatalf("recovered session history = %q, %v", history, err)
-	}
-}
-
-func TestDetachedClaudeProfileDestinationFinishesInterruptedMigration(t *testing.T) {
-	root := t.TempDir()
-	sessionID := uuid.NewString()
-	persisted := detachedClaudeProfileDestination(root, sessionID)
-	broadSource := filepath.Dir(root)
-	candidate, err := detachedClaudeProfileDestinationForSource(root, broadSource, sessionID)
-	if err != nil {
-		t.Fatalf("detachedClaudeProfileDestinationForSource() error = %v", err)
-	}
-	for _, directory := range []string{persisted, candidate} {
-		if mkdirErr := os.MkdirAll(directory, 0o700); mkdirErr != nil {
-			t.Fatal(mkdirErr)
-		}
-		if writeErr := os.WriteFile(filepath.Join(directory, ".ccr-profile-ready"), []byte("ccr private Claude profile\nsource=previous\n"), 0o600); writeErr != nil {
-			t.Fatal(writeErr)
-		}
-	}
-
-	got, err := resolveDetachedClaudeProfileDestination(root, broadSource, sessionID, persisted, true)
-	if err != nil {
-		t.Fatalf("resolveDetachedClaudeProfileDestination() interrupted migration error = %v", err)
-	}
-	if got != candidate {
-		t.Fatalf("finished migration profile = %q, want %q", got, candidate)
-	}
-	if _, err := os.Stat(persisted); !os.IsNotExist(err) {
-		t.Fatalf("interrupted migration source still exists: %v", err)
 	}
 }
 

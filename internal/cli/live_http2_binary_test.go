@@ -163,6 +163,12 @@ func runHTTP2BinaryCase(t *testing.T, binary, dbPath string, evidence http2Binar
 		prepareHTTP2AgentRepository(t, cmd.Dir)
 	}
 	cmd.Env = http2BinaryEnvironment(t)
+	if evidence.Scenario == "multi_turn_agent" {
+		cmd.Env = applyClaudeEnvironment(cmd.Env, ClaudeEnvironment{Set: []string{
+			"CLAUDE_CODE_SUBAGENT_MODEL=anthropic.ccr." + evidence.Alias,
+			"CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1",
+		}})
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	var input io.WriteCloser
