@@ -115,10 +115,15 @@ model:
 ccr launch --model coding-model
 ```
 
-If Claude auth is not available, an explicit `--model <alias>` lets the default
-`--auth-mode auto` resolve to provider-only local gateway auth. A no-model launch
-without Claude auth fails before Claude Code starts; CCR does not choose a
-provider implicitly for first-party requests.
+When `--model <alias>` selects a provider-backed route, the default
+`--auth-mode auto` resolves to provider-only local gateway auth even if Claude
+login is detected. This avoids requiring subscription auth to start the
+provider-routed session. A first-party Anthropic route without its own provider
+credential uses Claude auth instead. A no-model launch without Claude auth fails
+before Claude Code starts; CCR does not choose a provider implicitly for
+first-party requests. To keep both provider and subscription routes available
+while starting on a provider alias, use `--auth-mode preserve` with a working
+Claude login.
 
 CCR reserves `--model`, `--auth-mode`, `--claude-account`,
 `--permission-mode`, `--print`/`-p`, and `--db`. Use `ccr launch --help` for CCR
@@ -196,10 +201,11 @@ remains client-managed by Claude Code.
 
 ## Authentication
 
-`ccr launch` defaults to `--auth-mode auto`. Auto preserves a Claude Code
-subscription login or Anthropic API-key authentication when one is available,
-and resolves to provider-only when Claude auth is absent and `--model <alias>`
-selects a registered provider alias:
+`ccr launch` defaults to `--auth-mode auto`. With no startup alias, auto preserves
+a Claude Code subscription login or Anthropic API-key authentication when one
+is available. With a provider-backed `--model <alias>`, auto selects
+provider-only auth regardless of Claude login state. A first-party Anthropic
+alias without a configured provider credential uses Claude auth:
 
 ```bash
 ccr launch

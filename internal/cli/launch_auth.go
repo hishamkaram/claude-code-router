@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/claudeaccount"
+	"github.com/hishamkaram/claude-code-router/internal/providers"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -88,13 +89,46 @@ func resolveLaunchAuthMode(
 	if invocation.authMode != launchAuthModeAuto {
 		return invocation.authMode, nil
 	}
+	if modelAlias != "" {
+		usesClaudeSubscription, err := modelAliasUsesClaudeSubscription(ctx, s, modelAlias)
+		if err != nil {
+			return "", err
+		}
+		if !usesClaudeSubscription {
+			return launchAuthModeProviderOnly, nil
+		}
+		if launchClaudeAuthPresentOrUnknown(ctx, deps) {
+			return launchAuthModePreserve, nil
+		}
+		return "", missingClaudeAuthForModelAliasError(modelAlias)
+	}
 	if launchClaudeAuthPresentOrUnknown(ctx, deps) {
 		return launchAuthModePreserve, nil
 	}
-	if modelAlias != "" {
-		return launchAuthModeProviderOnly, nil
-	}
 	return "", missingClaudeAuthForAutoLaunchError(ctx, s)
+}
+
+func modelAliasUsesClaudeSubscription(ctx context.Context, s *store.Store, modelAlias string) (bool, error) {
+	model, err := s.GetModel(ctx, modelAlias)
+	if err != nil {
+		return false, fmt.Errorf("resolving launch auth for model alias %q: %w", modelAlias, err)
+	}
+	provider, err := s.GetProvider(ctx, model.ProviderName)
+	if err != nil {
+		return false, fmt.Errorf("resolving launch auth for provider %q: %w", model.ProviderName, err)
+	}
+	// Only the first-party Anthropic endpoint with no provider credential uses
+	// Claude Code's incoming subscription/API-key auth. A custom Anthropic-
+	// compatible endpoint with no key may intentionally be unauthenticated.
+	return providers.IsFirstPartyAnthropicEndpoint(provider.BaseURL) &&
+		strings.TrimSpace(provider.SecretRef) == "", nil
+}
+
+func missingClaudeAuthForModelAliasError(modelAlias string) error {
+	return fmt.Errorf(
+		"claude subscription authentication is required for model alias %q but was not found; run claude /login or configure an Anthropic provider API key",
+		modelAlias,
+	)
 }
 
 func preflightAutoLaunchAuthBeforeStore(

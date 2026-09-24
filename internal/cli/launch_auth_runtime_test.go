@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-func TestLaunchAutoWithClaudeAuthPreservesFirstPartyAuth(t *testing.T) {
+func TestLaunchAutoProviderModelWithClaudeAuthUsesProviderOnly(t *testing.T) {
 	t.Parallel()
 
 	server := newModelsServer(t, []string{"gpt-5"})
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--api-key-env", "CCR_TEST_PROVIDER_TOKEN"); err != nil {
 		t.Fatalf("provider add error = %v", err)
 	}
 	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
@@ -22,10 +22,56 @@ func TestLaunchAutoWithClaudeAuthPreservesFirstPartyAuth(t *testing.T) {
 	}
 
 	launcher := &fakeLauncher{pid: os.Getpid()}
+	detectionCalls := 0
+	out, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+		Secrets:  &fakeSecrets{values: map[string]string{"env:CCR_TEST_PROVIDER_TOKEN": "test-provider-token"}},
+		DetectClaudeAuth: func(context.Context) (bool, error) {
+			detectionCalls++
+			return true, nil
+		},
+	}, "--db", dbPath, "launch", "--model", "gpt")
+	if err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	if detectionCalls != 0 {
+		t.Fatalf("Claude auth detection calls = %d, want 0 for a provider-backed model", detectionCalls)
+	}
+	if launcher.hasEnvPrefix("ANTHROPIC_AUTH_TOKEN=") || !launcher.hasEnvPrefix("ANTHROPIC_API_KEY=") ||
+		!launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=X-CCR-Session-Token: ") ||
+		!launcher.unsetsEnv("ANTHROPIC_API_KEY") || !launcher.unsetsEnv("ANTHROPIC_AUTH_TOKEN") ||
+		!launcher.unsetsEnv("CLAUDE_CODE_OAUTH_TOKEN") || !launcher.unsetsEnv("CCR_TEST_PROVIDER_TOKEN") {
+		t.Fatalf("provider launch did not isolate subscription auth: %s", launcher.environmentSummary())
+	}
+	if !strings.Contains(out, "Provider-only auth is active") ||
+		strings.Contains(out, "Anthropic subscription login and Anthropic API-key auth are preserved") {
+		t.Fatalf("launch output has incorrect auth-mode summary:\n%s", out)
+	}
+	statusOut, _, err := runCommand(t, "--db", dbPath, "status")
+	if err != nil {
+		t.Fatalf("status error = %v", err)
+	}
+	if !strings.Contains(statusOut, "Launch auth: mode=provider-only") {
+		t.Fatalf("status output missing resolved auth mode:\n%s", statusOut)
+	}
+}
+
+func TestLaunchAutoClaudeSubscriptionAliasPreservesClaudeAuth(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--base-url", "https://API.ANTHROPIC.COM:443/", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "claude", "--provider", "anthropic", "--model", "claude-sonnet"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
 	out, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher:         launcher,
 		DetectClaudeAuth: func(context.Context) (bool, error) { return true, nil },
-	}, "--db", dbPath, "launch", "--model", "gpt")
+	}, "--db", dbPath, "launch", "--model", "claude")
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
@@ -33,12 +79,58 @@ func TestLaunchAutoWithClaudeAuthPreservesFirstPartyAuth(t *testing.T) {
 	if !strings.Contains(out, "Anthropic subscription login and Anthropic API-key auth are preserved") {
 		t.Fatalf("launch output missing preserve summary:\n%s", out)
 	}
-	statusOut, _, err := runCommand(t, "--db", dbPath, "status")
-	if err != nil {
-		t.Fatalf("status error = %v", err)
+}
+
+func TestLaunchAutoClaudeSubscriptionAliasWithoutAuthReportsLoginGuidance(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "anthropic", "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
 	}
-	if !strings.Contains(statusOut, "Launch auth: mode=preserve") {
-		t.Fatalf("status output missing resolved auth mode:\n%s", statusOut)
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "claude", "--provider", "anthropic", "--model", "claude-sonnet"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher:         launcher,
+		DetectClaudeAuth: func(context.Context) (bool, error) { return false, nil },
+	}, "--db", dbPath, "launch", "--model", "claude")
+	if err == nil || !strings.Contains(err.Error(), `model alias "claude"`) || !strings.Contains(err.Error(), "claude /login") {
+		t.Fatalf("launch error = %v, want actionable Claude login guidance", err)
+	}
+	if launcher.starts != 0 {
+		t.Fatalf("launcher starts = %d, want 0", launcher.starts)
+	}
+}
+
+func TestLaunchAutoCustomAnthropicEndpointDoesNotRequireClaudeAuth(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"custom-model"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "custom-anthropic", "--type", "anthropic-compatible", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "custom", "--provider", "custom-anthropic", "--model", "custom-model"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	detectionCalls := 0
+	out, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+		DetectClaudeAuth: func(context.Context) (bool, error) {
+			detectionCalls++
+			return false, nil
+		},
+	}, "--db", dbPath, "launch", "--model", "custom")
+	if err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	if detectionCalls != 0 || !strings.Contains(out, "Provider-only auth is active") {
+		t.Fatalf("custom endpoint launch depended on Claude auth (detection=%d): %s", detectionCalls, out)
 	}
 }
 

@@ -328,7 +328,7 @@ func (h *handler) handleMessages(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, req.Stream, &completion, &route)
+		usage = h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.usesClaudeSubscriptionAuth(), req.Stream, &completion, &route)
 		return
 	case routeOpenAIResponses:
 		usage = h.handleOpenAIResponses(w, r, req, &route, &completion)
