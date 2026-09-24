@@ -95,12 +95,12 @@ func TestLiveLaunchOpenAIProviderRoutesFamilyAfterSameSessionModelSwitch(t *test
 			return gateway.Start(ctx, cfg)
 		},
 	}
-	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--", "--allowedTools", "Agent", "--forward-subagent-text")
+	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "launch", "--model", "gpt", "--print", "--auth-mode", "gateway-token", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--", "--allowedTools", "Agent")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
-	if !strings.Contains(out, "CCR_LIVE_SWITCH_CHILD_OK") {
-		t.Fatalf("launch output missing switched child response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	if !strings.Contains(out, "CCR_LIVE_SWITCH_PARENT_OK") {
+		t.Fatalf("launch output missing switched parent response:\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	state.assertFamilyRequestsUseSwitchedAlias(t, out, errOut)
 	if got := firstPartyCalls.Load(); got != 0 {
