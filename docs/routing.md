@@ -30,6 +30,21 @@ overrides affect new launches. Relaunch Claude Code after `ccr model refresh`,
 `ccr model update`, or alias changes when the `/model` picker needs updated
 rows or `[1m]` markers.
 
+When `--model <alias>` selects a CCR route, the launch-only settings overlay
+also maps Claude Code's `opus`, `sonnet`, and `haiku` family defaults to
+private CCR routing identifiers. The gateway resolves those identifiers
+against the active alias for the Claude session, so agents and skills that
+declare a family model use the selected provider. A later `/model` selection
+updates that active alias; selecting a first-party Claude model resolves the
+family request back to that native family. Launches without a CCR startup
+alias do not receive these overrides, so native Claude settings and behavior
+remain unchanged.
+
+When Claude Code sends its `safeguards` request marker through a translated
+OpenAI-compatible route, CCR omits that provider-unsupported marker and adds
+`safeguards` to `X-CCR-Ignored-Anthropic-Fields`. CCR does not claim that the
+translated provider executed Anthropic safeguard semantics.
+
 Claude Code treats the strings `sonnet`, `opus`, and `haiku` inside custom IDs
 as native model-family signals. CCR selectively percent-escapes those substrings
 in picker IDs so native rows remain visible. For example, an alias named

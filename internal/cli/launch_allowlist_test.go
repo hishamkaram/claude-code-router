@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -404,6 +405,9 @@ func TestLaunchExtendsClaudeAvailableModelsWithoutStartupModel(t *testing.T) {
 		t.Fatalf("launch args = %#v, want Claude Code default startup model", launcher.args)
 	}
 	payload := launchSettingsPayload(t, launcher)
+	if len(payload.Env) != 0 {
+		t.Fatalf("family routing environment = %#v, want no override for native default launch", payload.Env)
+	}
 	for _, want := range []string{"sonnet", "anthropic.ccr.gpt", "anthropic.ccr.qwen"} {
 		if !slices.Contains(payload.AvailableModels, want) {
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
@@ -444,6 +448,34 @@ func TestLaunchRegistersStartupModelWhenClaudeAvailableModelsUnset(t *testing.T)
 	for _, want := range []string{"sonnet", "opus", "anthropic.ccr.gpt"} {
 		if !slices.Contains(payload.AvailableModels, want) {
 			t.Fatalf("availableModels = %#v, want %s", payload.AvailableModels, want)
+		}
+	}
+}
+
+func TestLaunchProviderModelSetsClaudeFamilyRoutingDefaults(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	if _, _, err := runCommandWithDeps(t, Dependencies{Launcher: launcher}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	payload := launchSettingsPayload(t, launcher)
+	want := modelrouting.DefaultModelEnvironment()
+	if !slices.Equal(mapKeys(payload.Env), mapKeys(want)) {
+		t.Fatalf("family environment keys = %#v, want %#v", payload.Env, want)
+	}
+	for key, wantValue := range want {
+		if payload.Env[key] != wantValue {
+			t.Fatalf("family environment[%q] = %q, want %q", key, payload.Env[key], wantValue)
 		}
 	}
 }
@@ -524,7 +556,8 @@ func TestLaunchCreatesFirstPartyAllowlistWhenAllAliasesNeedToolsDisabled(t *test
 }
 
 type launchSettings struct {
-	AvailableModels []string `json:"availableModels"`
+	AvailableModels []string          `json:"availableModels"`
+	Env             map[string]string `json:"env"`
 }
 
 func launchSettingsPayload(t *testing.T, launcher *fakeLauncher) launchSettings {
@@ -538,4 +571,13 @@ func launchSettingsPayload(t *testing.T, launcher *fakeLauncher) launchSettings 
 		t.Fatalf("settings JSON %q did not parse: %v", settings, err)
 	}
 	return payload
+}
+
+func mapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }

@@ -195,6 +195,27 @@ func TestModelCapabilitiesRoundTrip(t *testing.T) {
 	}
 }
 
+func TestModelStoreRejectsFamilyOverrideAliases(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, openErr := Open(ctx, filepath.Join(t.TempDir(), "ccr.db"))
+	if openErr != nil {
+		t.Fatalf("Open() error = %v", openErr)
+	}
+	defer func() { _ = s.Close() }()
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if err := s.AddProvider(ctx, Provider{Name: "litellm", Type: "litellm", BaseURL: "http://localhost:4000"}); err != nil {
+		t.Fatalf("AddProvider() error = %v", err)
+	}
+	for _, alias := range []string{"ccr-family-OPUS", "ccr-family-SONNET", "ccr-family-HAIKU"} {
+		if err := s.AddModel(ctx, Model{Alias: alias, ProviderName: "litellm", ProviderModel: "model", Status: "degraded"}); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("AddModel(%q) error = %v, want reserved alias rejection", alias, err)
+		}
+	}
+}
+
 func TestProviderResponsesOverlayPreservesDefaults(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

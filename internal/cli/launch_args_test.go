@@ -11,6 +11,13 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/cua"
 )
 
+func TestValidateModelAliasRejectsFamilyOverride(t *testing.T) {
+	t.Parallel()
+	if err := validateName("model alias", "ccr-family-SONNET"); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("validateName() error = %v, want reserved family identifier rejection", err)
+	}
+}
+
 func TestParseLaunchInvocationParsesCUAFlags(t *testing.T) {
 	t.Parallel()
 

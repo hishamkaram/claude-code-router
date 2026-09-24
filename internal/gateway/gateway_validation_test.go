@@ -477,6 +477,57 @@ func TestGatewayRejectsUnsupportedAnthropicFieldsOnOpenAIPath(t *testing.T) {
 	}
 }
 
+func TestGatewayDropsSafeguardsOnTranslatedOpenAIPath(t *testing.T) {
+	ctx := context.Background()
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("provider decode error = %v", err)
+		}
+		if _, present := payload["safeguards"]; present {
+			t.Fatalf("provider received Anthropic safeguards field")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-safeguards","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer provider.Close()
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL, SecretRef: ""}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	body := `{"model":"gpt","safeguards":{"mode":"auto"},"messages":[{"role":"user","content":"hello"}]}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get(ccrIgnoredFieldsHeader); got != "safeguards" {
+		t.Fatalf("%s = %q, want safeguards", ccrIgnoredFieldsHeader, got)
+	}
+}
+
+func TestResponsesPathAcceptsSafeguardsAsIgnored(t *testing.T) {
+	fields := map[string]json.RawMessage{"safeguards": json.RawMessage(`{"mode":"auto"}`)}
+	req := anthropicRequest{Fields: fields}
+	if validationErr := (&handler{}).validateOpenAIMessageRequest(&req); validationErr != nil {
+		t.Fatalf("validateOpenAIMessageRequest() = %#v, want accepted field", validationErr)
+	}
+	if validationErr := validateResponsesMessageRequest(&req); validationErr != nil {
+		t.Fatalf("validateResponsesMessageRequest() = %#v, want accepted field", validationErr)
+	}
+	if got := ignoredOpenAIRequestFields(req); len(got) != 1 || got[0] != "safeguards" {
+		t.Fatalf("ignoredOpenAIRequestFields() = %#v, want safeguards", got)
+	}
+}
+
 func TestGatewayDropsContextManagementOnOpenAIPath(t *testing.T) {
 	ctx := context.Background()
 	var gotContextManagement bool

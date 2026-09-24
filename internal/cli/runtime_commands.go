@@ -245,6 +245,7 @@ func runLaunchAttempt(
 
 	claudeSettings, err := launchClaudeSettingsArg(ctx, s, launchSettingsOptions{
 		IncludeToolDisabled: resolved.disableTools, LifecycleEnabled: !invocation.noLifecycle,
+		FamilyRoutingEnabled:         resolved.modelAlias != "",
 		StatuslineEnabled:            !invocation.noStatusline,
 		IsolateStatuslineCredentials: selectedAccount != nil,
 		GatewayURL:                   execution.server.URL(),
@@ -386,6 +387,7 @@ func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation la
 		}
 	}
 	settings := make(map[string]any, 1)
+	addLaunchFamilyRouting(settings, resolved.modelAlias != "")
 	if err := addLaunchAvailableModels(ctx, s, resolved.disableTools, settings); err != nil {
 		return false, err
 	}

@@ -464,7 +464,7 @@ func validateOpenAIContextManagement(fields map[string]json.RawMessage) *request
 
 func openAIPathSupportsAnthropicField(field string) bool {
 	switch field {
-	case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config", "context_management":
+	case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config", "context_management", "safeguards":
 		return true
 	default:
 		return false
@@ -472,10 +472,14 @@ func openAIPathSupportsAnthropicField(field string) bool {
 }
 
 func ignoredOpenAIAnthropicFields(fields map[string]json.RawMessage) []string {
+	ignored := make([]string, 0, 2)
 	if _, ok := fields["context_management"]; ok {
-		return []string{"context_management"}
+		ignored = append(ignored, "context_management")
 	}
-	return nil
+	if _, ok := fields["safeguards"]; ok {
+		ignored = append(ignored, "safeguards")
+	}
+	return ignored
 }
 
 func ignoredOpenAIRequestFields(req anthropicRequest) []string {

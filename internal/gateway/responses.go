@@ -122,7 +122,7 @@ func tokenUsageFromResponses(response *openairesponses.Response) observability.T
 func validateResponsesMessageRequest(req *anthropicRequest) *requestValidationError {
 	for field := range req.Fields {
 		switch field {
-		case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "metadata", "thinking", "output_config", "context_management":
+		case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "metadata", "thinking", "output_config", "context_management", "safeguards":
 		default:
 			return &requestValidationError{
 				status:  http.StatusNotImplemented,

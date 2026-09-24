@@ -159,6 +159,28 @@ func rewriteAnthropicRequestModel(body []byte, model string) ([]byte, error) {
 	return rewritten, nil
 }
 
+func rewriteAnthropicRequestModelAndDropFields(body []byte, model string, fields ...string) ([]byte, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("rewriting translated Anthropic request: %w", err)
+	}
+	if model != "" {
+		encodedModel, err := json.Marshal(model)
+		if err != nil {
+			return nil, fmt.Errorf("rewriting translated Anthropic request model: %w", err)
+		}
+		payload["model"] = encodedModel
+	}
+	for _, field := range fields {
+		delete(payload, field)
+	}
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("rewriting translated Anthropic request: %w", err)
+	}
+	return rewritten, nil
+}
+
 func rewriteAnthropicRequestMaxTokens(body []byte, maxTokens int) ([]byte, error) {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {

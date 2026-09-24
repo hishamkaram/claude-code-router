@@ -3,6 +3,19 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
+## v0.6.7
+
+- Route Claude Code agents and skills that declare `opus`, `sonnet`, or
+  `haiku` through the active CCR model selected for the session.
+- Follow in-session `/model` changes for those family requests, preserve
+  first-party routing after switching back to a native Claude model, and fail
+  closed when the active CCR alias is no longer routable.
+- Keep family routing launch-scoped through Claude Code's private settings
+  overlay; native launches without a CCR startup alias receive no override.
+- Accept Claude Code's current `safeguards` request marker on translated
+  provider routes, omit the unsupported field upstream, and expose that
+  degradation through `X-CCR-Ignored-Anthropic-Fields`.
+
 ## v0.6.4
 
 - Activate declared deferred tools from ToolSearch `tool_reference` results on

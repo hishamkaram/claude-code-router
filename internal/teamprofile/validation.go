@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
+	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
 )
 
@@ -165,6 +166,9 @@ func validateModel(model Model, providerTypes map[string]string) error {
 func validateModelIdentity(model Model, providerTypes map[string]string) (string, error) {
 	if err := validateName("model alias", model.Alias); err != nil {
 		return "", err
+	}
+	if modelrouting.IsFamilyOverride(model.Alias) {
+		return "", fmt.Errorf("model alias %q is reserved for CCR model-family routing", model.Alias)
 	}
 	providerType, ok := providerTypes[model.Provider]
 	if !ok {

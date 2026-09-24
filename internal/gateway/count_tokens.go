@@ -59,7 +59,7 @@ func (h *handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		usage = h.handleAnthropicCountTokens(w, r, route, body)
 		return
 	}
-	usage = h.handleOpenAICountTokens(w, r, route, body)
+	usage = h.handleOpenAICountTokens(w, r, req, route, body)
 }
 
 func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) observability.TokenUsage {
@@ -78,7 +78,8 @@ func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Requ
 	return h.handleAnthropicPassThrough(w, r, passBody, route.anthropicProvider, route.anthropicAuth, route.responseModel, route.firstPartyAnthropic, false, nil)
 }
 
-func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, route messageRoute, body []byte) observability.TokenUsage {
+func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute, body []byte) observability.TokenUsage {
+	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredOpenAIRequestFields(req))
 	if !route.capabilities.SupportsCountTokens {
 		if writeTokenCountCanceled(w, r.Context()) {
 			return observability.TokenUsage{}
@@ -94,7 +95,7 @@ func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request
 		writeEstimatedTokenCount(w, body, tokenCountFallbackSecret)
 		return estimatedUsage(body)
 	}
-	passBody, ok := rewriteCountTokenBody(w, body, route.model.ProviderModel)
+	passBody, ok := rewriteOpenAICountTokenBody(w, body, route.model.ProviderModel)
 	if !ok {
 		return observability.TokenUsage{}
 	}
@@ -108,6 +109,20 @@ func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request
 	}
 	writeProviderTokenCount(w, inputTokens)
 	return observability.TokenUsage{Observed: true, InputTokens: int64(inputTokens)}
+}
+
+func rewriteOpenAICountTokenBody(w http.ResponseWriter, body []byte, providerModel string) ([]byte, bool) {
+	rewritten, err := rewriteAnthropicRequestModelAndDropFields(
+		body,
+		providerModel,
+		"context_management",
+		"safeguards",
+	)
+	if err != nil {
+		writeAnthropicError(w, http.StatusBadRequest, err.Error())
+		return nil, false
+	}
+	return rewritten, true
 }
 
 func rewriteCountTokenBody(w http.ResponseWriter, body []byte, providerModel string) ([]byte, bool) {

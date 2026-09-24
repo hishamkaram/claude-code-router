@@ -78,6 +78,56 @@ func TestGatewayCountTokensUsesLiteLLMProviderEndpoint(t *testing.T) {
 	}
 }
 
+func TestGatewayCountTokensDropsUnsupportedAnthropicFieldsOnOpenAIPath(t *testing.T) {
+	ctx := context.Background()
+	var gotPayload map[string]json.RawMessage
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Errorf("provider request decode error = %v", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"input_tokens":13}`)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t, store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL}, store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "glm-5.2", Status: "degraded"})
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() {
+		if err := server.Shutdown(ctx); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	}()
+
+	body := `{"model":"gpt","context_management":{"edits":[]},"safeguards":{"mode":"auto"},"messages":[{"role":"user","content":"hello"}]}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages/count_tokens", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway count_tokens request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("gateway status = %d, want 200", resp.StatusCode)
+	}
+	assertCountTokensResponse(t, resp, 13, tokenCountModeProvider, "")
+	if got := resp.Header.Get(ccrIgnoredFieldsHeader); got != "context_management, safeguards" {
+		t.Fatalf("%s = %q, want context_management, safeguards", ccrIgnoredFieldsHeader, got)
+	}
+	for _, field := range []string{"context_management", "safeguards"} {
+		if _, ok := gotPayload[field]; ok {
+			t.Fatalf("provider received unsupported Anthropic field %q", field)
+		}
+	}
+	if gotModel := string(gotPayload["model"]); gotModel != `"glm-5.2"` {
+		t.Fatalf("provider model = %s, want %q", gotModel, "glm-5.2")
+	}
+}
+
 func TestGatewayCountTokensTreatsStoredLiteLLMAsProviderBacked(t *testing.T) {
 	ctx := context.Background()
 	called := false

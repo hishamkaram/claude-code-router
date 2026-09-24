@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 )
 
 const autoModeClassifierSystemPrefix = "You are a security monitor for autonomous AI coding agents."
@@ -53,6 +55,9 @@ func (s *activeModelSelection) observe(sessionID string, route messageRoute) {
 }
 
 func (h *handler) selectRouteForRequest(ctx context.Context, sessionID string, req anthropicRequest) (messageRoute, *requestValidationError) {
+	if family, ok := modelrouting.ParseOverride(req.Model); ok {
+		return h.selectFamilyRoute(ctx, sessionID, strings.TrimSpace(req.Model), family)
+	}
 	if !isAutoModeClassifierRequest(req) {
 		return h.selectRoute(ctx, req.Model)
 	}
@@ -73,6 +78,31 @@ func (h *handler) selectRouteForRequest(ctx context.Context, sessionID string, r
 			status: validationErr.status,
 			message: fmt.Sprintf(
 				"auto-mode classifier could not use active ccr model alias %q: %s; first-party Anthropic fallback was refused",
+				alias,
+				validationErr.message,
+			),
+		}
+	}
+	return route, nil
+}
+
+func (h *handler) selectFamilyRoute(ctx context.Context, sessionID, requested string, family modelrouting.Model) (messageRoute, *requestValidationError) {
+	alias := h.activeModel.currentAlias(sessionID)
+	if alias == "" {
+		nativeModel := family.NativeModelID()
+		route := h.routeFirstPartyAnthropicModel(nativeModel)
+		// The family identifier is only a launcher control value. Native
+		// fallback must send the resolved first-party model upstream.
+		route.model.ProviderModel = nativeModel
+		return route, nil
+	}
+	route, validationErr := h.routeConfiguredAlias(ctx, alias, requested)
+	if validationErr != nil {
+		return messageRoute{}, &requestValidationError{
+			status: validationErr.status,
+			message: fmt.Sprintf(
+				"model family %q could not use active ccr model alias %q: %s; first-party Anthropic fallback was refused",
+				family.Family,
 				alias,
 				validationErr.message,
 			),
