@@ -49,6 +49,15 @@ func (route messageRoute) agentChildSpawnAlias() string {
 	return route.model.Alias
 }
 
+func (route messageRoute) usesClaudeSubscriptionAuth() bool {
+	if route.firstPartyAnthropic {
+		return true
+	}
+	return route.anthropicAuth == anthropicAuthIncoming &&
+		route.anthropicProvider != nil &&
+		providers.IsFirstPartyAnthropicEndpoint(route.anthropicProvider.BaseURL)
+}
+
 func (route *messageRoute) rollbackAgentChild() {
 	if route.agentChildRollback == nil {
 		return
@@ -213,7 +222,19 @@ func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel
 	}
 	if caps.Protocol == providers.ProtocolAnthropicCompatible {
 		rewrittenProvider := provider
-		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, modelCapabilities: effectiveModel.Values, responseModel: responseModel}, nil
+		authMode := anthropicAuthProviderSecret
+		if strings.TrimSpace(provider.SecretRef) == "" && providers.IsFirstPartyAnthropicEndpoint(provider.BaseURL) {
+			authMode = anthropicAuthIncoming
+		}
+		return messageRoute{
+			kind:              routeAnthropic,
+			model:             model,
+			anthropicProvider: &rewrittenProvider,
+			anthropicAuth:     authMode,
+			capabilities:      caps,
+			modelCapabilities: effectiveModel.Values,
+			responseModel:     responseModel,
+		}, nil
 	}
 	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q with protocol %q is not supported by the gateway path", provider.Type, caps.Protocol)}
 }

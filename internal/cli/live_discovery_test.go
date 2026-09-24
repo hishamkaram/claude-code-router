@@ -61,7 +61,7 @@ func TestLiveGatewayTokenLaunchDiscoversConfiguredAlias(t *testing.T) {
 	}
 }
 
-func TestLiveAutoNoClaudeAuthLaunchesProviderOnlyConfiguredAlias(t *testing.T) {
+func TestLiveAutoProviderAliasIgnoresDetectedClaudeAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if _, err := liveclaude.Check(ctx); err != nil {
@@ -69,13 +69,29 @@ func TestLiveAutoNoClaudeAuthLaunchesProviderOnlyConfiguredAlias(t *testing.T) {
 	}
 
 	isolateLiveClaudeAuth(t)
+	t.Setenv("CCR_TEST_PROVIDER_TOKEN", "live-provider-token")
 	var chatCalled atomic.Bool
+	var providerCredentialSeen atomic.Bool
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
+			if r.Header.Get("Authorization") == "Bearer live-provider-token" {
+				providerCredentialSeen.Store(true)
+			} else {
+				t.Errorf("provider model discovery did not use the configured provider credential")
+				http.Error(w, "missing provider credential", http.StatusUnauthorized)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
 		case "/v1/chat/completions":
+			if r.Header.Get("Authorization") == "Bearer live-provider-token" {
+				providerCredentialSeen.Store(true)
+			} else {
+				t.Errorf("provider chat request did not use the configured provider credential")
+				http.Error(w, "missing provider credential", http.StatusUnauthorized)
+				return
+			}
 			chatCalled.Store(true)
 			payload, ok := decodeLiveOpenAIChatPayload(t, w, r)
 			if !ok {
@@ -89,15 +105,29 @@ func TestLiveAutoNoClaudeAuthLaunchesProviderOnlyConfiguredAlias(t *testing.T) {
 	defer provider.Close()
 
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
+	for _, args := range [][]string{
+		{"--db", dbPath, "provider", "add", "litellm", "--base-url", provider.URL, "--api-key-env", "CCR_TEST_PROVIDER_TOKEN"},
+		{"--db", dbPath, "model", "add", "litellm-glm-5-3-1m", "--provider", "litellm", "--model", "gpt-5"},
+	} {
+		if out, errOut, err := runLiveCommand(ctx, Dependencies{}, args...); err != nil {
+			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
+		}
+	}
 	out, errOut, err := runLiveCommand(ctx, Dependencies{
-		In: strings.NewReader("hello\n"),
-	}, "--db", dbPath, "launch", "--model", "gpt", "--print")
+		In:               strings.NewReader("hello\n"),
+		DetectClaudeAuth: func(context.Context) (bool, error) { return true, nil },
+	}, "--db", dbPath, "launch", "--model", "litellm-glm-5-3-1m", "--print")
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
 	if !chatCalled.Load() || !strings.Contains(out, "auto-provider-only-ok") {
 		t.Fatalf("launch did not complete through fake provider\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	}
+	if !providerCredentialSeen.Load() {
+		t.Fatalf("provider did not receive its configured credential")
+	}
+	if strings.Contains(out+errOut, "claude /login") || strings.Contains(out+errOut, "Please run /login") {
+		t.Fatalf("provider-backed launch prompted for Claude subscription login\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 	if !strings.Contains(errOut, "Provider-only auth is active for this launch") {
 		t.Fatalf("launch summary missing provider-only auth mode:\nstdout:\n%s\nstderr:\n%s", out, errOut)

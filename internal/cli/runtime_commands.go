@@ -50,13 +50,19 @@ coverage separately from workload exit; partial coverage does not exclude escape
 Detached Claude options cannot contain another standalone --; use --name=value
 for option values and --prompt-file for literal prompt text.
 
-By default, --auth-mode auto preserves a working Claude subscription or API-key
-login so first-party Claude models and registered CCR providers work side by
-side. If no Claude auth is available and --model <alias> selects a registered
-provider alias, CCR uses provider-only local gateway auth so that provider can
-run without a Claude subscription. Without --model and without Claude auth, CCR
-fails before starting Claude Code and tells you which provider alias to select.
-CCR never chooses a provider implicitly for first-party Claude requests.
+By default, --auth-mode auto uses provider-only local gateway auth when
+--model <alias> selects a registered provider-backed model, even if Claude
+login is detected. That launch can use the selected provider without asking
+Claude Code to authenticate to a subscription. For a first-party Anthropic
+model that uses incoming Claude auth, auto preserves the login when available.
+With no startup model, auto also preserves a working Claude login so registered
+models can be selected from /model alongside first-party models. Without
+--model and without Claude auth, CCR fails before starting Claude Code and tells
+you which provider alias to select. Use --auth-mode preserve with a working
+Claude login when a provider-backed startup model must also retain subscription
+routes. CCR never chooses a provider implicitly for first-party Claude requests.
+Provider-only startup disables first-party subscription routes; use
+--auth-mode preserve with a working login when both route families are needed.
 
 Use --auth-mode provider-only with --model <alias> to force provider-only local
 gateway auth. The older spelling --auth-mode gateway-token is accepted for
