@@ -190,7 +190,6 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 		return []string{
 			"Provider-only auth is active for this launch",
 			"Original Anthropic subscription login and Anthropic API-key auth are not active in provider-only mode",
-			"First-party Claude subscription routes are unavailable in this launch",
 		}
 	case launchAuthModeSubscriptionPool:
 		return []string{
@@ -202,7 +201,6 @@ func configuredProviderAuthDiagnostics(authMode string) []string {
 		return []string{
 			"Gateway accepts only the generated local X-CCR-Session-Token",
 			"Original Anthropic subscription login and Anthropic API-key auth are not active",
-			"First-party Claude subscription routes are unavailable in this launch",
 		}
 	}
 }

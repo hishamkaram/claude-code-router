@@ -24,8 +24,7 @@ func TestLaunchAcceptsAnthropicModelAliasForPassThrough(t *testing.T) {
 
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	out, _, err := runCommandWithDeps(t, Dependencies{
-		Launcher:         launcher,
-		DetectClaudeAuth: func(context.Context) (bool, error) { return true, nil },
+		Launcher: launcher,
 	}, "--db", dbPath, "launch", "--model", "claude")
 	if err != nil {
 		t.Fatalf("launch error = %v", err)
@@ -284,13 +283,8 @@ func TestLaunchHelpDescribesPreserveAuthModelSelection(t *testing.T) {
 		t.Fatalf("launch help error = %v", err)
 	}
 	for _, want := range []string{
-		"--auth-mode auto uses provider-only local gateway auth",
-		"login is detected",
-		"With no startup model, auto also preserves a working Claude login",
-		"--auth-mode preserve with a working",
-		"Provider-only startup disables first-party subscription routes",
-		"when both route families are needed",
-		"model that uses incoming Claude auth",
+		"--auth-mode auto preserves a working Claude subscription or API-key",
+		"CCR uses provider-only local gateway auth",
 		"CCR never chooses a provider implicitly",
 		"--auth-mode provider-only",
 		"retries the same buffered request",
@@ -322,7 +316,7 @@ func TestLaunchAppendsCCRSessionTokenToExistingCustomHeaders(t *testing.T) {
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	if _, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--model", "gpt", "--auth-mode", "preserve"); err != nil {
+	}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
 	headers, ok := launcher.envValue("ANTHROPIC_CUSTOM_HEADERS")
@@ -350,7 +344,7 @@ func TestLaunchReplacesExistingCCRSessionTokenInCustomHeaders(t *testing.T) {
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	if _, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--model", "gpt", "--auth-mode", "preserve"); err != nil {
+	}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
 	headers, ok := launcher.envValue("ANTHROPIC_CUSTOM_HEADERS")
@@ -384,7 +378,7 @@ func TestLaunchPreserveAuthModeClearsInheritedGatewayAuth(t *testing.T) {
 	launcher := &fakeLauncher{pid: os.Getpid()}
 	if _, _, err := runCommandWithDeps(t, Dependencies{
 		Launcher: launcher,
-	}, "--db", dbPath, "launch", "--model", "gpt", "--auth-mode", "preserve"); err != nil {
+	}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
 	assertPreserveAuthEnv(t, launcher)

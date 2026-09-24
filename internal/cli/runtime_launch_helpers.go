@@ -81,11 +81,9 @@ func writeLaunchAuthSummary(out io.Writer, authMode string) {
 	case launchAuthModeProviderOnly:
 		fmt.Fprintln(out, "Provider-only auth is active for this launch; Claude Code authenticates only to CCR's loopback gateway with a generated local token.")
 		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in provider-only mode.")
-		fmt.Fprintln(out, "First-party Claude subscription routes are unavailable in this launch; use --auth-mode preserve with a working Claude login to retain them.")
 	case launchAuthModeGatewayToken:
 		fmt.Fprintln(out, "Gateway accepts only the generated local X-CCR-Session-Token for this process.")
 		fmt.Fprintln(out, "Original Anthropic subscription login and Anthropic API-key auth are not active in --auth-mode gateway-token; use --auth-mode provider-only for the product-facing spelling.")
-		fmt.Fprintln(out, "First-party Claude subscription routes are unavailable in this launch; use --auth-mode preserve with a working Claude login to retain them.")
 	case launchAuthModeSubscriptionPool:
 		fmt.Fprintln(out, "Claude authenticates only to this process's loopback gateway with a generated local token.")
 		fmt.Fprintln(out, "Model requests use CCR's active account OAuth token in gateway memory; confirmed account-wide limits rotate without restarting Claude Code.")
