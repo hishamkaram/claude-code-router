@@ -79,6 +79,10 @@ func (h *handler) handleAnthropicCountTokens(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *handler) handleOpenAICountTokens(w http.ResponseWriter, r *http.Request, req anthropicRequest, route messageRoute, body []byte) observability.TokenUsage {
+	if validationErr := validateOpenAISafeguards(req.Fields); validationErr != nil {
+		writeAnthropicError(w, validationErr.status, validationErr.message)
+		return observability.TokenUsage{}
+	}
 	addIgnoredAnthropicFieldsHeader(w.Header(), ignoredOpenAIRequestFields(req))
 	if !route.capabilities.SupportsCountTokens {
 		if writeTokenCountCanceled(w, r.Context()) {

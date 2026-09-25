@@ -476,14 +476,30 @@ func validateOpenAIContextManagement(fields map[string]json.RawMessage) *request
 // the rest of the session, so the degradation is safe as well as visible.
 func validateOpenAISafeguards(fields map[string]json.RawMessage) *requestValidationError {
 	raw, ok := fields["safeguards"]
-	if !ok || len(raw) == 0 || string(raw) == "null" {
+	if !ok {
 		return nil
 	}
-	var safeguards []struct {
-		Type string `json:"type"`
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: expected an array"}
 	}
+	var safeguards []json.RawMessage
 	if err := json.Unmarshal(raw, &safeguards); err != nil {
-		return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field"}
+		return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: expected an array"}
+	}
+	for _, safeguard := range safeguards {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(safeguard, &item); err != nil || item == nil {
+			return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: expected an array of objects"}
+		}
+		typeRaw, ok := item["type"]
+		if !ok {
+			return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: each item requires a string type"}
+		}
+		var safeguardType string
+		if err := json.Unmarshal(typeRaw, &safeguardType); err != nil || strings.TrimSpace(safeguardType) == "" {
+			return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: each item requires a string type"}
+		}
 	}
 	return nil
 }

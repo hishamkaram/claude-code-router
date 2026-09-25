@@ -140,12 +140,40 @@ func TestGatewayRejectsMalformedSafeguardsWithoutProviderCall(t *testing.T) {
 			body:     `{"model":"gpt","safeguards":{"type":"dangerous_tool_use"},"messages":[{"role":"user","content":"hello"}]}`,
 		},
 		{
+			name:     "chat route null instead of list",
+			provider: store.Provider{Name: "litellm", Type: "litellm", BaseURL: "", SecretRef: ""},
+			model:    store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"},
+			body:     `{"model":"gpt","safeguards":null,"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
 			name:     "responses route string instead of list",
 			provider: store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: "", SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
 			model: store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
 				Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true),
 			}},
 			body: `{"model":"responses","safeguards":"dangerous_tool_use","messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			name:     "responses route object instead of list",
+			provider: store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: "", SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
+			model: store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
+				Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true),
+			}},
+			body: `{"model":"responses","safeguards":{},"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			name:     "chat route scalar item",
+			provider: store.Provider{Name: "litellm", Type: "litellm", BaseURL: "", SecretRef: ""},
+			model:    store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"},
+			body:     `{"model":"gpt","safeguards":[1],"messages":[{"role":"user","content":"hello"}]}`,
+		},
+		{
+			name:     "responses route non-string item type",
+			provider: store.Provider{Name: "openai", Type: "openai-compatible", BaseURL: "", SupportsTools: true, SupportsStreaming: true, SupportsResponses: true},
+			model: store.Model{Alias: "responses", ProviderName: "openai", ProviderModel: "gpt-responses", Status: "degraded", CapabilityOverrides: modelcap.Values{
+				Kind: modelcap.KindResponses, SupportsResponses: modelcap.Bool(true),
+			}},
+			body: `{"model":"responses","safeguards":[{"type":1}],"messages":[{"role":"user","content":"hello"}]}`,
 		},
 	}
 	for _, test := range tests {
