@@ -327,6 +327,27 @@ an OpenAI-compatible route instead of forwarding stale pre-compaction history.
 Use a first-party or Anthropic-compatible route when an application directly
 requires that Anthropic beta API feature.
 
+## `501 Anthropic request field "safeguards" is not supported`
+
+Claude Code 2.1.278 and newer sends a top-level `safeguards` field when auto
+mode (`--permission-mode auto`, or `permissions.defaultMode: "auto"` in user
+or managed settings) asks the Anthropic API to run its tool-use classifier
+server-side. CCR v0.6.4 and earlier rejected that field on OpenAI-compatible
+and OpenAI Responses routes, so every auto-mode request to such an alias
+failed with this 501 while sessions in other permission modes kept working.
+
+Upgrade CCR. Translated routes now accept the field, never forward it to the
+provider, and expose the degradation on successful responses with:
+
+```text
+X-CCR-Ignored-Anthropic-Fields: safeguards
+```
+
+Because the response carries no `safeguard_results`, Claude Code logs that the
+server-side classifier is unavailable and classifies tool use locally for the
+rest of the session. Use a first-party Claude alias when the Anthropic
+server-side classifier itself is required.
+
 ## `501 unsupported assistant text block: citations`
 
 Anthropic assistant history can attach citation annotations to a text block.

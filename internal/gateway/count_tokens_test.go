@@ -100,7 +100,7 @@ func TestGatewayCountTokensDropsUnsupportedAnthropicFieldsOnOpenAIPath(t *testin
 		}
 	}()
 
-	body := `{"model":"gpt","context_management":{"edits":[]},"safeguards":{"mode":"auto"},"messages":[{"role":"user","content":"hello"}]}`
+	body := `{"model":"gpt","context_management":{"edits":[]},"safeguards":[{"type":"dangerous_tool_use"}],"messages":[{"role":"user","content":"hello"}]}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages/count_tokens", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
@@ -125,6 +125,45 @@ func TestGatewayCountTokensDropsUnsupportedAnthropicFieldsOnOpenAIPath(t *testin
 	}
 	if gotModel := string(gotPayload["model"]); gotModel != `"glm-5.2"` {
 		t.Fatalf("provider model = %s, want %q", gotModel, "glm-5.2")
+	}
+}
+
+func TestGatewayCountTokensRejectsMalformedSafeguards(t *testing.T) {
+	ctx := context.Background()
+	called := false
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		http.Error(w, "provider must not be called", http.StatusInternalServerError)
+	}))
+	defer provider.Close()
+
+	s := newGatewayStore(t,
+		store.Provider{Name: "litellm", Type: "litellm", BaseURL: provider.URL},
+		store.Model{Alias: "gpt", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "degraded"},
+	)
+	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
+	defer func() { _ = server.Shutdown(ctx) }()
+
+	body := `{"model":"gpt","safeguards":{},"messages":[{"role":"user","content":"hello"}]}`
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages/count_tokens", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("gateway count_tokens request error = %v", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading response: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "safeguards") {
+		t.Fatalf("gateway status = %d body = %q, want 400 naming safeguards", resp.StatusCode, raw)
+	}
+	if called {
+		t.Fatal("provider was called for malformed safeguards field")
 	}
 }
 

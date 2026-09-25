@@ -121,9 +121,7 @@ func tokenUsageFromResponses(response *openairesponses.Response) observability.T
 
 func validateResponsesMessageRequest(req *anthropicRequest) *requestValidationError {
 	for field := range req.Fields {
-		switch field {
-		case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "metadata", "thinking", "output_config", "context_management", "safeguards":
-		default:
+		if !openAIPathSupportsAnthropicField(field) {
 			return &requestValidationError{
 				status:  http.StatusNotImplemented,
 				message: fmt.Sprintf("Anthropic request field %q is not supported by the OpenAI Responses gateway path", field),
@@ -131,6 +129,9 @@ func validateResponsesMessageRequest(req *anthropicRequest) *requestValidationEr
 		}
 	}
 	if err := validateOpenAIContextManagement(req.Fields); err != nil {
+		return err
+	}
+	if err := validateOpenAISafeguards(req.Fields); err != nil {
 		return err
 	}
 	if err := validateThinking(req.Thinking); err != nil {

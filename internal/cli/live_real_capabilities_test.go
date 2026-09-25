@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -537,12 +536,12 @@ func acquireLiveDesktopLock(t *testing.T) {
 	if err != nil {
 		t.Skipf("desktop lock %s unavailable: %v", lockPath, err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := tryLockLiveDesktopFile(lockFile); err != nil {
 		_ = lockFile.Close()
 		t.Skipf("desktop lock %s is held by another live CUA test: %v", lockPath, err)
 	}
 	t.Cleanup(func() {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = unlockLiveDesktopFile(lockFile)
 		_ = lockFile.Close()
 	})
 }

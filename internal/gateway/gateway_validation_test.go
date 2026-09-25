@@ -495,7 +495,7 @@ func TestGatewayDropsSafeguardsOnTranslatedOpenAIPath(t *testing.T) {
 	server := startGateway(t, ctx, s, fakeGatewaySecrets{})
 	defer func() { _ = server.Shutdown(ctx) }()
 
-	body := `{"model":"gpt","safeguards":{"mode":"auto"},"messages":[{"role":"user","content":"hello"}]}`
+	body := `{"model":"gpt","safeguards":[{"type":"dangerous_tool_use"}],"messages":[{"role":"user","content":"hello"}]}`
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL()+"/v1/messages", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("NewRequest() error = %v", err)
@@ -515,7 +515,7 @@ func TestGatewayDropsSafeguardsOnTranslatedOpenAIPath(t *testing.T) {
 }
 
 func TestResponsesPathAcceptsSafeguardsAsIgnored(t *testing.T) {
-	fields := map[string]json.RawMessage{"safeguards": json.RawMessage(`{"mode":"auto"}`)}
+	fields := map[string]json.RawMessage{"safeguards": json.RawMessage(`[{"type":"dangerous_tool_use"}]`)}
 	req := anthropicRequest{Fields: fields}
 	if validationErr := (&handler{}).validateOpenAIMessageRequest(&req); validationErr != nil {
 		t.Fatalf("validateOpenAIMessageRequest() = %#v, want accepted field", validationErr)

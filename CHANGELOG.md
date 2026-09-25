@@ -35,6 +35,16 @@ lives under `docs/acceptance/`.
 
 ## Unreleased
 
+- Accept and drop the Anthropic `safeguards` request field on the OpenAI Chat
+  Completions and Responses routes. Claude Code 2.1.278 auto mode sends
+  `safeguards: [{"type": "dangerous_tool_use", ...}]` to request Anthropic's
+  server-side tool-use classifier, and translated routes previously failed
+  every such request with `501 Anthropic request field "safeguards" is not
+  supported`. The field is not forwarded, the degradation is exposed through
+  `X-CCR-Ignored-Anthropic-Fields: safeguards`, and Claude Code classifies
+  tool use locally for the rest of the session. Malformed `safeguards` values
+  are rejected with 400; other unsupported fields remain rejected visibly.
+
 ## v0.6.1
 
 - Translate Anthropic mid-conversation `tool_addition` and `tool_removal`

@@ -429,6 +429,9 @@ func (h *handler) validateOpenAIMessageRequest(req *anthropicRequest) *requestVa
 	if err := validateOpenAIContextManagement(req.Fields); err != nil {
 		return err
 	}
+	if err := validateOpenAISafeguards(req.Fields); err != nil {
+		return err
+	}
 	if err := validateThinking(req.Thinking); err != nil {
 		return &requestValidationError{status: http.StatusNotImplemented, message: err.Error()}
 	}
@@ -462,6 +465,48 @@ func validateOpenAIContextManagement(fields map[string]json.RawMessage) *request
 	return nil
 }
 
+// validateOpenAISafeguards accepts the Anthropic `safeguards` request field on
+// translated routes. Claude Code auto mode sends
+// `safeguards: [{"type": "dangerous_tool_use", "classifier_context": ...}]` to
+// ask the Anthropic API to run its tool-use classifier server-side and answer
+// with `safeguard_results`. OpenAI-compatible providers have no such
+// classifier, so the field is dropped and reported through
+// X-CCR-Ignored-Anthropic-Fields. Claude Code treats a successful response
+// without `safeguard_results` as "not run here" and classifies locally for
+// the rest of the session, so the degradation is safe as well as visible.
+func validateOpenAISafeguards(fields map[string]json.RawMessage) *requestValidationError {
+	raw, ok := fields["safeguards"]
+	if !ok {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: expected an array"}
+	}
+	var safeguards []json.RawMessage
+	if err := json.Unmarshal(raw, &safeguards); err != nil {
+		return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: expected an array"}
+	}
+	for _, safeguard := range safeguards {
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(safeguard, &item); err != nil || item == nil {
+			return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: expected an array of objects"}
+		}
+		typeRaw, ok := item["type"]
+		if !ok {
+			return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: each item requires a string type"}
+		}
+		var safeguardType string
+		if err := json.Unmarshal(typeRaw, &safeguardType); err != nil || strings.TrimSpace(safeguardType) == "" {
+			return &requestValidationError{status: http.StatusBadRequest, message: "invalid Anthropic safeguards field: each item requires a string type"}
+		}
+	}
+	return nil
+}
+
+// openAIPathSupportsAnthropicField is the shared allowlist for the OpenAI Chat
+// Completions and OpenAI Responses routes. Fields listed in
+// droppedOpenAIAnthropicFields are accepted but never forwarded.
 func openAIPathSupportsAnthropicField(field string) bool {
 	switch field {
 	case "model", "system", "messages", "max_tokens", "temperature", "stop_sequences", "stream", "tools", "tool_choice", "thinking", "metadata", "output_config", "context_management", "safeguards":
