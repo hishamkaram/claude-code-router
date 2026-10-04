@@ -73,7 +73,7 @@ func serveLiveResponsesImage(t *testing.T, w http.ResponseWriter, r *http.Reques
 				return
 			}
 			var content []responses.Content
-			if err := json.Unmarshal(encoded, &content); err != nil || len(content) != 1 || content[0].Type != "input_image" || content[0].ImageURL != "data:image/png;base64,"+liveImagePNGData {
+			if err := json.Unmarshal(encoded, &content); err != nil || !validLiveImageOutput(content) {
 				t.Errorf("image function output not preserved: %s", encoded)
 				http.Error(w, "invalid image output", http.StatusBadRequest)
 				return
@@ -96,4 +96,12 @@ func serveLiveResponsesImage(t *testing.T, w http.ResponseWriter, r *http.Reques
 		}
 	}
 	http.Error(w, "image tool missing", http.StatusBadRequest)
+}
+
+// Claude may append an image-source annotation after the original image.
+func validLiveImageOutput(content []responses.Content) bool {
+	if len(content) < 1 || len(content) > 2 || content[0].Type != "input_image" || content[0].ImageURL != "data:image/png;base64,"+liveImagePNGData {
+		return false
+	}
+	return len(content) == 1 || (content[1].Type == "input_text" && strings.HasPrefix(content[1].Text, "[Image: source: ") && strings.HasSuffix(content[1].Text, "]"))
 }
