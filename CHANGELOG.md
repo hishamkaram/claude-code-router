@@ -3,6 +3,21 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
+## v0.6.9
+
+- Preserve Anthropic's opt-in function-tool strictness on Chat Completions and
+  Responses routes. Send explicit `strict: false` when omitted by the caller,
+  while retaining explicit strict mode and the complete tool schemas. This
+  avoids upstream empty responses triggered by otherwise valid MCP schemas.
+- Add `ccr --version` with the same output as `ccr version`.
+- Add schema-versioned `ccr model list --json` with sorted aliases, provider
+  model identities, compatibility, and effective capability metadata. Discovery
+  stays local and does not resolve credentials or contact providers.
+- Document foreground integration with Delegation Layer. Update live fixtures
+  for Claude's optional image-source annotation and Agent-result delivery
+  acknowledgments, and retire the old CCR 0.5.1
+  predecessor CI test while retaining current-version continuation coverage.
+
 ## v0.6.7
 
 - Route Claude Code agents and skills that declare `opus`, `sonnet`, or

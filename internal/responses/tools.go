@@ -308,6 +308,11 @@ func responsesTool(raw json.RawMessage) (Tool, bool, error) {
 	if len(tool.InputSchema) == 0 || string(tool.InputSchema) == "null" {
 		return Tool{}, false, fmt.Errorf("function tool %q missing input_schema", name)
 	}
+	// Preserve Anthropic's opt-in strictness rather than the upstream default.
+	if tool.Strict == nil {
+		strict := false
+		tool.Strict = &strict
+	}
 	return Tool{
 		Type:        "function",
 		Name:        name,

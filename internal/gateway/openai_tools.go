@@ -32,10 +32,8 @@ func openAIToolsFromAnthropic(rawTools []json.RawMessage) ([]openAITool, error) 
 		if parameters == nil {
 			parameters = map[string]any{"type": "object"}
 		}
-		var strict *bool
-		if value, ok := payload["strict"].(bool); ok {
-			strict = &value
-		}
+		// Preserve Anthropic's opt-in strictness rather than the upstream default.
+		strict, _ := payload["strict"].(bool)
 		deferred, _ := payload["defer_loading"].(bool)
 		tools = append(tools, openAITool{
 			Type:     "function",
@@ -44,7 +42,7 @@ func openAIToolsFromAnthropic(rawTools []json.RawMessage) ([]openAITool, error) 
 				Name:        name,
 				Description: description,
 				Parameters:  parameters,
-				Strict:      strict,
+				Strict:      &strict,
 			},
 		})
 	}

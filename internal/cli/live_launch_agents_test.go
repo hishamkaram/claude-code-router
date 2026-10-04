@@ -284,11 +284,7 @@ func (s *liveSwitchedAgentProviderState) handleChat(t *testing.T, w http.Respons
 			"subagent_type":     "general-purpose",
 			"run_in_background": false,
 		})
-	case openAIMessagesContain(payload.Messages, "Return exactly CCR_LIVE_SWITCH_CHILD_OK") &&
-		(openAIMessagesContainToolRole(payload.Messages, "") ||
-			openAIMessageRoleContains(payload.Messages, "assistant", "CCR_LIVE_SWITCH_CHILD_OK") ||
-			strings.Contains(latestOpenAIMessage(payload.Messages), "tool_result") ||
-			strings.HasPrefix(latestOpenAIMessage(payload.Messages), "tool ")):
+	case openAIMessagesContainAgentResult(payload.Messages, "toolu_switch_agent", "CCR_LIVE_SWITCH_CHILD_OK"):
 		s.parentModel = payload.Model
 		writeLiveOpenAITextFixture(w, payload, "chatcmpl-switch-parent", "CCR_LIVE_SWITCH_PARENT_OK", 4, 2)
 	case openAIMessagesContain(payload.Messages, "Return exactly CCR_LIVE_SWITCH_CHILD_OK"):

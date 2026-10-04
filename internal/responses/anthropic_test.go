@@ -81,7 +81,7 @@ func TestRequestFromAnthropicMessagesJSONBasicCases(t *testing.T) {
 			raw:  `{"model":"claude","tools":[{"name":"bash","input_schema":{"type":"object"}},{"name":"read","input_schema":{"type":"object"}}],"messages":[{"role":"system","content":[{"type":"text","text":"before"},{"type":"tool_removal","tool":{"type":"tool_reference","name":"read"},"cache_control":{"type":"ephemeral"}},{"type":"text","text":"after"}]},{"role":"user","content":"hello"}]}`,
 			want: &Request{
 				Model: "claude",
-				Tools: []Tool{{Type: "function", Name: "bash", Parameters: rawJSON(`{"type":"object"}`)}},
+				Tools: []Tool{{Type: "function", Name: "bash", Parameters: rawJSON(`{"type":"object"}`), Strict: new(bool)}},
 				Input: []InputItem{
 					{Type: "message", Role: "developer", Content: []Content{{Type: "input_text", Text: "before\nafter"}}},
 					{Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "hello"}}},
@@ -119,7 +119,7 @@ func TestRequestFromAnthropicMessagesJSONBasicCases(t *testing.T) {
 			want: &Request{
 				Model:      "claude",
 				Input:      []InputItem{{Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "go"}}}},
-				Tools:      []Tool{{Type: "function", Name: "lookup", Parameters: rawJSON(`{"type":"object"}`)}},
+				Tools:      []Tool{{Type: "function", Name: "lookup", Parameters: rawJSON(`{"type":"object"}`), Strict: new(bool)}},
 				ToolChoice: map[string]string{"type": "function", "name": "lookup"},
 			},
 		},
@@ -187,6 +187,7 @@ func wantFullFixtureRequest(temp *float64) *Request {
 				Name:        "get_weather",
 				Description: "Get weather by city.",
 				Parameters:  rawJSON(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}`),
+				Strict:      new(bool),
 			},
 			{Type: "computer"},
 		},
