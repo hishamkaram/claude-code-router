@@ -5,6 +5,10 @@ lives under `docs/acceptance/`.
 
 ## v0.6.9
 
+- Preserve Anthropic's opt-in function-tool strictness on Chat Completions and
+  Responses routes. Send explicit `strict: false` when omitted by the caller,
+  while retaining explicit strict mode and the complete tool schemas. This
+  avoids upstream empty responses triggered by otherwise valid MCP schemas.
 - Add `ccr --version` with the same output as `ccr version`.
 - Add schema-versioned `ccr model list --json` with sorted aliases, provider
   model identities, compatibility, and effective capability metadata. Discovery
