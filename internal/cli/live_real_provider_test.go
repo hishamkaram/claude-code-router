@@ -363,12 +363,12 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 			t.Fatalf("%s model selection: %v", label, err)
 		}
 		if !strings.HasPrefix(selection, "Set model to ") {
-			t.Errorf("%s: Claude Code rejected model selection (output withheld)", label)
-			return
+			t.Fatalf("%s: Claude Code rejected model selection (output withheld)", label)
 		}
 		result, err := liveRealTurn(ctx, run, liveStreamInput(t, "Reply with only this exact marker, without punctuation or commentary:\n"+sentinel))
 		if err != nil || strings.TrimSpace(result) != sentinel {
-			t.Errorf("%s: expected turn marker %q, result_bytes=%d, error=%v", label, sentinel, len(result), err)
+			// Background turns may have shifted the stream; further results are ambiguous.
+			t.Fatalf("%s: expected turn marker %q, result_bytes=%d, error=%v", label, sentinel, len(result), err)
 		} else {
 			t.Logf("%s: completed expected turn", label)
 		}
