@@ -95,6 +95,7 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	opts := &options{}
 	cmd := &cobra.Command{
 		Use:           "ccr",
+		Version:       buildinfo.String(),
 		Short:         "Claude Code live model router",
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -118,6 +119,7 @@ Compatibility policy:
 
 Significant gateway behavior must be proven with live Claude Code E2E tests.`,
 	}
+	cmd.SetVersionTemplate("{{.Version}}\n")
 	cmd.SetIn(deps.In)
 	cmd.SetOut(deps.Out)
 	cmd.SetErr(deps.Err)
@@ -514,7 +516,8 @@ func newModelAddCommand(ctx context.Context, opts *options) *cobra.Command {
 }
 
 func newModelListCommand(ctx context.Context, opts *options) *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List configured model aliases",
 		Args:  cobra.NoArgs,
@@ -528,6 +531,9 @@ func newModelListCommand(ctx context.Context, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if jsonOutput {
+				return writeModelListJSON(cmd.OutOrStdout(), models)
+			}
 			if len(models) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No model aliases configured.")
 				return nil
@@ -539,6 +545,8 @@ func newModelListCommand(ctx context.Context, opts *options) *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Emit schema-versioned JSON")
+	return cmd
 }
 
 func openMigratedStore(ctx context.Context, opts *options) (*store.Store, string, error) {
