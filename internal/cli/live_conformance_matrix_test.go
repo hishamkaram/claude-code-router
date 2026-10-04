@@ -294,13 +294,7 @@ func (f *liveClaudeConformanceFixture) handleOpenAI(t *testing.T, w http.Respons
 		f.writeOpenAIText(w, payload, claudeConformanceWorkflowParent)
 	case f.workflowStarted() && strings.Contains(latest, "subagent spawned by a workflow orchestration script") && strings.Contains(latest, claudeConformanceWorkflowChild):
 		f.writeOpenAIText(w, payload, claudeConformanceWorkflowChild)
-	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && openAIMessagesContainToolRole(payload.Messages, ""):
-		f.writeOpenAIText(w, payload, claudeConformanceAgentParent)
-	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") &&
-		openAIMessageRoleContains(payload.Messages, "assistant", "CCR_CONFORMANCE_AGENT_CHILD_OK"):
-		f.writeOpenAIText(w, payload, claudeConformanceAgentParent)
-	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") &&
-		(strings.Contains(latest, "tool_result") || strings.HasPrefix(latest, "tool ")):
+	case openAIMessagesContainAgentResult(payload.Messages, "toolu_agent_conformance", "CCR_CONFORMANCE_AGENT_CHILD_OK"):
 		f.writeOpenAIText(w, payload, claudeConformanceAgentParent)
 	case strings.Contains(latest, "CCR_CONFORMANCE_AGENT_CHILD_OK") && !strings.Contains(latest, claudeConformanceAgentParent):
 		if liveToolsContain(payload.Tools, "SubagentHandback") {

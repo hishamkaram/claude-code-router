@@ -417,8 +417,9 @@ func liveAutoLaunchAuthUnavailable(err error) bool {
 }
 
 type liveOpenAIChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string `json:"role"`
+	Content    string `json:"content"`
+	ToolCallID string `json:"tool_call_id"`
 }
 
 type liveOpenAIChatPayload struct {
@@ -480,4 +481,22 @@ func runLiveCommand(ctx context.Context, deps Dependencies, args ...string) (str
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), errOut.String(), err
+}
+
+func openAIMessagesContainAgentResult(messages []liveOpenAIChatMessage, callID, needle string) bool {
+	for _, message := range messages {
+		if message.Role != "tool" || message.ToolCallID != callID {
+			continue
+		}
+		if strings.Contains(message.Content, needle) {
+			return true
+		}
+		// Claude can deliver SubagentHandback reports separately, leaving a
+		// positive delivery acknowledgment in the matching Agent tool result.
+		if strings.HasPrefix(strings.TrimSpace(message.Content), "This agent's report was delivered to you as a message from ") &&
+			strings.Contains(message.Content, "(its SubagentHandback call).") {
+			return true
+		}
+	}
+	return false
 }

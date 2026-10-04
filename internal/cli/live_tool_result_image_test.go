@@ -297,8 +297,9 @@ type liveImageOpenAITool struct {
 }
 
 type liveImageOpenAIMessage struct {
-	Role    string          `json:"role"`
-	Content json.RawMessage `json:"content"`
+	Role       string          `json:"role"`
+	Content    json.RawMessage `json:"content"`
+	ToolCallID string          `json:"tool_call_id"`
 }
 
 type liveImageOpenAIRequest struct {
@@ -350,8 +351,11 @@ func liveOpenAIImageToolResultConverted(messages []liveImageOpenAIMessage) bool 
 	toolIndex := -1
 	imageIndex := -1
 	for index, message := range messages {
-		if message.Role == "tool" && bytes.Contains(message.Content, []byte("[image output]")) {
-			toolIndex = index
+		if message.Role == "tool" && message.ToolCallID == "toolu_live_image" {
+			var text string
+			if json.Unmarshal(message.Content, &text) == nil && strings.TrimSpace(text) != "" {
+				toolIndex = index
+			}
 		}
 		if message.Role == "user" &&
 			bytes.Contains(message.Content, []byte(`"type":"image_url"`)) &&
@@ -360,6 +364,40 @@ func liveOpenAIImageToolResultConverted(messages []liveImageOpenAIMessage) bool 
 		}
 	}
 	return toolIndex >= 0 && imageIndex > toolIndex
+}
+
+func TestLiveImageConversionEvidence(t *testing.T) {
+	t.Parallel()
+	tool := liveImageOpenAIMessage{Role: "tool", ToolCallID: "toolu_live_image", Content: json.RawMessage(`"[image output]"`)}
+	annotated := tool
+	annotated.Content = json.RawMessage(`"[Image: source: /tmp/tool-result.png]"`)
+	unrelated := tool
+	unrelated.ToolCallID = "other-tool"
+	empty := tool
+	empty.Content = json.RawMessage(`""`)
+	image := liveImageOpenAIMessage{Role: "user", Content: json.RawMessage(`[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + liveImagePNGData + `"}}]`)}
+	wrongImage := image
+	wrongImage.Content = json.RawMessage(`[{"type":"image_url","image_url":{"url":"data:image/png;base64,wrong"}}]`)
+	for _, test := range []struct {
+		name     string
+		messages []liveImageOpenAIMessage
+		want     bool
+	}{
+		{"image-only result", []liveImageOpenAIMessage{tool, image}, true},
+		{"annotated result", []liveImageOpenAIMessage{annotated, image}, true},
+		{"unrelated tool", []liveImageOpenAIMessage{unrelated, image}, false},
+		{"missing tool", []liveImageOpenAIMessage{image}, false},
+		{"empty tool content", []liveImageOpenAIMessage{empty, image}, false},
+		{"missing image", []liveImageOpenAIMessage{tool}, false},
+		{"image before tool", []liveImageOpenAIMessage{image, tool}, false},
+		{"wrong image", []liveImageOpenAIMessage{tool, wrongImage}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := liveOpenAIImageToolResultConverted(test.messages); got != test.want {
+				t.Fatalf("image conversion evidence = %v, want %v", got, test.want)
+			}
+		})
+	}
 }
 
 func writeLiveImageToolCall(w http.ResponseWriter, payload liveOpenAIChatPayload, name string) {
