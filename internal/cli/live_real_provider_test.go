@@ -4,6 +4,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -355,6 +356,8 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 	var launchID int64
 	run := startLiveCompactionCommand(t, ctx, Dependencies{StartGateway: liveRealGatewayStarter(&launchID)}, args)
 	check := func(label, model, sentinel string) {
+		// Bind each response to this turn rather than a predictable history pattern.
+		sentinel += "_" + rand.Text()
 		selection, err := liveRealTurn(ctx, run, liveStreamInput(t, "/model "+model))
 		if err != nil {
 			t.Fatalf("%s model selection: %v", label, err)
