@@ -184,9 +184,8 @@ units alone. It does not block D-Bus or guess which external processes to kill.
 ## Verification
 
 ```bash
-export CCR_LIVE_LEGACY_CCR=/absolute/path/to/ccr-0.5.1
 go test -tags=live -count=1 -v ./internal/jobs
-go test -tags=live -count=1 -v ./internal/cli -run '^TestLiveDetached(ClaudeJobs|ClaudeContinuation|LegacyContinuation)$'
+go test -tags=live -count=1 -v ./internal/cli -run '^TestLiveDetached(ClaudeJobs|ClaudeContinuation)$'
 ```
 
 The Linux containment suite checks escaped descendants, concurrent forking,

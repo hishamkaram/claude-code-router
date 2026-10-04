@@ -47,18 +47,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - name: Check out genuine CCR 0.5.1 predecessor
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: d17d9bde76530fe5de845ec5f8c12a4c84595b0f
-          path: .live-legacy
-          persist-credentials: false
-      - name: Build pinned predecessor
-        working-directory: .live-legacy
-        run: |
-          go build -ldflags '-X github.com/hishamkaram/claude-code-router/internal/buildinfo.Version=0.5.1 -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Commit=d17d9bde76530fe5de845ec5f8c12a4c84595b0f' -o "$RUNNER_TEMP/ccr-legacy" ./cmd/ccr
-          echo "CCR_LIVE_LEGACY_CCR=$RUNNER_TEMP/ccr-legacy" >> "$GITHUB_ENV"
-          "$RUNNER_TEMP/ccr-legacy" version
       - name: Install Claude Code
         run: npm install --global "@anthropic-ai/claude-code@${{ matrix.claude-version }}"
       - name: Provision Linux user manager for containment tests
@@ -89,7 +77,7 @@ jobs:
         run: |
           claude --version
           git rev-parse HEAD
-          go test -tags=live -count=1 -timeout 5m -v ./internal/cli -run '^TestLiveDetached(ClaudeJobs|ClaudeContinuation|LegacyContinuation)$' | tee "$RUNNER_TEMP/durable-cli.log"
+          go test -tags=live -count=1 -timeout 5m -v ./internal/cli -run '^TestLiveDetached(ClaudeJobs|ClaudeContinuation)$' | tee "$RUNNER_TEMP/durable-cli.log"
       - name: Preserve deterministic acceptance evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

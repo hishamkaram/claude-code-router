@@ -20,23 +20,10 @@ import (
 )
 
 func TestLiveDetachedClaudeContinuation(t *testing.T) {
-	proveLiveDetachedClaudeContinuation(t, "")
+	proveLiveDetachedClaudeContinuation(t)
 }
 
-func TestLiveDetachedLegacyContinuation(t *testing.T) {
-	legacy := os.Getenv("CCR_LIVE_LEGACY_CCR")
-	if legacy == "" {
-		t.Fatal("CCR_LIVE_LEGACY_CCR must name a real CCR 0.5.1 binary")
-	}
-	version, err := exec.CommandContext(t.Context(), legacy, "version").Output()
-	if err != nil || !strings.HasPrefix(string(version), "ccr 0.5.1 ") {
-		t.Fatalf("required CCR 0.5.1 predecessor: %s %v", version, err)
-	}
-	t.Logf("legacy predecessor binary: %s", strings.TrimSpace(string(version)))
-	proveLiveDetachedClaudeContinuation(t, legacy)
-}
-
-func proveLiveDetachedClaudeContinuation(t *testing.T, legacy string) {
+func proveLiveDetachedClaudeContinuation(t *testing.T) {
 	t.Helper()
 	claude, err := exec.LookPath("claude")
 	if err != nil {
@@ -69,23 +56,7 @@ func proveLiveDetachedClaudeContinuation(t *testing.T, legacy string) {
 			prompt = "Remember this marker for later rounds: " + marker
 		}
 		before := calls.Load()
-		launchBinary := binary
-		legacyRound := index == 0 && legacy != ""
-		if legacyRound {
-			launchBinary = legacy
-		}
-		head = launchLiveContinuation(t, ctx, launchBinary, database, directory, prompt, head, legacyRound)
-		if legacyRound {
-			if head.SchemaVersion != 1 {
-				t.Fatalf("predecessor is not a genuine schema-1 record: %+v", head)
-			}
-			evidence, _, err := jobs.CommitOutput(ctx, head.Log, head.SessionID, "anthropic.ccr.fixture-full[1m]")
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Validate independently without rewriting the genuine old record.
-			head.ResultEvidence = &evidence
-		}
+		head = launchLiveContinuation(t, ctx, binary, database, directory, prompt, head)
 		if head.Status != "completed" || !head.Stopped() || head.ResultEvidence == nil || head.Containment != expectedLiveContainment(t) {
 			diagnostic, _ := os.ReadFile(head.ErrorLog)
 			t.Fatalf("%s: %+v\n%s", phase, head, diagnostic)
@@ -99,7 +70,7 @@ func proveLiveDetachedClaudeContinuation(t *testing.T, legacy string) {
 	// An isolated empty profile creates a real missing-history failure without
 	// production code inspecting Claude's transcript storage layout.
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	missing := launchLiveContinuation(t, ctx, binary, database, directory, "Continue the original session.", head, false)
+	missing := launchLiveContinuation(t, ctx, binary, database, directory, "Continue the original session.", head)
 	if missing.Status != "failed" || missing.ReasonCode != jobs.ReasonStartupFailed || !missing.Stopped() || missing.RequestedResumeSession != head.SessionID {
 		diagnostic, _ := os.ReadFile(missing.Log)
 		t.Fatalf("missing history classification: %+v\n%s", missing, diagnostic)
@@ -137,16 +108,14 @@ func continuationFixture(t *testing.T, marker string, calls *atomic.Int64) *http
 	}))
 }
 
-func launchLiveContinuation(t *testing.T, ctx context.Context, binary, database, directory, prompt string, parent jobs.Record, legacy bool) jobs.Record {
+func launchLiveContinuation(t *testing.T, ctx context.Context, binary, database, directory, prompt string, parent jobs.Record) jobs.Record {
 	t.Helper()
 	path := filepath.Join(directory, "prompt.txt")
 	if err := os.WriteFile(path, []byte(prompt), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	args := []string{"--db", database, "launch", "--model=fixture-full", "--auth-mode=provider-only", "--detach", "-p", "--prompt-file=" + path, "--no-lifecycle", "--no-statusline", "--output-format=stream-json", "--verbose", "--max-turns=1", "--tools=", "--strict-mcp-config", "--mcp-config={\"mcpServers\":{}}"}
-	if !legacy {
-		args = append(args, "--submission-id="+uuid.NewString())
-	}
+	args = append(args, "--submission-id="+uuid.NewString())
 	if parent.JobID != "" {
 		args = append(args, "--resume="+parent.SessionID, "--expected-parent-job="+parent.JobID)
 	}

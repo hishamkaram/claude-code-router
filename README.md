@@ -477,3 +477,16 @@ security vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Agent integration through Delegation Layer
+
+[Delegation Layer](https://github.com/hishamkaram/delegation-layer) can supervise
+foreground CCR tasks through its `ccr:print` adapter. Configure a CCR provider
+and alias first; the caller passes the alias explicitly. Delegate owns task
+budgets, cancellation, evidence, and continuation. CCR continues to own routing
+and credentials. This integration does not use CCR detached jobs.
+
+Automation can use `ccr --version` (equivalent to `ccr version`) and
+`ccr model list --json`. Model listing returns schema version 1 with a sorted
+`models` array containing aliases, provider/model names, compatibility, and
+effective capabilities. It does not contact providers or validate credentials.
