@@ -33,6 +33,18 @@ assert_file_contains() {
     grep -F "$expected" "$file" >/dev/null 2>&1 || fail "$message (missing '$expected')"
 }
 
+checksum() {
+    checksum_line=
+    if command -v sha256sum >/dev/null 2>&1; then
+        checksum_line=$(sha256sum "$1")
+    elif command -v shasum >/dev/null 2>&1; then
+        checksum_line=$(shasum -a 256 "$1")
+    else
+        fail 'sha256sum or shasum is required for installer tests'
+    fi
+    printf '%s\n' "${checksum_line%% *}"
+}
+
 cat >"$mock_bin/uname" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -80,6 +92,12 @@ cp "$source" "$destination"
 EOF
 chmod 0755 "$mock_bin/curl"
 
+cat >"$mock_bin/awk" <<'EOF'
+#!/bin/sh
+exit 127
+EOF
+chmod 0755 "$mock_bin/awk"
+
 create_release() {
     release_text=$1
     for architecture in amd64 arm64; do
@@ -93,15 +111,23 @@ create_release() {
     : >"$fixtures/checksums.txt"
     for architecture in amd64 arm64; do
         archive="$fixtures/claude-code-router_linux_$architecture.tar.gz"
-        checksum=$(sha256sum "$archive" | awk '{print $1}')
-        printf '%s  %s\n' "$checksum" "claude-code-router_linux_$architecture.tar.gz" >>"$fixtures/checksums.txt"
+        archive_checksum=$(checksum "$archive")
+        printf '%s  %s\n' "$archive_checksum" "claude-code-router_linux_$architecture.tar.gz" >>"$fixtures/checksums.txt"
     done
 }
 
 run_installer() {
     HOME=$test_home \
-    CCR_TEST_FIXTURES=$fixtures \
-    CCR_TEST_URL_LOG=$url_log \
+    CCR_TEST_FIXTURES="$fixtures" \
+    CCR_TEST_URL_LOG="$url_log" \
+    PATH="$mock_bin:$base_path" \
+    "$installer" "$@"
+}
+
+run_installer_without_home() {
+    env -u HOME \
+    CCR_TEST_FIXTURES="$fixtures" \
+    CCR_TEST_URL_LOG="$url_log" \
     PATH="$mock_bin:$base_path" \
     "$installer" "$@"
 }
@@ -124,6 +150,12 @@ if HOME="$test_root/missing-value-home" PATH="$mock_bin:$base_path" "$installer"
     fail 'missing --version value was accepted'
 fi
 
+: >"$url_log"
+if HOME="$test_root/option-value-home" PATH="$mock_bin:$base_path" "$installer" --version --help >/dev/null 2>&1; then
+    fail 'option token was accepted as a --version value'
+fi
+[ ! -s "$url_log" ] || fail 'invalid --version value triggered a download'
+
 test_home=$test_root/latest-home
 mkdir -p "$test_home"
 : >"$url_log"
@@ -143,6 +175,12 @@ assert_equal 'ccr first' "$("$custom_dir/ccr" version 2>/dev/null || true)" 'pin
 assert_file_contains "$url_log" '/releases/download/v1.2.3/claude-code-router_linux_amd64.tar.gz' \
     'pinned install used the wrong release URL'
 
+no_home_dir=$test_root/no-home-bin
+: >"$url_log"
+run_installer_without_home --dir "$no_home_dir" >/dev/null
+assert_equal 'ccr first' "$("$no_home_dir/ccr" version 2>/dev/null || true)" \
+    'explicit --dir install incorrectly required HOME'
+
 test_home=$test_root/arm-home
 mkdir -p "$test_home"
 CCR_TEST_MACHINE=aarch64 run_installer >/dev/null
@@ -151,10 +189,10 @@ assert_equal 'ccr first' "$("$test_home/.local/bin/ccr" version 2>/dev/null || t
 test_home=$test_root/update-home
 mkdir -p "$test_home"
 run_installer >/dev/null
-old_checksum=$(sha256sum "$test_home/.local/bin/ccr" | awk '{print $1}')
+old_checksum=$(checksum "$test_home/.local/bin/ccr")
 create_release second
 run_installer >/dev/null
-new_checksum=$(sha256sum "$test_home/.local/bin/ccr" | awk '{print $1}')
+new_checksum=$(checksum "$test_home/.local/bin/ccr")
 [ "$old_checksum" != "$new_checksum" ] || fail 'update did not replace the existing binary'
 assert_equal 'ccr second' "$("$test_home/.local/bin/ccr" version 2>/dev/null || true)" 'update produced the wrong version'
 
@@ -163,14 +201,14 @@ printf '%064d  %s\n' 0 claude-code-router_linux_amd64.tar.gz >"$fixtures/checksu
 if run_installer >/dev/null 2>&1; then
     fail 'checksum mismatch was accepted'
 fi
-new_checksum=$(sha256sum "$test_home/.local/bin/ccr" | awk '{print $1}')
+new_checksum=$(checksum "$test_home/.local/bin/ccr")
 assert_equal "$old_checksum" "$new_checksum" 'checksum failure replaced the existing binary'
 
 printf '%s\n' 'not-the-amd64-entry' >"$fixtures/checksums.txt"
 if run_installer >/dev/null 2>&1; then
     fail 'missing checksum entry was accepted'
 fi
-new_checksum=$(sha256sum "$test_home/.local/bin/ccr" | awk '{print $1}')
+new_checksum=$(checksum "$test_home/.local/bin/ccr")
 assert_equal "$old_checksum" "$new_checksum" 'missing checksum replaced the existing binary'
 
 test_home=$test_root/unsupported-home

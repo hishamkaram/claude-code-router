@@ -32,6 +32,9 @@ fail() {
 require_value() {
     [ "$#" -ge 2 ] || fail "$1 requires a value"
     [ -n "$2" ] || fail "$1 requires a non-empty value"
+    case "$2" in
+        -*) fail "$1 requires a value" ;;
+    esac
 }
 
 while [ "$#" -gt 0 ]; do
@@ -56,8 +59,10 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-[ -n "$home" ] || fail 'HOME is not set'
-[ -n "$install_dir" ] || install_dir=$home/.local/bin
+if [ -z "$install_dir" ]; then
+    [ -n "$home" ] || fail 'HOME is not set when --dir is omitted'
+    install_dir=$home/.local/bin
+fi
 
 case "$version" in
     latest)
@@ -108,13 +113,15 @@ download() {
 
 sha256() {
     file=$1
+    checksum_line=
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$file" | awk '{print $1}'
+        checksum_line=$(sha256sum "$file")
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$file" | awk '{print $1}'
+        checksum_line=$(shasum -a 256 "$file")
     else
         fail 'sha256sum or shasum is required to verify the release'
     fi
+    printf '%s\n' "${checksum_line%% *}"
 }
 
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/ccr-install.XXXXXX") || fail 'could not create a temporary directory'
@@ -135,7 +142,13 @@ printf 'Downloading CCR (%s, %s)...\n' "$architecture" "$version"
 download "$release_base/$archive_name" "$archive_path"
 download "$release_base/checksums.txt" "$checksums_path"
 
-expected_checksum=$(awk -v name="$archive_name" '$2 == name { print $1; exit }' "$checksums_path")
+expected_checksum=
+while IFS=' ' read -r checksum checksum_name; do
+    if [ "$checksum_name" = "$archive_name" ]; then
+        expected_checksum=$checksum
+        break
+    fi
+done <"$checksums_path"
 [ -n "$expected_checksum" ] || fail "checksums.txt does not contain $archive_name"
 case "$expected_checksum" in
     *[!0-9A-Fa-f]*) fail "invalid checksum for $archive_name" ;;
