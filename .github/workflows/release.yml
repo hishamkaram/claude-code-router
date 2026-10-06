@@ -151,8 +151,9 @@ jobs:
       - name: Verify and smoke-test draft archives
         shell: bash
         run: |
-          gh release download "$TAG" --pattern 'claude-code-router_*.tar.gz' --pattern checksums.txt
+          gh release download "$TAG" --pattern 'claude-code-router_*.tar.gz' --pattern checksums.txt --pattern install.sh
           shasum -a 256 --check checksums.txt
+          sh -n install.sh
           case "$(uname -s)" in
             Linux) platform=linux ;;
             Darwin) platform=darwin ;;

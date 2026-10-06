@@ -74,6 +74,7 @@ Also record pull-request CI and the 12-job fixture matrix:
 
 - Release archives exist for Linux/macOS amd64/arm64.
 - `checksums.txt` verifies downloaded archives.
+- The Linux `install.sh` release asset exists and passes `sh -n`.
 - GitHub provenance attestation verifies against `release.yml`.
 - The GHCR browser image tag exists and its keyless cosign signature verifies.
 - Linux and macOS archive smoke tests pass.

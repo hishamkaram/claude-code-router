@@ -9,7 +9,7 @@ DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILT_BY ?= make
 LDFLAGS := -s -w -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Version=$(VERSION) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Commit=$(COMMIT) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Date=$(DATE) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.BuiltBy=$(BUILT_BY)
 
-.PHONY: build build-cua-macos test test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-subscription-pool-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
+.PHONY: build build-cua-macos test test-install test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-subscription-pool-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -24,6 +24,9 @@ build-cua-macos:
 
 test:
 	$(GO) test -count=1 ./...
+
+test-install:
+	sh scripts/test-install.sh
 
 test-race:
 	$(GO) test $(GOFLAGS) -count=1 -p 4 ./...
