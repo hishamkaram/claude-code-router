@@ -50,6 +50,8 @@ release:
   github:
     owner: hishamkaram
     name: claude-code-router
+  extra_files:
+    - glob: ./scripts/install.sh
   draft: true
   prerelease: auto
   name_template: '{{ .Tag }}'

@@ -97,8 +97,9 @@ git push origin vX.Y.Z
 
 The tag workflow runs deterministic checks, creates macOS and Linux release
 archives for `amd64` and `arm64`, publishes a draft GitHub Release with
-`checksums.txt`, creates GitHub provenance attestations, builds the managed
-browser image, pushes its version tag to GHCR, and signs it with keyless cosign.
+`checksums.txt` and the checksum-verifying Linux `install.sh`, creates GitHub
+provenance attestations, builds the managed browser image, pushes its version
+tag to GHCR, and signs it with keyless cosign.
 It does not move `browser:latest` or update Homebrew. Pre-release tags therefore
 remain version-tagged images and cannot replace the stable default.
 
@@ -126,6 +127,7 @@ remain version-tagged images and cannot replace the stable default.
    computer-use helper is source-built only and is not included in Homebrew or
    GoReleaser archives. Do not describe it as shipped, signed, notarized, or
    production-hardened.
+5. Download `install.sh` from the draft release and run `sh -n install.sh`.
 
 ## Promote
 

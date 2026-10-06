@@ -20,6 +20,38 @@ endpoint. It never silently falls back to a different model or provider.
 brew install hishamkaram/tap/claude-code-router
 ```
 
+### Linux installer
+
+The release installer detects Linux amd64 or arm64, downloads the matching
+archive, verifies its SHA-256 checksum, and installs `ccr` into
+`~/.local/bin` without requiring root:
+
+```bash
+curl -fsSL https://github.com/hishamkaram/claude-code-router/releases/latest/download/install.sh | sh
+ccr version
+```
+
+To install a specific release or use a system directory:
+
+```bash
+release_version=vX.Y.Z
+curl -fsSL https://github.com/hishamkaram/claude-code-router/releases/latest/download/install.sh \
+  | sh -s -- --version "$release_version" --dir "$HOME/.local/bin"
+```
+
+To update CCR, run the same latest-release command again. The installer verifies
+the new archive before atomically replacing the existing binary. It does not run
+in the background or modify shell profiles. A system-wide install is explicit:
+
+```bash
+curl -fsSL https://github.com/hishamkaram/claude-code-router/releases/latest/download/install.sh \
+  | sudo sh -s -- --dir /usr/local/bin
+```
+
+The installer requires `curl` or `wget`, `tar`, `install`, `mktemp`, `mv`, and
+`sha256sum` or `shasum`. If `~/.local/bin` is not on `PATH`, it prints the
+required shell export.
+
 ### GitHub Releases (macOS and Linux)
 
 Download the archive for your operating system and CPU from the
