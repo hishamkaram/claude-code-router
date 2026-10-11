@@ -18,6 +18,7 @@ const observerTokenHeader = "X-CCR-Observer-Token"
 type launchSettingsOptions struct {
 	IncludeToolDisabled          bool
 	FamilyRoutingEnabled         bool
+	PinnedRoute                  *gateway.PinnedRoute
 	LifecycleEnabled             bool
 	StatuslineEnabled            bool
 	IsolateStatuslineCredentials bool
@@ -46,7 +47,7 @@ func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launch
 	settings := make(map[string]any, 4)
 	addLaunchFamilyRouting(settings, options.FamilyRoutingEnabled)
 	result := launchSettingsResult{}
-	if err := addLaunchAvailableModels(ctx, s, options.IncludeToolDisabled, settings); err != nil {
+	if err := addLaunchAvailableModels(ctx, s, options.IncludeToolDisabled, options.PinnedRoute, settings); err != nil {
 		return launchSettingsResult{}, err
 	}
 	if options.LifecycleEnabled {
@@ -117,7 +118,11 @@ func addCCRStatusline(settings map[string]any, state, executable string) (string
 	return state, nil
 }
 
-func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDisabled bool, settings map[string]any) error {
+func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDisabled bool, pinnedRoute *gateway.PinnedRoute, settings map[string]any) error {
+	if pinnedRoute != nil {
+		settings["availableModels"] = []string{pinnedRoute.DiscoveryID()}
+		return nil
+	}
 	existing, configured, err := claudeAvailableModels()
 	if err != nil {
 		return err

@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"strings"
 	"unicode"
+
+	"github.com/hishamkaram/claude-code-router/internal/anthropictoolchange"
 )
 
 type openAIToolChange struct {
-	typeName string
-	toolName string
+	typeName   string
+	toolName   string
+	inlineTool *openAITool
 }
 
 func openAIToolsFromAnthropic(rawTools []json.RawMessage) ([]openAITool, error) {
@@ -49,8 +52,8 @@ func openAIToolsFromAnthropic(rawTools []json.RawMessage) ([]openAITool, error) 
 	return tools, nil
 }
 
-func openAIToolsAfterAnthropicChanges(tools []openAITool, messages []anthropicMessage) ([]openAITool, error) {
-	changes, err := openAIToolChangesFromAnthropic(messages)
+func openAIToolsAfterAnthropicChanges(tools []openAITool, system any, messages []anthropicMessage) ([]openAITool, error) {
+	changes, err := openAIToolChangesFromAnthropic(system, messages)
 	if err != nil {
 		return nil, err
 	}
@@ -65,27 +68,24 @@ func openAIToolsAfterAnthropicChanges(tools []openAITool, messages []anthropicMe
 		return tools, nil
 	}
 
-	defined := make(map[string]bool, len(tools))
+	working := append([]openAITool(nil), tools...)
+	defined := make(map[string]int, len(working))
 	active := make(map[string]bool, len(tools))
-	for _, tool := range tools {
+	for index, tool := range working {
 		name := tool.Function.Name
-		defined[name] = true
+		if _, exists := defined[name]; !exists {
+			defined[name] = index
+		}
 		active[name] = !tool.deferred
 	}
 	for _, change := range changes {
-		if !defined[change.toolName] {
-			// A ToolSearch result may name a tool from another turn's set; that activates
-			// nothing rather than failing the request.
-			if change.typeName == "tool_reference" {
-				continue
-			}
-			return nil, fmt.Errorf("system %s references unknown tool %q", change.typeName, change.toolName)
+		if err := applyOpenAIToolChange(&working, defined, active, change); err != nil {
+			return nil, err
 		}
-		active[change.toolName] = change.typeName != "tool_removal"
 	}
 
-	filtered := make([]openAITool, 0, len(tools))
-	for _, tool := range tools {
+	filtered := make([]openAITool, 0, len(working))
+	for _, tool := range working {
 		if active[tool.Function.Name] {
 			filtered = append(filtered, tool)
 		}
@@ -93,32 +93,68 @@ func openAIToolsAfterAnthropicChanges(tools []openAITool, messages []anthropicMe
 	return filtered, nil
 }
 
-func openAIToolChangesFromAnthropic(messages []anthropicMessage) ([]openAIToolChange, error) {
+func applyOpenAIToolChange(tools *[]openAITool, defined map[string]int, active map[string]bool, change openAIToolChange) error {
+	if change.inlineTool != nil {
+		if index, exists := defined[change.toolName]; exists {
+			(*tools)[index] = *change.inlineTool
+		} else {
+			defined[change.toolName] = len(*tools)
+			*tools = append(*tools, *change.inlineTool)
+		}
+		active[change.toolName] = true
+		return nil
+	}
+	if _, exists := defined[change.toolName]; !exists {
+		// A ToolSearch result may name a tool from another turn's set; that activates
+		// nothing rather than failing the request.
+		if change.typeName == "tool_reference" {
+			return nil
+		}
+		return fmt.Errorf("system %s references unknown tool %q", change.typeName, change.toolName)
+	}
+	active[change.toolName] = change.typeName != "tool_removal"
+	return nil
+}
+
+func openAIToolChangesFromAnthropic(system any, messages []anthropicMessage) ([]openAIToolChange, error) {
 	changes := make([]openAIToolChange, 0)
+	var err error
+	changes, err = appendOpenAISystemToolChanges(changes, system)
+	if err != nil {
+		return nil, err
+	}
 	for _, message := range messages {
 		if message.Role != "system" {
 			changes = appendOpenAIToolResultReferences(changes, message)
 			continue
 		}
-		blocks, ok := message.Content.([]any)
+		changes, err = appendOpenAISystemToolChanges(changes, message.Content)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return changes, nil
+}
+
+func appendOpenAISystemToolChanges(changes []openAIToolChange, content any) ([]openAIToolChange, error) {
+	blocks, ok := content.([]any)
+	if !ok {
+		return changes, nil
+	}
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
 		if !ok {
 			continue
 		}
-		for _, item := range blocks {
-			block, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			blockType, _ := block["type"].(string)
-			if blockType != "tool_addition" && blockType != "tool_removal" {
-				continue
-			}
-			change, err := openAIToolChangeFromAnthropic(block)
-			if err != nil {
-				return nil, err
-			}
-			changes = append(changes, change)
+		blockType, _ := block["type"].(string)
+		if blockType != "tool_addition" && blockType != "tool_removal" {
+			continue
 		}
+		change, err := openAIToolChangeFromAnthropic(block)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
 	}
 	return changes, nil
 }
@@ -171,41 +207,46 @@ func openAIToolResultReferenceNames(item any) []string {
 
 func openAIToolChangeFromAnthropic(block map[string]any) (openAIToolChange, error) {
 	blockType, _ := block["type"].(string)
-	for key := range block {
-		// cache_control is accepted and dropped, matching the text system block path.
-		// Claude Code marks the final system block for prompt caching, and that block is
-		// a tool_addition whenever tools change mid-conversation. OpenAI has no equivalent
-		// field, so ignoring it costs caching and nothing else; rejecting it fails the
-		// whole request over a hint.
-		if key != "type" && key != "tool" && key != "cache_control" {
-			return openAIToolChange{}, fmt.Errorf("system %s block field %q is not supported by the OpenAI-compatible gateway path", blockType, key)
+	rawBlock, err := json.Marshal(block)
+	if err != nil {
+		return openAIToolChange{}, fmt.Errorf("encode system %s block: %w", blockType, err)
+	}
+	change, err := anthropictoolchange.Parse(rawBlock)
+	if err != nil {
+		return openAIToolChange{}, err
+	}
+	switch change.Kind {
+	case anthropictoolchange.Reference:
+		return openAIToolChange{typeName: change.BlockType, toolName: change.Name}, nil
+	case anthropictoolchange.Definition:
+		inlineTool, err := openAIInlineToolFromAnthropic(change.Definition, change.BlockType)
+		if err != nil {
+			return openAIToolChange{}, err
 		}
+		return openAIToolChange{
+			typeName:   change.BlockType,
+			toolName:   inlineTool.Function.Name,
+			inlineTool: inlineTool,
+		}, nil
+	default:
+		return openAIToolChange{}, fmt.Errorf("system %s tool type %q is not supported", change.BlockType, change.Kind)
 	}
-	reference, ok := block["tool"].(map[string]any)
-	if !ok {
-		return openAIToolChange{}, fmt.Errorf("system %s block requires a tool reference object", blockType)
+}
+
+func openAIInlineToolFromAnthropic(rawDefinition json.RawMessage, blockType string) (*openAITool, error) {
+	parsed, err := openAIToolsFromAnthropic([]json.RawMessage{rawDefinition})
+	if err != nil {
+		return nil, fmt.Errorf("system %s tool definition is invalid: %w", blockType, err)
 	}
-	for key := range reference {
-		if key != "type" && key != "name" {
-			return openAIToolChange{}, fmt.Errorf("system %s tool reference field %q is not supported by the OpenAI-compatible gateway path", blockType, key)
-		}
+	if len(parsed) != 1 {
+		return nil, fmt.Errorf("system %s tool definition must contain exactly one tool", blockType)
 	}
-	referenceType, _ := reference["type"].(string)
-	if referenceType != "tool_reference" {
-		return openAIToolChange{}, fmt.Errorf("system %s tool reference type %q is not supported by the OpenAI-compatible gateway path", blockType, referenceType)
-	}
-	toolName, ok := reference["name"].(string)
-	if !ok {
-		return openAIToolChange{}, fmt.Errorf("system %s tool reference name must be a string", blockType)
-	}
-	toolName = strings.TrimSpace(toolName)
-	if toolName == "" {
-		return openAIToolChange{}, fmt.Errorf("system %s tool reference name is required", blockType)
-	}
+	toolName := strings.TrimSpace(parsed[0].Function.Name)
 	if strings.IndexFunc(toolName, unicode.IsControl) >= 0 {
-		return openAIToolChange{}, fmt.Errorf("system %s tool reference name must not contain control characters", blockType)
+		return nil, fmt.Errorf("system %s tool definition name must not contain control characters", blockType)
 	}
-	return openAIToolChange{typeName: blockType, toolName: toolName}, nil
+	parsed[0].Function.Name = toolName
+	return &parsed[0], nil
 }
 
 func openAIToolChoiceFromAnthropic(raw json.RawMessage) (choice any, parallelTools *bool, err error) {

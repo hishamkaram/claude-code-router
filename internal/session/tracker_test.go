@@ -28,6 +28,7 @@ func TestTrackerNormalizesLifecycleState(t *testing.T) {
 	tracker.ObserveRoute(ctx, Route{
 		Kind: "registered", ModelAlias: "coder", ProviderName: "fixture",
 		ProviderModel: "model-v1", Protocol: "openai-compatible",
+		ConfigurationFingerprint: "sha256:fixture",
 	})
 	events := []HookEvent{
 		{SessionID: "session-1", HookEventName: "SessionStart", Source: "startup"},
@@ -168,6 +169,59 @@ func TestTrackerCompletionRecoversMissingStartEvents(t *testing.T) {
 	tasks, err := s.ListTasks(ctx, launchID, sessions[0].ID, false)
 	if err != nil || len(tasks) != 1 || tasks[0].Status != "completed" || tasks[0].CompletedAt == "" {
 		t.Fatalf("recovered tasks = %#v, error = %v", tasks, err)
+	}
+}
+
+func TestTrackerSessionEndRecoversAndPersistsObservedRoute(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, launchID := trackerStore(t, ctx)
+	tracker, trackerErr := NewTracker(Config{Store: s, LaunchID: launchID, Enabled: true})
+	if trackerErr != nil {
+		t.Fatal(trackerErr)
+	}
+	tracker.ObserveRoute(ctx, Route{
+		Kind: "registered", ModelAlias: "recovered-model", ProviderName: "fixture",
+		ProviderModel: "model-v1", Protocol: "openai-compatible",
+	})
+	if hookErr := tracker.HandleHook(ctx, HookEvent{SessionID: "session-1", HookEventName: "SessionEnd", Reason: "clear"}); hookErr != nil {
+		t.Fatal(hookErr)
+	}
+	sessions, listErr := s.ListClaudeSessions(ctx, launchID, false)
+	if listErr != nil || len(sessions) != 1 {
+		t.Fatalf("ListClaudeSessions() = %#v, error = %v", sessions, listErr)
+	}
+	if sessions[0].ActiveRouteKind != "registered" || sessions[0].ActiveModelAlias != "recovered-model" ||
+		sessions[0].ActiveProviderName != "fixture" || sessions[0].ActiveProviderModel != "model-v1" {
+		t.Fatalf("recovered session route = %#v", sessions[0])
+	}
+}
+
+func TestTrackerBindsKnownSessionBeforeRouteObservation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, launchID := trackerStore(t, ctx)
+	tracker, trackerErr := NewTracker(Config{Store: s, LaunchID: launchID, Enabled: true})
+	if trackerErr != nil {
+		t.Fatal(trackerErr)
+	}
+	if bindErr := tracker.BindKnownSession(ctx, "session-1", "startup"); bindErr != nil {
+		t.Fatal(bindErr)
+	}
+	tracker.ObserveRoute(ctx, Route{
+		Kind: "registered", ModelAlias: "coder", ProviderName: "fixture",
+		ProviderModel: "model-v1", Protocol: "openai-compatible",
+		ConfigurationFingerprint: "sha256:fixture",
+	})
+	sessions, listErr := s.ListClaudeSessions(ctx, launchID, false)
+	if listErr != nil || len(sessions) != 1 {
+		t.Fatalf("ListClaudeSessions() = %#v, error = %v", sessions, listErr)
+	}
+	if sessions[0].Source != "startup" || sessions[0].ActiveRouteKind != "registered" ||
+		sessions[0].ActiveModelAlias != "coder" || sessions[0].ActiveProviderName != "fixture" ||
+		sessions[0].ActiveProviderModel != "model-v1" || sessions[0].ActiveProtocol != "openai-compatible" ||
+		sessions[0].ActiveRouteFingerprint != "sha256:fixture" {
+		t.Fatalf("known session route = %#v", sessions[0])
 	}
 }
 

@@ -14,6 +14,22 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
+func TestConfiguredRouteCarriesConfigurationFingerprint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newGatewayStore(t,
+		store.Provider{Name: "litellm", Type: "litellm", BaseURL: "http://127.0.0.1:4000"},
+		store.Model{Alias: "coder", ProviderName: "litellm", ProviderModel: "gpt-5", Status: "full"},
+	)
+	route, validationErr := (&handler{cfg: Config{Store: s}}).routeConfiguredAlias(ctx, "coder", "anthropic.ccr.coder")
+	if validationErr != nil {
+		t.Fatalf("routeConfiguredAlias() error = %v", validationErr)
+	}
+	if !strings.HasPrefix(route.configurationFingerprint, "sha256:") {
+		t.Fatalf("route fingerprint = %q", route.configurationFingerprint)
+	}
+}
+
 func TestGatewayFirstPartyClaudeModelBeatsDefaultAliasFallback(t *testing.T) {
 	ctx := context.Background()
 	var gotModel string
@@ -264,6 +280,169 @@ func TestGatewayModelDiscoveryIncludesFirstPartyWithoutNativeShim(t *testing.T) 
 	}
 }
 
+func TestGatewayPinnedRouteModelDiscoveryUsesImmutableSnapshot(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	provider := store.Provider{Name: "fixture", Type: "openai-compatible", BaseURL: "http://127.0.0.1:1"}
+	model := store.Model{Alias: "coder", ProviderName: "fixture", ProviderModel: "model-v1", Status: "degraded"}
+	s := newGatewayStore(t, provider, model)
+	pinned, err := NewPinnedRoute(model, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := startGatewayWithConfig(t, ctx, Config{
+		Store:             s,
+		Secrets:           fakeGatewaySecrets{},
+		Token:             "local-token",
+		DefaultModelAlias: model.Alias,
+		PinnedRoute:       &pinned,
+	})
+	defer func() {
+		if shutdownErr := server.Shutdown(ctx); shutdownErr != nil {
+			t.Fatalf("Shutdown() error = %v", shutdownErr)
+		}
+	}()
+
+	updatedModel, err := s.GetModel(ctx, model.Alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedModel.ProviderModel = "model-v2"
+	if err := s.UpdateModel(ctx, updatedModel); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddModel(ctx, store.Model{
+		Alias: "db-only", ProviderName: provider.Name, ProviderModel: "db-only-model", Status: "degraded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/v1/models", "/models"} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL()+path, http.NoBody)
+		if err != nil {
+			t.Fatalf("NewRequest(%q) error = %v", path, err)
+		}
+		req.Header.Set("X-CCR-Session-Token", "local-token")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("gateway models request %q error = %v", path, err)
+		}
+		var decoded struct {
+			Data []gatewayModelEntry `json:"data"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&decoded)
+		closeErr := resp.Body.Close()
+		if decodeErr != nil {
+			t.Fatalf("gateway model decode %q error = %v", path, decodeErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("gateway model response %q close error = %v", path, closeErr)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("gateway status %q = %d, want 200", path, resp.StatusCode)
+		}
+		if len(decoded.Data) != 1 {
+			t.Fatalf("discovery entries %q = %#v, want only the pinned model", path, decoded.Data)
+		}
+		if decoded.Data[0].ID != pinned.DiscoveryID() {
+			t.Fatalf("discovery ID %q = %q, want pinned ID %q", path, decoded.Data[0].ID, pinned.DiscoveryID())
+		}
+		if decoded.Data[0].DisplayName != "CCR coder (model-v1)" {
+			t.Fatalf("discovery display name %q = %q, want immutable pinned model", path, decoded.Data[0].DisplayName)
+		}
+	}
+}
+
+func TestNewPinnedRouteClonesModelCapabilitiesBeforeDiscovery(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	contextWindow := int64(8192)
+	maxOutput := int64(2048)
+	vision := true
+	model := store.Model{
+		Alias: "coder", ProviderName: "fixture", ProviderModel: "model-v1", Status: "degraded",
+		DiscoveredCapabilities: modelcap.Snapshot{
+			Values: modelcap.Values{
+				Kind:                modelcap.KindChat,
+				ContextWindowTokens: &contextWindow,
+				MaxOutputTokens:     &maxOutput,
+				InputModalities:     []string{"image", "text"},
+				SupportsVision:      &vision,
+			},
+			Sources: map[string]string{"context_window_tokens": "fixture"},
+		},
+		CapabilityOverrides: modelcap.Values{
+			MaxOutputTokens:  &maxOutput,
+			OutputModalities: []string{"text", "image"},
+		},
+	}
+	provider := store.Provider{Name: "fixture", Type: "openai-compatible", BaseURL: "http://127.0.0.1:1"}
+	pinned, err := NewPinnedRoute(model, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	contextWindow = 1
+	maxOutput = 2
+	vision = false
+	model.DiscoveredCapabilities.Values.InputModalities[0] = "audio"
+	model.DiscoveredCapabilities.Sources["context_window_tokens"] = "mutated"
+	model.CapabilityOverrides.OutputModalities[0] = "audio"
+
+	if pinned.model.DiscoveredCapabilities.Sources["context_window_tokens"] != "fixture" ||
+		*pinned.model.DiscoveredCapabilities.Values.ContextWindowTokens != 8192 ||
+		*pinned.model.DiscoveredCapabilities.Values.SupportsVision != true ||
+		pinned.model.DiscoveredCapabilities.Values.InputModalities[0] != "image" ||
+		pinned.model.CapabilityOverrides.OutputModalities[0] != "text" {
+		t.Fatalf("pinned capability snapshot changed after caller mutation: %#v", pinned.model)
+	}
+
+	s := newGatewayStore(t, provider, model)
+	server := startGatewayWithConfig(t, ctx, Config{
+		Store:             s,
+		Secrets:           fakeGatewaySecrets{},
+		Token:             "local-token",
+		DefaultModelAlias: model.Alias,
+		PinnedRoute:       &pinned,
+	})
+	defer func() {
+		if shutdownErr := server.Shutdown(ctx); shutdownErr != nil {
+			t.Fatalf("Shutdown() error = %v", shutdownErr)
+		}
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL()+"/v1/models", http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-CCR-Session-Token", "local-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Data []gatewayModelEntry `json:"data"`
+	}
+	decodeErr := json.NewDecoder(resp.Body).Decode(&decoded)
+	closeErr := resp.Body.Close()
+	if decodeErr != nil {
+		t.Fatalf("gateway model decode error = %v", decodeErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("gateway model response close error = %v", closeErr)
+	}
+	if resp.StatusCode != http.StatusOK || len(decoded.Data) != 1 {
+		t.Fatalf("gateway discovery status=%d data=%#v", resp.StatusCode, decoded.Data)
+	}
+	entry := decoded.Data[0]
+	if entry.MaxInputTokens == nil || *entry.MaxInputTokens != 8192 || entry.MaxTokens == nil || *entry.MaxTokens != 2048 ||
+		entry.Capabilities == nil || entry.Capabilities.ImageInput == nil || !entry.Capabilities.ImageInput.Supported {
+		t.Fatalf("gateway discovery changed after caller mutation: %#v", entry)
+	}
+}
+
 func TestGatewayFirstPartyClaudeRouteDoesNotFallBackWhenDiscoveryFails(t *testing.T) {
 	ctx := context.Background()
 	openAICalled := false
@@ -509,6 +688,49 @@ func TestGatewayRejectsUnknownOrMalformedCanonicalDiscoveryAliases(t *testing.T)
 				t.Fatalf("selectRoute(%q) status = %d, want %d", requested, validationErr.status, http.StatusBadRequest)
 			}
 		})
+	}
+}
+
+func TestGatewayPinnedRouteIgnoresLaterConfigurationMutation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	provider := store.Provider{Name: "fixture", Type: "openai-compatible", BaseURL: "http://127.0.0.1:1"}
+	model := store.Model{Alias: "coder", ProviderName: "fixture", ProviderModel: "model-v1", Status: "degraded"}
+	s := newGatewayStore(t, provider, model)
+	pinned, err := NewPinnedRoute(model, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updatedModel, err := s.GetModel(ctx, "coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedModel.ProviderModel = "model-v2"
+	if updateErr := s.UpdateModel(ctx, updatedModel); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	updatedProvider, err := s.GetProvider(ctx, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedProvider.BaseURL = "http://127.0.0.1:2"
+	if _, err := s.UpdateProvider(ctx, updatedProvider); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler{cfg: Config{Store: s, PinnedRoute: &pinned}, activeModel: newActiveModelSelection("coder")}
+	route, validationErr := h.selectRoute(ctx, "coder")
+	if validationErr != nil {
+		t.Fatalf("selectRoute() error = %#v", validationErr)
+	}
+	if route.model.ProviderModel != "model-v1" || route.provider.BaseURL != "http://127.0.0.1:1" {
+		t.Fatalf("pinned route drifted: model=%q base_url=%q", route.model.ProviderModel, route.provider.BaseURL)
+	}
+	if _, validationErr := h.selectRoute(ctx, "claude-sonnet-4-5"); validationErr == nil ||
+		!strings.Contains(validationErr.message, "does not match the route pinned") {
+		t.Fatalf("first-party route was not refused: %#v", validationErr)
 	}
 }
 

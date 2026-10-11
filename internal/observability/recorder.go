@@ -38,12 +38,14 @@ type RouteStart struct {
 }
 
 type RouteResolution struct {
-	SessionID     int64
-	RouteKind     string
-	ModelAlias    string
-	ProviderName  string
-	ProviderModel string
-	Protocol      string
+	SessionID                 int64
+	RouteKind                 string
+	ModelAlias                string
+	ProviderName              string
+	ProviderModel             string
+	Protocol                  string
+	ClassifierSelectionSource string
+	ClassifierActiveAlias     string
 }
 
 type RouteResult struct {
@@ -219,7 +221,9 @@ func (s *RouteSpan) Resolve(ctx context.Context, resolution RouteResolution) {
 	err := s.recorder.store.ResolveRouteEvent(ctx, s.eventID, resolution.SessionID, store.RouteEvent{
 		RouteKind: resolution.RouteKind, ModelAlias: resolution.ModelAlias,
 		ProviderName: resolution.ProviderName, ProviderModel: resolution.ProviderModel,
-		Protocol: resolution.Protocol,
+		Protocol:                  resolution.Protocol,
+		ClassifierSelectionSource: resolution.ClassifierSelectionSource,
+		ClassifierActiveAlias:     resolution.ClassifierActiveAlias,
 	})
 	if err != nil {
 		s.recorder.recordFailure("resolve route", err)

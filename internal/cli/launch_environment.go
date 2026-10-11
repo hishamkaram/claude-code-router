@@ -124,7 +124,7 @@ func configuredProviderSecretEnvNames(ctx context.Context, s *store.Store) ([]st
 	names := make(map[string]struct{})
 	for index := range configuredProviders {
 		provider := &configuredProviders[index]
-		if name, found := strings.CutPrefix(provider.SecretRef, "env:"); found && name != "" {
+		if name, found := providerSecretEnvName(provider.SecretRef); found {
 			names[name] = struct{}{}
 		}
 	}
@@ -134,6 +134,28 @@ func configuredProviderSecretEnvNames(ctx context.Context, s *store.Store) ([]st
 	}
 	slices.Sort(result)
 	return result, nil
+}
+
+func providerSecretEnvName(secretRef string) (string, bool) {
+	name, found := strings.CutPrefix(secretRef, "env:")
+	return name, found && name != ""
+}
+
+func unionProviderSecretEnvNames(groups ...[]string) []string {
+	names := make(map[string]struct{})
+	for _, group := range groups {
+		for _, name := range group {
+			if name != "" {
+				names[name] = struct{}{}
+			}
+		}
+	}
+	result := make([]string, 0, len(names))
+	for name := range names {
+		result = append(result, name)
+	}
+	slices.Sort(result)
+	return result
 }
 
 func launchClaudeModelID(model store.Model) (string, error) {

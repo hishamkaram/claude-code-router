@@ -61,6 +61,14 @@ Use --auth-mode provider-only with --model <alias> to force provider-only local
 gateway auth. The older spelling --auth-mode gateway-token is accepted for
 compatibility.
 
+For a foreground native Claude session that was previously routed through a
+provider-only CCR alias, use:
+  ccr launch --resume-route -- --resume <session-id>
+CCR restores only a recorded registered provider route. It does not choose a default route or query the provider model catalog again. It fails before Claude
+starts when route evidence is missing or the current alias configuration no
+longer matches the recorded provider route. --resume-route cannot be combined
+with --model, --auth-mode, --claude-account, or detached jobs.
+
 Use --auth-mode subscription-pool to route first-party model requests through a
 registered local Claude account. Claude authenticates only to the loopback
 gateway; account OAuth tokens remain in CCR memory. On a confirmed account-wide
@@ -108,6 +116,9 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 			if metadataArgs, ok := invocation.claudeMetadataArgs(); ok {
 				return runClaudeMetadata(ctx, cmd, deps, metadataArgs)
 			}
+			if err := validateStaticLaunchInvocation(invocation); err != nil {
+				return err
+			}
 			if invocation.dbPathSet {
 				opts.dbPath = invocation.dbPath
 			}
@@ -127,6 +138,7 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 	cmd.Flags().String("submission-id", "", "Recover the same detached admission for an identical request")
 	cmd.Flags().String("expected-parent-job", "", "Require this session head for detached --resume")
 	cmd.Flags().String("resume", "", "Resume a registered detached session; requires stream-json and verbose output")
+	cmd.Flags().Bool("resume-route", false, "Restore the recorded provider route for a foreground native --resume session")
 	cmd.Flags().Bool("no-history", false, "Disable redacted route history for this launch")
 	cmd.Flags().Bool("no-lifecycle", false, "Disable Claude lifecycle hooks for this launch")
 	cmd.Flags().Bool("no-statusline", false, "Disable CCR status-line injection for this launch")
@@ -161,6 +173,11 @@ type resolvedLaunch struct {
 	claudeModelID string
 	authMode      string
 	disableTools  bool
+	compatibility *launchCompatibilitySummary
+	pinnedRoute   *gateway.PinnedRoute
+	// nil means a normal launch reads the current configured providers; a non-nil
+	// slice is the admitted provider environment snapshot for a pinned route.
+	providerSecretEnvNames []string
 }
 
 type launchExecution struct {
@@ -188,18 +205,7 @@ func runLaunchAttempt(
 	selectedAccount *selectedClaudeAccount,
 	subscriptionPool *subscriptionPoolController,
 ) (resultErr error) {
-	if err := validateLaunchInputs(
-		invocation.modelAlias,
-		invocation.authMode,
-		invocation.claudeAccount,
-		invocation.permissionMode,
-	); err != nil {
-		return err
-	}
-	if err := validateLaunchPassthroughArgs(invocation.claudeArgs); err != nil {
-		return err
-	}
-	invocation, err := preflightAutoLaunchAuthBeforeStore(ctx, opts, deps, invocation)
+	invocation, err := prepareLaunchInvocation(ctx, opts, deps, invocation)
 	if err != nil {
 		return err
 	}
@@ -246,6 +252,7 @@ func runLaunchAttempt(
 	claudeSettings, err := launchClaudeSettingsArg(ctx, s, launchSettingsOptions{
 		IncludeToolDisabled: resolved.disableTools, LifecycleEnabled: !invocation.noLifecycle,
 		FamilyRoutingEnabled:         resolved.modelAlias != "",
+		PinnedRoute:                  resolved.pinnedRoute,
 		StatuslineEnabled:            !invocation.noStatusline,
 		IsolateStatuslineCredentials: selectedAccount != nil,
 		GatewayURL:                   execution.server.URL(),
@@ -265,6 +272,36 @@ func runLaunchAttempt(
 		return passthroughErr
 	}
 	return runClaudeLaunchProcess(ctx, cmd, deps, execution, claudeSettings.JSON)
+}
+
+func prepareLaunchInvocation(
+	ctx context.Context,
+	opts *options,
+	deps Dependencies,
+	invocation launchInvocation,
+) (launchInvocation, error) {
+	if err := validateStaticLaunchInvocation(invocation); err != nil {
+		return launchInvocation{}, err
+	}
+	return preflightAutoLaunchAuthBeforeStore(ctx, opts, deps, invocation)
+}
+
+func validateStaticLaunchInvocation(invocation launchInvocation) error {
+	if err := validateResumeRouteInvocation(invocation); err != nil {
+		return err
+	}
+	if err := validateNativeSessionIDs(invocation.claudeArgs); err != nil {
+		return err
+	}
+	if err := validateLaunchInputs(
+		invocation.modelAlias,
+		invocation.authMode,
+		invocation.claudeAccount,
+		invocation.permissionMode,
+	); err != nil {
+		return err
+	}
+	return validateLaunchPassthroughArgs(invocation.claudeArgs)
 }
 
 func preflightLaunch(
@@ -388,13 +425,16 @@ func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation la
 	}
 	settings := make(map[string]any, 1)
 	addLaunchFamilyRouting(settings, resolved.modelAlias != "")
-	if err := addLaunchAvailableModels(ctx, s, resolved.disableTools, settings); err != nil {
+	if err := addLaunchAvailableModels(ctx, s, resolved.disableTools, resolved.pinnedRoute, settings); err != nil {
 		return false, err
 	}
 	return len(settings) > 0, nil
 }
 
 func resolveLaunch(ctx context.Context, deps Dependencies, s *store.Store, invocation launchInvocation) (resolvedLaunch, error) {
+	if invocation.resumeRoute {
+		return resolveRecordedResumeRoute(ctx, deps, s, invocation)
+	}
 	modelAlias, err := resolveLaunchModelAlias(ctx, deps, s, invocation.modelAlias)
 	if err != nil {
 		return resolvedLaunch{}, err
@@ -410,21 +450,33 @@ func resolveLaunch(ctx context.Context, deps Dependencies, s *store.Store, invoc
 	if err != nil {
 		return resolvedLaunch{}, err
 	}
-	claudeModelID := ""
-	if modelAlias != "" {
-		model, err := s.GetModel(ctx, modelAlias)
-		if err != nil {
-			return resolvedLaunch{}, err
-		}
-		claudeModelID, err = launchClaudeModelID(model)
-		if err != nil {
-			return resolvedLaunch{}, err
-		}
+	claudeModelID, compatibility, err := resolveLaunchRouteSummary(ctx, s, modelAlias)
+	if err != nil {
+		return resolvedLaunch{}, err
 	}
 	return resolvedLaunch{
 		modelAlias: modelAlias, claudeModelID: claudeModelID,
-		authMode: authMode, disableTools: disableTools,
+		authMode: authMode, disableTools: disableTools, compatibility: compatibility,
 	}, nil
+}
+
+func resolveLaunchRouteSummary(ctx context.Context, s *store.Store, modelAlias string) (string, *launchCompatibilitySummary, error) {
+	if modelAlias == "" {
+		return "", nil, nil
+	}
+	model, err := s.GetModel(ctx, modelAlias)
+	if err != nil {
+		return "", nil, err
+	}
+	claudeModelID, err := launchClaudeModelID(model)
+	if err != nil {
+		return "", nil, err
+	}
+	provider, err := s.GetProvider(ctx, model.ProviderName)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading provider %q launch compatibility: %w", model.ProviderName, err)
+	}
+	return claudeModelID, snapshotLaunchCompatibility(provider), nil
 }
 
 func launchObservationStates(invocation launchInvocation) (lifecycleState, statuslineState string) {
@@ -452,7 +504,7 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 		})
 		execution.recorder = recorder
 	}
-	tracker, observerToken, err := newLaunchObserver(execution, recorder)
+	tracker, observerToken, err := newLaunchObserver(ctx, execution, recorder)
 	if err != nil {
 		return err
 	}
@@ -463,6 +515,7 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 		RequestAccounting: deps.RequestAccounting,
 		Token:             execution.token, ObserverToken: execution.observerToken,
 		DefaultModelAlias: execution.resolved.modelAlias,
+		PinnedRoute:       execution.resolved.pinnedRoute,
 		Recorder:          recorder, Tracker: tracker,
 		ManagedCUA: execution.managedCUA.Runtime(), ManagedCUAProject: execution.cuaProject,
 		AnthropicSubscriptionPool: gatewaySubscriptionPool(execution.subscriptionPool),
@@ -474,6 +527,7 @@ func startObservableGateway(ctx context.Context, deps Dependencies, execution *l
 }
 
 func newLaunchObserver(
+	ctx context.Context,
 	execution *launchExecution,
 	recorder *observability.Recorder,
 ) (*session.Tracker, string, error) {
@@ -491,6 +545,11 @@ func newLaunchObserver(
 	})
 	if err != nil {
 		return nil, "", fmt.Errorf("creating lifecycle tracker: %w", err)
+	}
+	if sessionID, source, found := nativeKnownSession(execution.invocation.claudeArgs); found {
+		if err := tracker.BindKnownSession(ctx, sessionID, source); err != nil {
+			return nil, "", fmt.Errorf("binding supplied native session: %w", err)
+		}
 	}
 	return tracker, token, nil
 }
@@ -522,10 +581,11 @@ func runClaudeLaunchProcess(
 	}()
 	claudeArgs := launchClaudeArgs(resolved.claudeModelID, invocation.printMode, resolved.disableTools,
 		claudeSettingsPath, invocation.permissionMode, invocation.claudeArgs)
-	providerSecretEnvNames, err := configuredProviderSecretEnvNames(ctx, execution.store)
+	currentProviderSecretEnvNames, err := configuredProviderSecretEnvNames(ctx, execution.store)
 	if err != nil {
-		return fmt.Errorf("reading configured provider secret environment names: %w", err)
+		return fmt.Errorf("reading current configured provider secret environment names before launch: %w", err)
 	}
+	providerSecretEnvNames := unionProviderSecretEnvNames(resolved.providerSecretEnvNames, currentProviderSecretEnvNames)
 	env := launchClaudeEnv(launchEnvironmentOptions{
 		GatewayURL: execution.server.URL(), Token: execution.token,
 		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
@@ -552,7 +612,7 @@ func runClaudeLaunchProcess(
 		summaryOut = errOut
 	}
 	writeLaunchSummary(ctx, summaryOut, execution.store, execution.server.URL(), execution.launchID,
-		process.PID(), resolved.modelAlias, resolved.disableTools, resolved.authMode, invocation.permissionMode)
+		process.PID(), resolved, invocation.permissionMode)
 	var notices <-chan string
 	if execution.subscriptionPool != nil {
 		notices = execution.subscriptionPool.Notices()
@@ -562,9 +622,30 @@ func runClaudeLaunchProcess(
 	managedCUAErr := shutdownManagedCUA(ctx, &execution.managedCUA)
 	settingsCleanupErr := cleanupSettings()
 	cleanupSettings = func() error { return nil }
+	recorderErr := requiredConformanceRecorderError(invocation.requireHealthyRecorder, execution.recorder)
 	state, reason := launchExitState(ctx, waitErr)
 	finishErr := execution.finalizer.Finish(ctx, state, reason, launchExitCode(waitErr))
-	return errors.Join(waitErr, stopErr, managedCUAErr, settingsCleanupErr, finishErr)
+	return errors.Join(waitErr, stopErr, managedCUAErr, settingsCleanupErr, recorderErr, finishErr)
+}
+
+func requiredConformanceRecorderError(required bool, recorder *observability.Recorder) error {
+	if !required {
+		return nil
+	}
+	if recorder == nil {
+		return fmt.Errorf("claude conformance route evidence recorder is unavailable")
+	}
+	return validateConformanceRecorderSnapshot(recorder.Snapshot())
+}
+
+func validateConformanceRecorderSnapshot(snapshot observability.Snapshot) error {
+	if !snapshot.Enabled {
+		return fmt.Errorf("claude conformance route evidence recorder is disabled")
+	}
+	if !snapshot.Healthy || snapshot.WriteFailures > 0 {
+		return fmt.Errorf("claude conformance route evidence recorder is unhealthy after %d write failures: %s", snapshot.WriteFailures, snapshot.LastError)
+	}
+	return nil
 }
 
 func validateLaunchInputs(modelAlias, authMode, claudeAccount, permissionMode string) error {

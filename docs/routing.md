@@ -102,8 +102,11 @@ message that explicitly names a valid CCR alias, is the routing source of truth.
 Its actual alias, provider model, protocol, capabilities, result, latency, and
 provider-reported token usage appear in `ccr status`, `ccr trace`, and the CCR
 status line. Classifier traces use the operations `auto_mode_classifier` and
-`auto_mode_classifier_count_tokens`. CCR does not infer a route from generated
-model self-identification.
+`auto_mode_classifier_count_tokens`. Each classifier trace also records whether
+the request explicitly selected its route or followed the active session route,
+plus the active alias used for that decision. Live conformance fails closed when
+that decision evidence is missing or route persistence reports a write failure.
+CCR does not infer a route from generated model self-identification.
 
 ## Runtime and Lifecycle Visibility
 
@@ -194,6 +197,27 @@ ccr launch --auth-mode gateway-token --model coding-model
 `gateway-token` is the older spelling for provider-only local gateway auth. It
 keeps the same behavior for existing scripts, but new commands should use
 `provider-only`.
+
+### Exact foreground continuation
+
+For an existing native Claude Code session that began on a provider-only CCR
+route, restore the recorded route without naming a model again:
+
+```bash
+ccr launch --resume-route -- --resume <session-id>
+```
+
+CCR requires one native `--resume` argument and restores only a previously
+observed registered provider route. It verifies the current alias still names
+the exact recorded provider/model configuration, including the provider secret
+reference identity, without storing secret values or contacting the provider
+model catalog. Missing route evidence, first-party source sessions, and
+configuration drift fail before Claude Code starts. `--resume-route` cannot be
+combined with `--model`, `--auth-mode`, `--claude-account`, or detached jobs.
+Route records without protocol and configuration fingerprint evidence are
+intentionally refused. Resume once with
+`--auth-mode provider-only --model <alias> -- --resume <session-id>` and send a
+request to establish fresh route evidence.
 
 ### `subscription-pool`
 

@@ -32,23 +32,25 @@ type traceStreamView struct {
 }
 
 type traceRouteView struct {
-	RequestID      string           `json:"request_id"`
-	Operation      string           `json:"operation"`
-	RequestedModel string           `json:"requested_model"`
-	RouteKind      string           `json:"route_kind,omitempty"`
-	ModelAlias     string           `json:"model_alias,omitempty"`
-	ProviderName   string           `json:"provider_name,omitempty"`
-	ProviderModel  string           `json:"provider_model,omitempty"`
-	Protocol       string           `json:"protocol,omitempty"`
-	Streaming      bool             `json:"streaming"`
-	Tools          bool             `json:"tools"`
-	Thinking       bool             `json:"thinking"`
-	Status         string           `json:"status"`
-	HTTPStatus     int              `json:"http_status,omitempty"`
-	ErrorClass     string           `json:"error_class,omitempty"`
-	LatencyMS      int64            `json:"latency_ms"`
-	Usage          traceUsageView   `json:"usage"`
-	Stream         *traceStreamView `json:"stream,omitempty"`
+	RequestID                 string           `json:"request_id"`
+	Operation                 string           `json:"operation"`
+	RequestedModel            string           `json:"requested_model"`
+	RouteKind                 string           `json:"route_kind,omitempty"`
+	ModelAlias                string           `json:"model_alias,omitempty"`
+	ProviderName              string           `json:"provider_name,omitempty"`
+	ProviderModel             string           `json:"provider_model,omitempty"`
+	Protocol                  string           `json:"protocol,omitempty"`
+	ClassifierSelectionSource string           `json:"classifier_selection_source,omitempty"`
+	ClassifierActiveAlias     string           `json:"classifier_active_alias,omitempty"`
+	Streaming                 bool             `json:"streaming"`
+	Tools                     bool             `json:"tools"`
+	Thinking                  bool             `json:"thinking"`
+	Status                    string           `json:"status"`
+	HTTPStatus                int              `json:"http_status,omitempty"`
+	ErrorClass                string           `json:"error_class,omitempty"`
+	LatencyMS                 int64            `json:"latency_ms"`
+	Usage                     traceUsageView   `json:"usage"`
+	Stream                    *traceStreamView `json:"stream,omitempty"`
 }
 
 type traceLifecycleView struct {
@@ -309,7 +311,9 @@ func newTraceRouteView(route store.RouteEvent) traceRouteView {
 		RequestedModel: route.RequestedModel, RouteKind: route.RouteKind,
 		ModelAlias: route.ModelAlias, ProviderName: route.ProviderName,
 		ProviderModel: route.ProviderModel, Protocol: route.Protocol,
-		Streaming: route.Streaming, Tools: route.Tools, Thinking: route.Thinking,
+		ClassifierSelectionSource: route.ClassifierSelectionSource,
+		ClassifierActiveAlias:     route.ClassifierActiveAlias,
+		Streaming:                 route.Streaming, Tools: route.Tools, Thinking: route.Thinking,
 		Status: route.Status, HTTPStatus: route.HTTPStatus, ErrorClass: route.ErrorClass,
 		LatencyMS: route.LatencyMS,
 		Usage: traceUsageView{

@@ -57,6 +57,68 @@ type Snapshot struct {
 	Sources map[string]string `json:"sources,omitempty"`
 }
 
+// CloneValues returns an independent copy of capability values, including
+// pointer fields, modality slices, and presence metadata.
+func CloneValues(values Values) Values {
+	values.ContextWindowTokens = cloneInt64Pointer(values.ContextWindowTokens)
+	values.MaxInputTokens = cloneInt64Pointer(values.MaxInputTokens)
+	values.MaxOutputTokens = cloneInt64Pointer(values.MaxOutputTokens)
+	values.InputModalities = slices.Clone(values.InputModalities)
+	values.OutputModalities = slices.Clone(values.OutputModalities)
+	values.SupportsTools = cloneBoolPointer(values.SupportsTools)
+	values.SupportsToolChoice = cloneBoolPointer(values.SupportsToolChoice)
+	values.SupportsParallelTools = cloneBoolPointer(values.SupportsParallelTools)
+	values.SupportsStreaming = cloneBoolPointer(values.SupportsStreaming)
+	values.SupportsThinking = cloneBoolPointer(values.SupportsThinking)
+	values.SupportsPromptCaching = cloneBoolPointer(values.SupportsPromptCaching)
+	values.SupportsSystemMessages = cloneBoolPointer(values.SupportsSystemMessages)
+	values.SupportsVision = cloneBoolPointer(values.SupportsVision)
+	values.SupportsPDFInput = cloneBoolPointer(values.SupportsPDFInput)
+	values.SupportsAudioInput = cloneBoolPointer(values.SupportsAudioInput)
+	values.SupportsAudioOutput = cloneBoolPointer(values.SupportsAudioOutput)
+	values.SupportsResponseSchema = cloneBoolPointer(values.SupportsResponseSchema)
+	values.SupportsResponses = cloneBoolPointer(values.SupportsResponses)
+	values.SupportsComputerUse = cloneBoolPointer(values.SupportsComputerUse)
+	if values.presentFields != nil {
+		presentFields := make(map[string]struct{}, len(values.presentFields))
+		for field := range values.presentFields {
+			presentFields[field] = struct{}{}
+		}
+		values.presentFields = presentFields
+	}
+	return values
+}
+
+// CloneSnapshot returns an independent copy of a capability snapshot,
+// including its values and per-field provenance.
+func CloneSnapshot(snapshot Snapshot) Snapshot {
+	snapshot.Values = CloneValues(snapshot.Values)
+	if snapshot.Sources != nil {
+		sources := make(map[string]string, len(snapshot.Sources))
+		for field, source := range snapshot.Sources {
+			sources[field] = source
+		}
+		snapshot.Sources = sources
+	}
+	return snapshot
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 func (v *Values) UnmarshalJSON(data []byte) error {
 	fields, err := decodeValueFields(data)
 	if err != nil {

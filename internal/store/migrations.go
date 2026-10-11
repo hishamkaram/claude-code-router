@@ -301,6 +301,81 @@ func (s *Store) migrateV8ToV9(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) migrateV9ToV10(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v9 to v10 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	columns := [...]migrationColumn{
+		{name: "active_protocol", definition: "active_protocol TEXT NOT NULL DEFAULT ''"},
+	}
+	if err := addMigrationColumnsIfMissing(ctx, tx, "sessions", columns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_sessions_claude_session_id
+ON sessions(claude_session_id, id DESC)`); err != nil {
+		return fmt.Errorf("creating native Claude session lookup index: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 10 WHERE id = 1 AND version = 9`); err != nil {
+		return fmt.Errorf("updating schema version to 10: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v9 to v10 migration: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateV10ToV11(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v10 to v11 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	columns := [...]migrationColumn{
+		{name: "active_route_fingerprint", definition: "active_route_fingerprint TEXT NOT NULL DEFAULT ''"},
+	}
+	if err := addMigrationColumnsIfMissing(ctx, tx, "sessions", columns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 11 WHERE id = 1 AND version = 10`); err != nil {
+		return fmt.Errorf("updating schema version to 11: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v10 to v11 migration: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateV11ToV12(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("starting v11 to v12 migration: %w", err)
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+	columns := [...]migrationColumn{
+		{name: "classifier_selection_source", definition: "classifier_selection_source TEXT NOT NULL DEFAULT ''"},
+		{name: "classifier_active_alias", definition: "classifier_active_alias TEXT NOT NULL DEFAULT ''"},
+	}
+	if err := addMigrationColumnsIfMissing(ctx, tx, "route_events", columns[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_version SET version = 12 WHERE id = 1 AND version = 11`); err != nil {
+		return fmt.Errorf("updating schema version to 12: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing v11 to v12 migration: %w", err)
+	}
+	return nil
+}
+
 func tableColumnExists(ctx context.Context, tx *sql.Tx, table, name string) (bool, error) {
 	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {

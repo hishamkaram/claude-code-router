@@ -209,7 +209,7 @@ func textFromAnthropicSystemMessage(raw json.RawMessage) (string, error) {
 			}
 			parts = append(parts, text)
 		case "tool_addition", "tool_removal":
-			if _, err := parseAnthropicToolChange(rawBlock, blockType); err != nil {
+			if _, err := parseAnthropicToolChange(rawBlock); err != nil {
 				return "", err
 			}
 		default:

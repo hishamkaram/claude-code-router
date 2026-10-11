@@ -19,6 +19,7 @@ type fakeSecrets struct {
 	failStore    bool
 	failResolve  bool
 	resolveCount int
+	onResolve    func(string) error
 }
 
 func (f *fakeSecrets) Available(ctx context.Context) error {
@@ -44,6 +45,11 @@ func (f *fakeSecrets) Resolve(ctx context.Context, ref string) (string, error) {
 		return "", err
 	}
 	f.resolveCount++
+	if f.onResolve != nil {
+		if err := f.onResolve(ref); err != nil {
+			return "", err
+		}
+	}
 	if f.failResolve {
 		return "", fmt.Errorf("fake resolve should not be called")
 	}

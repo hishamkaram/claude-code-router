@@ -67,7 +67,7 @@ ccr version
 
 ### Go
 
-Install from source with Go 1.25 or newer:
+Install from source with Go 1.26.9 or newer:
 
 ```bash
 go install github.com/hishamkaram/claude-code-router/cmd/ccr@latest
@@ -121,6 +121,22 @@ tools for the launch, pass it explicitly:
 ```bash
 ccr launch --model <alias> --chrome
 ```
+
+To continue an existing foreground native Claude session through the same
+recorded provider-only route, use:
+
+```bash
+ccr launch --resume-route -- --resume <session-id>
+```
+
+CCR restores an observed registered route only. It fails before Claude starts
+if no route evidence exists or the current alias configuration no longer matches
+the recorded provider route; it never falls back to first-party Claude. Do not
+combine `--resume-route` with `--model`, `--auth-mode`, `--claude-account`, or
+detached jobs. Route records without protocol and configuration fingerprint
+evidence are intentionally refused. Resume once with an explicit provider-only
+model route and send a request to record fresh evidence before using
+`--resume-route`.
 
 ### Local Claude Subscription Account Pool
 

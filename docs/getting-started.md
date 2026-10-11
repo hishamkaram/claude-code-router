@@ -137,6 +137,14 @@ CCR-owned `--no-history`, `--no-lifecycle`, `--no-statusline`, and `--ccr-cua-*`
 options also belong before it. A second `--` is passed to Claude Code to mark
 literal prompt text, for example `ccr launch -p -- -- --literal-prompt`.
 
+To resume a foreground native Claude session through its recorded provider-only
+route, use `ccr launch --resume-route -- --resume <session-id>`. CCR restores
+only observed registered routes and rejects missing evidence or configuration
+drift before Claude Code starts. Do not combine this option with `--model`,
+`--auth-mode`, `--claude-account`, or detached jobs. Older route records that
+do not contain protocol and configuration fingerprint evidence must first be
+re-observed through an explicit provider-only model launch.
+
 ## Scripted Alternatives
 
 For automation, add a provider and import all discoverable models without

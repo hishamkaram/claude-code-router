@@ -148,6 +148,33 @@ func TestLaunchForwardsClaudeCodeArguments(t *testing.T) {
 	}
 }
 
+func TestLaunchAcceptsDelegationLayerArguments(t *testing.T) {
+	t.Parallel()
+
+	server := newModelsServer(t, []string{"gpt-5"})
+	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	if _, _, err := runCommand(t, "--db", dbPath, "provider", "add", "litellm", "--base-url", server.URL, "--no-api-key"); err != nil {
+		t.Fatalf("provider add error = %v", err)
+	}
+	if _, _, err := runCommand(t, "--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"); err != nil {
+		t.Fatalf("model add error = %v", err)
+	}
+
+	launcher := &fakeLauncher{pid: os.Getpid()}
+	_, _, err := runCommandWithDeps(t, Dependencies{
+		Launcher: launcher,
+	}, "--db", dbPath, "launch", "--model", "gpt", "--auth-mode", "provider-only", "--print",
+		"--permission-mode", "plan", "--", "--input-format", "text", "--output-format", "stream-json",
+		"--verbose", "--permission-prompts", "none")
+	if err != nil {
+		t.Fatalf("launch error = %v", err)
+	}
+	wantTail := []string{"--input-format", "text", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"}
+	if len(launcher.args) < len(wantTail) || !slices.Equal(launcher.args[len(launcher.args)-len(wantTail):], wantTail) {
+		t.Fatalf("launch args = %#v, want delegation tail %#v", launcher.args, wantTail)
+	}
+}
+
 func TestLaunchPreservesClaudeOptionTerminator(t *testing.T) {
 	t.Parallel()
 
@@ -349,6 +376,8 @@ func TestValidateLaunchPassthroughArgs(t *testing.T) {
 		{name: "rejects model override", args: []string{"--model=sonnet"}, wantErr: "--model is managed"},
 		{name: "rejects Claude account override", args: []string{"--claude-account", "work"}, wantErr: "--claude-account is managed"},
 		{name: "rejects print override", args: []string{"-p=true"}, wantErr: "-p is managed"},
+		{name: "rejects resume route override", args: []string{"--resume-route"}, wantErr: "--resume-route is managed"},
+		{name: "rejects resume route inline override", args: []string{"--resume-route=true"}, wantErr: "--resume-route is managed"},
 		{name: "rejects fallback model", args: []string{"--fallback-model", "sonnet"}, wantErr: "bypass the selected model route"},
 		{name: "rejects background mode", args: []string{"--bg"}, wantErr: "detached agents"},
 		{name: "allows disabled background mode", args: []string{"--background=false"}},

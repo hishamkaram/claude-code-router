@@ -12,36 +12,38 @@ import (
 )
 
 type launchInvocation struct {
-	modelAlias     string
-	printMode      bool
-	submissionID   string
-	expectedParent string
-	resumeSession  string
-	detach         bool
-	promptFile     string
-	authMode       string
-	authModeSet    bool
-	claudeAccount  string
-	permissionMode string
-	dbPath         string
-	dbPathSet      bool
-	noHistory      bool
-	noLifecycle    bool
-	noStatusline   bool
-	cuaConfig      cua.Config
-	cuaExternalURL string
-	cuaTokenEnv    string
-	cuaModeSet     bool
-	cuaExecutorSet bool
-	cuaLimitsSet   bool
-	cuaURLSet      bool
-	cuaTokenEnvSet bool
-	help           bool
-	claudeArgs     []string
+	modelAlias             string
+	printMode              bool
+	resumeRoute            bool
+	submissionID           string
+	expectedParent         string
+	resumeSession          string
+	detach                 bool
+	promptFile             string
+	authMode               string
+	authModeSet            bool
+	claudeAccount          string
+	permissionMode         string
+	dbPath                 string
+	dbPathSet              bool
+	noHistory              bool
+	noLifecycle            bool
+	noStatusline           bool
+	requireHealthyRecorder bool
+	cuaConfig              cua.Config
+	cuaExternalURL         string
+	cuaTokenEnv            string
+	cuaModeSet             bool
+	cuaExecutorSet         bool
+	cuaLimitsSet           bool
+	cuaURLSet              bool
+	cuaTokenEnvSet         bool
+	help                   bool
+	claudeArgs             []string
 }
 
 func (invocation launchInvocation) claudeMetadataArgs() ([]string, bool) {
-	if invocation.modelAlias != "" || invocation.printMode || invocation.detach || invocation.promptFile != "" ||
+	if invocation.modelAlias != "" || invocation.printMode || invocation.resumeRoute || invocation.detach || invocation.promptFile != "" ||
 		invocation.authModeSet || invocation.claudeAccount != "" ||
 		invocation.permissionMode != "" ||
 		invocation.noHistory || invocation.noLifecycle || invocation.noStatusline ||
@@ -100,6 +102,9 @@ func parseLaunchOwnedOption(invocation *launchInvocation, args []string, index *
 	switch arg {
 	case "--detach":
 		invocation.detach = true
+		return true, nil
+	case "--resume-route":
+		invocation.resumeRoute = true
 		return true, nil
 	case "--print", "-p":
 		invocation.printMode = true
@@ -389,6 +394,8 @@ func parseLaunchDisableOption(invocation *launchInvocation, arg string) (bool, e
 	switch option {
 	case "--detach":
 		target = &invocation.detach
+	case "--resume-route":
+		target = &invocation.resumeRoute
 	case "--no-history":
 		target = &invocation.noHistory
 	case "--no-lifecycle":
@@ -469,7 +476,7 @@ func validateLaunchPassthroughArgs(args []string) error {
 			return fmt.Errorf("%s is managed by ccr launch; pass it before --", option)
 		}
 	}
-	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline", "--detach", "--prompt-file", "--submission-id", "--expected-parent-job"); option != "" {
+	if option := findLaunchOption(args, "--model", "--auth-mode", "--claude-account", "--permission-mode", "--print", "-p", "--db", "--no-history", "--no-lifecycle", "--no-statusline", "--detach", "--prompt-file", "--submission-id", "--expected-parent-job", "--resume-route"); option != "" {
 		return fmt.Errorf("%s is managed by ccr launch; pass its CCR value before other Claude Code options", option)
 	}
 	if option := findLaunchOption(args, "--fallback-model"); option != "" {
@@ -502,6 +509,38 @@ func findLaunchOption(args []string, options ...string) string {
 			if arg == option || strings.HasPrefix(arg, option+"=") {
 				return option
 			}
+		}
+	}
+	return ""
+}
+
+func detachedSessionOption(args []string) string {
+	if option := findLaunchOption(args, "--session-id", "--resume", "--continue", "--fork-session", "--no-session-persistence", "--from-pr", "--teleport"); option != "" {
+		return option
+	}
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if option := detachedShortSessionOption(arg); option != "" {
+			return option
+		}
+	}
+	return ""
+}
+
+func detachedShortSessionOption(arg string) string {
+	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
+		return ""
+	}
+	for _, option := range arg[1:] {
+		switch option {
+		case 'c', 'r':
+			return "-" + string(option)
+		case 'p', 'h', 'v':
+			// Claude bundles boolean short options; value-taking options consume the tail.
+		default:
+			return ""
 		}
 	}
 	return ""

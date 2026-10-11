@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hishamkaram/claude-code-router/internal/cua"
+	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/secret"
 	"github.com/hishamkaram/claude-code-router/internal/session"
@@ -31,6 +32,7 @@ type Config struct {
 	Token             string
 	ObserverToken     string
 	DefaultModelAlias string
+	PinnedRoute       *PinnedRoute
 	AnthropicBaseURL  string
 	Recorder          *observability.Recorder
 	Tracker           *session.Tracker
@@ -48,6 +50,60 @@ type Config struct {
 	// ready. Keep the sink open while the gateway is running. Events never carry
 	// headers, bodies, URLs, provider identifiers, or auth material.
 	AnthropicSubscriptionExhaustion chan<- AnthropicSubscriptionExhaustionEvent
+}
+
+// PinnedRoute is the immutable provider target for one resumed Claude session.
+// Its fields stay private so callers cannot change the route after admission.
+type PinnedRoute struct {
+	model                store.Model
+	provider             store.Provider
+	discoveryID          string
+	providerSecret       string
+	providerSecretPinned bool
+}
+
+func NewPinnedRoute(model store.Model, provider store.Provider) (PinnedRoute, error) {
+	return newPinnedRoute(model, provider, "", false)
+}
+
+// NewPinnedRouteWithSecret creates an immutable route with the provider
+// credential resolved at admission time. The credential is kept only in the
+// in-memory route and is never written to the store or included in errors.
+func NewPinnedRouteWithSecret(model store.Model, provider store.Provider, providerSecret string) (PinnedRoute, error) {
+	return newPinnedRoute(model, provider, providerSecret, true)
+}
+
+func newPinnedRoute(model store.Model, provider store.Provider, providerSecret string, providerSecretPinned bool) (PinnedRoute, error) {
+	if strings.TrimSpace(model.Alias) == "" || strings.TrimSpace(model.ProviderName) == "" ||
+		strings.TrimSpace(model.ProviderModel) == "" {
+		return PinnedRoute{}, fmt.Errorf("gateway.NewPinnedRoute: model route is incomplete")
+	}
+	if model.ProviderName != provider.Name {
+		return PinnedRoute{}, fmt.Errorf("gateway.NewPinnedRoute: model provider %q does not match provider %q", model.ProviderName, provider.Name)
+	}
+	model = clonePinnedModel(model)
+	discoveryID, err := DiscoveryIDForModel(model)
+	if err != nil {
+		return PinnedRoute{}, fmt.Errorf("gateway.NewPinnedRoute: building Claude model ID: %w", err)
+	}
+	return PinnedRoute{
+		model:                model,
+		provider:             provider,
+		discoveryID:          discoveryID,
+		providerSecret:       providerSecret,
+		providerSecretPinned: providerSecretPinned,
+	}, nil
+}
+
+func clonePinnedModel(model store.Model) store.Model {
+	model.DiscoveredCapabilities = modelcap.CloneSnapshot(model.DiscoveredCapabilities)
+	model.CapabilityOverrides = modelcap.CloneValues(model.CapabilityOverrides)
+	return model
+}
+
+// DiscoveryID returns the Claude-facing model ID admitted for this route.
+func (r PinnedRoute) DiscoveryID() string {
+	return r.discoveryID
 }
 
 type Server struct {
@@ -83,6 +139,10 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.Tracker != nil && strings.TrimSpace(cfg.ObserverToken) == "" {
 		return nil, fmt.Errorf("gateway.Start: observer token is required when runtime observation is enabled")
 	}
+	if err := snapshotPinnedRoute(&cfg); err != nil {
+		return nil, err
+	}
+	cfg.Secrets = pinProviderSecret(cfg.Secrets, cfg.PinnedRoute)
 	var upstream *upstreamTransport
 	if cfg.HTTPClient == nil {
 		var err error
@@ -144,6 +204,48 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	recordTransportPolicy(ctx, cfg.Recorder, upstream != nil)
 	return gateway, nil
+}
+
+func snapshotPinnedRoute(cfg *Config) error {
+	if cfg.PinnedRoute == nil {
+		return nil
+	}
+	if cfg.DefaultModelAlias != cfg.PinnedRoute.model.Alias {
+		return fmt.Errorf("gateway.Start: pinned route must match the default model alias")
+	}
+	pinnedRoute := *cfg.PinnedRoute
+	cfg.PinnedRoute = &pinnedRoute
+	return nil
+}
+
+type pinnedRouteSecretBackend struct {
+	backend secret.Backend
+	route   *PinnedRoute
+}
+
+func pinProviderSecret(backend secret.Backend, route *PinnedRoute) secret.Backend {
+	if route == nil || !route.providerSecretPinned || strings.TrimSpace(route.provider.SecretRef) == "" {
+		return backend
+	}
+	return pinnedRouteSecretBackend{backend: backend, route: route}
+}
+
+func (b pinnedRouteSecretBackend) Available(ctx context.Context) error {
+	return b.backend.Available(ctx)
+}
+
+func (b pinnedRouteSecretBackend) Store(ctx context.Context, ref, value string) error {
+	return b.backend.Store(ctx, ref, value)
+}
+
+func (b pinnedRouteSecretBackend) Resolve(ctx context.Context, ref string) (string, error) {
+	if ref == b.route.provider.SecretRef {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		return b.route.providerSecret, nil
+	}
+	return b.backend.Resolve(ctx, ref)
 }
 
 func (s *Server) URL() string {

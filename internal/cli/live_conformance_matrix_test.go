@@ -206,8 +206,8 @@ func runLiveClaudeConformanceProtocol(t *testing.T, ctx context.Context, protoco
 	out, errOut, err := runLiveCommand(ctx, deps, "--db", dbPath, "conformance", "run",
 		"fixture-sonnet", "--claude", "--include-anthropic", "--json")
 	if err != nil {
-		t.Fatalf("Claude conformance matrix error = %v; fixture=%s\nstdout:\n%s\nstderr:\n%s",
-			err, fixture.summary(), out, errOut)
+		t.Fatalf("Claude conformance matrix error = %v; fixture=%s; routes=%s\nstdout:\n%s\nstderr:\n%s",
+			err, fixture.summary(), liveConformanceRouteSummary(t, dbPath), out, errOut)
 	}
 	var document conformanceDocument
 	if err := json.Unmarshal([]byte(out), &document); err != nil {
@@ -216,6 +216,7 @@ func runLiveClaudeConformanceProtocol(t *testing.T, ctx context.Context, protoco
 	if document.SchemaVersion != 1 || document.Status != "passed" || !document.LiveVerified || len(document.Checks) != 11 {
 		t.Fatalf("conformance document = %#v", document)
 	}
+	fixture.assertClassifierTraceCoverage(t, dbPath)
 	fixture.assertComplete(t, out, errOut)
 	assertLiveDatabaseRedaction(t, dbPath, []string{
 		liveFixtureAPIKey, "CCR_CONFORMANCE_AGENT_CHILD_OK",

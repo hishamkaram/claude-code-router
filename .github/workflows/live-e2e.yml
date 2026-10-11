@@ -73,11 +73,11 @@ jobs:
       - name: Forced process-group ownership and admission controls
         if: runner.os == 'Linux' && matrix.containment == 'process-group'
         run: go test -tags=live -race -count=1 -timeout 5m -v ./internal/jobs -run '^(TestOwnedProcessGroupCancellationSettles|TestAdmission.*)$' | tee "$RUNNER_TEMP/durable-native.log"
-      - name: Real Claude detached lifecycle and four-round continuation
+      - name: Real Claude detached lifecycle, continuation, and resume-route
         run: |
           claude --version
           git rev-parse HEAD
-          go test -tags=live -count=1 -timeout 5m -v ./internal/cli -run '^TestLiveDetached(ClaudeJobs|ClaudeContinuation)$' | tee "$RUNNER_TEMP/durable-cli.log"
+          go test -tags=live -count=1 -timeout 5m -v ./internal/cli -run '^(TestLiveDetached(ClaudeJobs|ClaudeContinuation)|TestLiveResumeRouteRestoresRecordedProviderRoute)$' | tee "$RUNNER_TEMP/durable-cli.log"
       - name: Preserve deterministic acceptance evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

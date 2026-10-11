@@ -259,7 +259,7 @@ func seedRuntimeInspectionStore(t *testing.T) (string, int64, int64) {
 	if err != nil {
 		t.Fatalf("UpsertClaudeSession() error = %v", err)
 	}
-	if routeErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "fixture", "model-v1"); routeErr != nil {
+	if routeErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "fixture", "model-v1", "openai-compatible", "sha256:fixture"); routeErr != nil {
 		t.Fatalf("UpdateClaudeSessionRoute() error = %v", routeErr)
 	}
 	if _, agentErr := s.UpsertAgent(ctx, store.Agent{

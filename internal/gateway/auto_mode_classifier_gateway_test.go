@@ -342,7 +342,9 @@ func TestGatewayTracesAutoModeClassifierOperationsWithoutTracker(t *testing.T) {
 			continue
 		}
 		if route.RequestedModel != "claude-sonnet-5" || route.ModelAlias != model.Alias ||
-			route.ProviderModel != model.ProviderModel || route.Status != "succeeded" {
+			route.ProviderModel != model.ProviderModel || route.Status != "succeeded" ||
+			route.ClassifierSelectionSource != store.ClassifierSelectionSourceActive ||
+			route.ClassifierActiveAlias != model.Alias {
 			t.Fatalf("classifier trace = %#v", route)
 		}
 		wantOperations[route.Operation] = true

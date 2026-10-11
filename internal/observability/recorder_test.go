@@ -23,6 +23,8 @@ func TestRecorderPersistsRedactedRouteAndLifecycleMetadata(t *testing.T) {
 	span.Resolve(ctx, RouteResolution{
 		RouteKind: "registered", ModelAlias: "coder", ProviderName: "fixture",
 		ProviderModel: "model-v1", Protocol: "openai-compatible",
+		ClassifierSelectionSource: store.ClassifierSelectionSourceActive,
+		ClassifierActiveAlias:     "coder",
 	})
 	span.Complete(ctx, RouteResult{
 		Status: "succeeded", HTTPStatus: 200,
@@ -35,6 +37,8 @@ func TestRecorderPersistsRedactedRouteAndLifecycleMetadata(t *testing.T) {
 		t.Fatalf("ListTraceEvents() error = %v", err)
 	}
 	if len(events) != 2 || events[1].Route.ProviderModel != "model-v1" ||
+		events[1].Route.ClassifierSelectionSource != store.ClassifierSelectionSourceActive ||
+		events[1].Route.ClassifierActiveAlias != "coder" ||
 		events[1].Route.Usage.InputTokens != 10 {
 		t.Fatalf("ListTraceEvents() = %#v", events)
 	}

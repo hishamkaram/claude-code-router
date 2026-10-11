@@ -96,6 +96,86 @@ func TestValuesUnmarshalRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestCloneValuesPreservesExplicitNullPresenceIndependently(t *testing.T) {
+	t.Parallel()
+	var original Values
+	if err := json.Unmarshal([]byte(`{"context_window_tokens":8192,"input_modalities":["text","image"],"supports_responses":null,"supports_computer_use":null}`), &original); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	cloned := CloneValues(original)
+
+	if cloned.ContextWindowTokens == nil || *cloned.ContextWindowTokens != 8192 {
+		t.Fatalf("cloned ContextWindowTokens = %#v", cloned.ContextWindowTokens)
+	}
+	if cloned.SupportsResponses != nil || cloned.SupportsComputerUse != nil {
+		t.Fatalf("cloned explicit null fields = %#v, %#v", cloned.SupportsResponses, cloned.SupportsComputerUse)
+	}
+	if !UsesSchemaV3Fields(cloned) {
+		t.Fatal("cloned explicit-null presence metadata was lost")
+	}
+
+	*original.ContextWindowTokens = 1
+	original.InputModalities[0] = "audio"
+	delete(original.presentFields, "supports_responses")
+	if *cloned.ContextWindowTokens != 8192 || cloned.InputModalities[0] != "text" {
+		t.Fatalf("clone changed with original mutation: %#v", cloned)
+	}
+	if _, ok := cloned.presentFields["supports_responses"]; !ok {
+		t.Fatal("clone lost presence metadata after original mutation")
+	}
+
+	*cloned.ContextWindowTokens = 16384
+	cloned.InputModalities[1] = "audio"
+	delete(cloned.presentFields, "supports_computer_use")
+	if *original.ContextWindowTokens != 1 || original.InputModalities[1] != "image" {
+		t.Fatalf("original changed with clone mutation: %#v", original)
+	}
+	if _, ok := original.presentFields["supports_computer_use"]; !ok {
+		t.Fatal("original presence metadata changed with clone mutation")
+	}
+}
+
+func TestCloneSnapshotCopiesSourcesAndValuesIndependently(t *testing.T) {
+	t.Parallel()
+	snapshot := Snapshot{
+		Values: Values{
+			MaxOutputTokens:  Int64(2048),
+			OutputModalities: []string{"text"},
+			presentFields:    map[string]struct{}{"supports_responses": {}},
+		},
+		Sources: map[string]string{"max_output_tokens": SourceOpenAIModels},
+	}
+	cloned := CloneSnapshot(snapshot)
+
+	*cloned.Values.MaxOutputTokens = 4096
+	cloned.Values.OutputModalities[0] = "audio"
+	cloned.Sources["max_output_tokens"] = "clone"
+	delete(cloned.Values.presentFields, "supports_responses")
+	if *snapshot.Values.MaxOutputTokens != 2048 || snapshot.Values.OutputModalities[0] != "text" {
+		t.Fatalf("snapshot values changed with clone mutation: %#v", snapshot.Values)
+	}
+	if snapshot.Sources["max_output_tokens"] != SourceOpenAIModels {
+		t.Fatalf("snapshot sources changed with clone mutation: %#v", snapshot.Sources)
+	}
+	if _, ok := snapshot.Values.presentFields["supports_responses"]; !ok {
+		t.Fatal("snapshot presence metadata changed with clone mutation")
+	}
+
+	*snapshot.Values.MaxOutputTokens = 1
+	snapshot.Values.OutputModalities[0] = "image"
+	snapshot.Sources["max_output_tokens"] = "original"
+	snapshot.Values.presentFields["supports_computer_use"] = struct{}{}
+	if *cloned.Values.MaxOutputTokens != 4096 || cloned.Values.OutputModalities[0] != "audio" {
+		t.Fatalf("clone values changed with snapshot mutation: %#v", cloned.Values)
+	}
+	if cloned.Sources["max_output_tokens"] != "clone" {
+		t.Fatalf("clone sources changed with snapshot mutation: %#v", cloned.Sources)
+	}
+	if _, ok := cloned.Values.presentFields["supports_computer_use"]; ok {
+		t.Fatal("clone presence metadata changed with snapshot mutation")
+	}
+}
+
 func TestIsRoutableKindKeepsUnknownAndRejectsNonChatKinds(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []string{"", KindUnknown, KindChat, KindCompletion, KindResponses} {

@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
+
+var ErrResumeRouteUnavailable = errors.New("resume route unavailable")
 
 type Launch struct {
 	ID                int64
@@ -25,19 +28,36 @@ type Launch struct {
 }
 
 type ClaudeSession struct {
-	ID                  int64
-	LaunchID            int64
-	ClaudeSessionID     string
-	Source              string
-	State               string
-	ActiveRouteKind     string
-	ActiveModelAlias    string
-	ActiveProviderName  string
-	ActiveProviderModel string
-	StartedAt           string
-	LastSeenAt          string
-	EndedAt             string
-	EndReason           string
+	ID                     int64
+	LaunchID               int64
+	ClaudeSessionID        string
+	Source                 string
+	State                  string
+	ActiveRouteKind        string
+	ActiveModelAlias       string
+	ActiveProviderName     string
+	ActiveProviderModel    string
+	ActiveProtocol         string
+	ActiveRouteFingerprint string
+	StartedAt              string
+	LastSeenAt             string
+	EndedAt                string
+	EndReason              string
+}
+
+// ResumeRoute is the durable provider route CCR can restore for a native
+// Claude Code session. It contains route metadata only; credentials remain in
+// the configured secret backend.
+type ResumeRoute struct {
+	ClaudeSessionID          string
+	SourceLaunchID           int64
+	SourceAuthMode           string
+	RouteKind                string
+	ModelAlias               string
+	ProviderName             string
+	ProviderModel            string
+	Protocol                 string
+	ConfigurationFingerprint string
 }
 
 type Task struct {
@@ -203,13 +223,19 @@ SELECT id FROM sessions WHERE launch_id = ? AND claude_session_id = ?
 	return id, nil
 }
 
-func (s *Store) UpdateClaudeSessionRoute(ctx context.Context, id int64, routeKind, alias, providerName, providerModel string) error {
+func (s *Store) UpdateClaudeSessionRoute(
+	ctx context.Context,
+	id int64,
+	routeKind, alias, providerName, providerModel, protocol, configurationFingerprint string,
+) error {
 	result, err := s.db.ExecContext(ctx, `
 UPDATE sessions
 SET active_route_kind = ?, active_model_alias = ?, active_provider_name = ?,
-  active_provider_model = ?, last_seen_at = ?
+  active_provider_model = ?, active_protocol = ?, active_route_fingerprint = ?,
+  last_seen_at = ?
 WHERE id = ?
-`, routeKind, alias, providerName, providerModel, runtimeTimestamp(), id)
+`, routeKind, alias, providerName, providerModel, protocol, configurationFingerprint,
+		runtimeTimestamp(), id)
 	if err != nil {
 		return fmt.Errorf("store.UpdateClaudeSessionRoute: updating session %d: %w", id, err)
 	}
@@ -263,6 +289,42 @@ func (s *Store) GetClaudeSession(ctx context.Context, launchID int64, claudeSess
 		return ClaudeSession{}, fmt.Errorf("store.GetClaudeSession: reading Claude session %q: %w", claudeSessionID, err)
 	}
 	return session, nil
+}
+
+// FindResumeRoute returns the newest observed route for a native Claude Code
+// session. The sessions row is authoritative; event history is audit evidence
+// and is never used to reconstruct current route state.
+func (s *Store) FindResumeRoute(ctx context.Context, claudeSessionID string) (ResumeRoute, error) {
+	var route ResumeRoute
+	err := s.db.QueryRowContext(ctx, `
+SELECT sessions.claude_session_id, sessions.launch_id, launches.auth_mode,
+  sessions.active_route_kind, sessions.active_model_alias,
+  sessions.active_provider_name, sessions.active_provider_model,
+	  sessions.active_protocol, sessions.active_route_fingerprint
+FROM sessions
+JOIN launches ON launches.id = sessions.launch_id
+WHERE sessions.claude_session_id = ?
+  AND sessions.active_route_kind <> ''
+ORDER BY sessions.id DESC
+LIMIT 1`, claudeSessionID).Scan(
+		&route.ClaudeSessionID, &route.SourceLaunchID, &route.SourceAuthMode,
+		&route.RouteKind, &route.ModelAlias, &route.ProviderName,
+		&route.ProviderModel, &route.Protocol, &route.ConfigurationFingerprint,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ResumeRoute{}, fmt.Errorf("%w: native Claude session %q has no observed route", ErrResumeRouteUnavailable, claudeSessionID)
+	}
+	if err != nil {
+		return ResumeRoute{}, fmt.Errorf("store.FindResumeRoute: reading native Claude session %q: %w", claudeSessionID, err)
+	}
+	if route.RouteKind != "registered" {
+		return ResumeRoute{}, fmt.Errorf("%w: native Claude session %q last used route kind %q", ErrResumeRouteUnavailable, claudeSessionID, route.RouteKind)
+	}
+	if route.ModelAlias == "" || route.ProviderName == "" || route.ProviderModel == "" ||
+		route.Protocol == "" || route.ConfigurationFingerprint == "" {
+		return ResumeRoute{}, fmt.Errorf("%w: native Claude session %q has incomplete provider route evidence", ErrResumeRouteUnavailable, claudeSessionID)
+	}
+	return route, nil
 }
 
 func (s *Store) UpsertAgent(ctx context.Context, agent Agent) (int64, error) {
@@ -467,7 +529,8 @@ FROM launches`
 
 const claudeSessionSelectSQL = `
 SELECT id, launch_id, claude_session_id, source, state, active_route_kind,
-  active_model_alias, active_provider_name, active_provider_model, started_at,
+  active_model_alias, active_provider_name, active_provider_model, active_protocol,
+  active_route_fingerprint, started_at,
   last_seen_at, ended_at, end_reason
 FROM sessions`
 
@@ -493,7 +556,8 @@ func scanClaudeSession(row rowScanner, session *ClaudeSession) error {
 	return row.Scan(&session.ID, &session.LaunchID, &session.ClaudeSessionID,
 		&session.Source, &session.State, &session.ActiveRouteKind,
 		&session.ActiveModelAlias, &session.ActiveProviderName,
-		&session.ActiveProviderModel, &session.StartedAt, &session.LastSeenAt,
+		&session.ActiveProviderModel, &session.ActiveProtocol,
+		&session.ActiveRouteFingerprint, &session.StartedAt, &session.LastSeenAt,
 		&session.EndedAt, &session.EndReason)
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/cua"
 	"github.com/hishamkaram/claude-code-router/internal/modelcap"
 	"github.com/hishamkaram/claude-code-router/internal/providers"
+	"github.com/hishamkaram/claude-code-router/internal/routeidentity"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -29,15 +30,18 @@ const (
 )
 
 type messageRoute struct {
-	kind                routeKind
-	model               store.Model
-	provider            store.Provider
-	anthropicProvider   *store.Provider
-	anthropicAuth       anthropicAuthMode
-	firstPartyAnthropic bool
-	capabilities        providers.Capabilities
-	modelCapabilities   modelcap.Values
-	responseModel       string
+	kind                      routeKind
+	model                     store.Model
+	provider                  store.Provider
+	anthropicProvider         *store.Provider
+	anthropicAuth             anthropicAuthMode
+	firstPartyAnthropic       bool
+	capabilities              providers.Capabilities
+	modelCapabilities         modelcap.Values
+	configurationFingerprint  string
+	responseModel             string
+	classifierSelectionSource string
+	classifierActiveAlias     string
 }
 
 func validateRouteMessageCapabilities(route messageRoute, req anthropicRequest) *requestValidationError {
@@ -109,6 +113,9 @@ func (h *handler) selectRoute(ctx context.Context, requested string) (messageRou
 	if aliasLookup.exists {
 		return h.routeConfiguredAlias(ctx, aliasLookup.alias, requested)
 	}
+	if h.cfg.PinnedRoute != nil {
+		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("model %q does not match the route pinned for this resumed session", requested)}
+	}
 	if aliasLookup.prefixed {
 		if aliasLookup.malformed {
 			return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("model discovery alias %q is malformed", requested)}
@@ -129,6 +136,20 @@ type configuredAliasLookup struct {
 }
 
 func (h *handler) configuredAliasForRequest(ctx context.Context, requested string) (configuredAliasLookup, *requestValidationError) {
+	if h.cfg.PinnedRoute != nil {
+		alias := h.cfg.PinnedRoute.model.Alias
+		if requested == alias {
+			return configuredAliasLookup{alias: alias, exists: true}, nil
+		}
+		discovery := parseDiscoveryID(requested)
+		if !discovery.prefixed {
+			return configuredAliasLookup{alias: requested}, nil
+		}
+		if !discovery.valid {
+			return configuredAliasLookup{prefixed: true, malformed: true}, nil
+		}
+		return configuredAliasLookup{alias: discovery.alias, exists: discovery.alias == alias, prefixed: true}, nil
+	}
 	alias := requested
 	aliasExists, err := h.cfg.Store.ModelExists(ctx, alias)
 	if err != nil {
@@ -152,16 +173,12 @@ func (h *handler) configuredAliasForRequest(ctx context.Context, requested strin
 }
 
 func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel string) (messageRoute, *requestValidationError) {
-	model, modelErr := h.cfg.Store.GetModel(ctx, alias)
-	if modelErr != nil {
-		return messageRoute{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("reading requested model alias %q: %v", alias, modelErr)}
+	model, provider, targetErr := h.configuredRouteTarget(ctx, alias)
+	if targetErr != nil {
+		return messageRoute{}, targetErr
 	}
 	if model.Status == "blocked" {
 		return messageRoute{}, &requestValidationError{status: http.StatusForbidden, message: fmt.Sprintf("model alias %q is blocked and cannot be routed", alias)}
-	}
-	provider, providerErr := h.cfg.Store.GetProvider(ctx, model.ProviderName)
-	if providerErr != nil {
-		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("provider %q for model alias %q is not configured", model.ProviderName, alias)}
 	}
 	if providers.IsProviderControlModel(provider.Type, model.ProviderModel) {
 		return messageRoute{}, &requestValidationError{
@@ -169,31 +186,61 @@ func (h *handler) routeConfiguredAlias(ctx context.Context, alias, responseModel
 			message: fmt.Sprintf("model alias %q targets LiteLLM control model %q and cannot be routed", alias, model.ProviderModel),
 		}
 	}
-	effectiveModel, capabilityErr := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
-	if capabilityErr != nil {
-		return messageRoute{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("computing capabilities for model alias %q: %v", alias, capabilityErr)}
-	}
-	if !modelcap.IsRoutableKind(effectiveModel.Values.Kind) {
-		return messageRoute{}, unsupportedModelCapability(model, "kind "+effectiveModel.Values.Kind)
+	effectiveModel, configurationFingerprint, identityErr := configuredRouteIdentity(model, provider)
+	if identityErr != nil {
+		return messageRoute{}, identityErr
 	}
 	caps := effectiveProviderCapabilities(provider)
-	if modelUsesResponsesAPI(effectiveModel.Values) {
-		if !supportsResponsesRoute(caps, effectiveModel.Values) {
+	if modelUsesResponsesAPI(effectiveModel) {
+		if !supportsResponsesRoute(caps, effectiveModel) {
 			return messageRoute{}, &requestValidationError{
 				status:  http.StatusNotImplemented,
 				message: fmt.Sprintf("model alias %q requires the OpenAI Responses API, but provider %q is not configured as Responses-capable", alias, provider.Name),
 			}
 		}
-		return messageRoute{kind: routeOpenAIResponses, model: model, provider: provider, capabilities: caps, modelCapabilities: modelCapabilitiesForRoute(caps, effectiveModel.Values), responseModel: responseModel}, nil
+		return messageRoute{kind: routeOpenAIResponses, model: model, provider: provider, capabilities: caps, modelCapabilities: modelCapabilitiesForRoute(caps, effectiveModel), configurationFingerprint: configurationFingerprint, responseModel: responseModel}, nil
 	}
 	if caps.Protocol == providers.ProtocolOpenAICompatible {
-		return messageRoute{kind: routeOpenAI, model: model, provider: provider, capabilities: caps, modelCapabilities: modelCapabilitiesForRoute(caps, effectiveModel.Values), responseModel: responseModel}, nil
+		return messageRoute{kind: routeOpenAI, model: model, provider: provider, capabilities: caps, modelCapabilities: modelCapabilitiesForRoute(caps, effectiveModel), configurationFingerprint: configurationFingerprint, responseModel: responseModel}, nil
 	}
 	if caps.Protocol == providers.ProtocolAnthropicCompatible {
 		rewrittenProvider := provider
-		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, modelCapabilities: effectiveModel.Values, responseModel: responseModel}, nil
+		return messageRoute{kind: routeAnthropic, model: model, anthropicProvider: &rewrittenProvider, anthropicAuth: anthropicAuthProviderSecret, capabilities: caps, modelCapabilities: effectiveModel, configurationFingerprint: configurationFingerprint, responseModel: responseModel}, nil
 	}
 	return messageRoute{}, &requestValidationError{status: http.StatusNotImplemented, message: fmt.Sprintf("provider type %q with protocol %q is not supported by the gateway path", provider.Type, caps.Protocol)}
+}
+
+func configuredRouteIdentity(model store.Model, provider store.Provider) (modelcap.Values, string, *requestValidationError) {
+	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if err != nil {
+		return modelcap.Values{}, "", &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("computing capabilities for model alias %q: %v", model.Alias, err)}
+	}
+	if !modelcap.IsRoutableKind(effective.Values.Kind) {
+		return modelcap.Values{}, "", unsupportedModelCapability(model, "kind "+effective.Values.Kind)
+	}
+	fingerprint, err := routeidentity.Fingerprint(model, provider, effective.Values)
+	if err != nil {
+		return modelcap.Values{}, "", &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("identifying route for model alias %q: %v", model.Alias, err)}
+	}
+	return effective.Values, fingerprint, nil
+}
+
+func (h *handler) configuredRouteTarget(ctx context.Context, alias string) (store.Model, store.Provider, *requestValidationError) {
+	if h.cfg.PinnedRoute != nil {
+		if alias != h.cfg.PinnedRoute.model.Alias {
+			return store.Model{}, store.Provider{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("model alias %q does not match the pinned resumed-session route", alias)}
+		}
+		return h.cfg.PinnedRoute.model, h.cfg.PinnedRoute.provider, nil
+	}
+	model, modelErr := h.cfg.Store.GetModel(ctx, alias)
+	if modelErr != nil {
+		return store.Model{}, store.Provider{}, &requestValidationError{status: http.StatusInternalServerError, message: fmt.Sprintf("reading requested model alias %q: %v", alias, modelErr)}
+	}
+	provider, providerErr := h.cfg.Store.GetProvider(ctx, model.ProviderName)
+	if providerErr != nil {
+		return store.Model{}, store.Provider{}, &requestValidationError{status: http.StatusBadRequest, message: fmt.Sprintf("provider %q for model alias %q is not configured", model.ProviderName, alias)}
+	}
+	return model, provider, nil
 }
 
 func modelUsesResponsesAPI(capabilities modelcap.Values) bool {

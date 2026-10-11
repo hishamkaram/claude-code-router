@@ -8,8 +8,11 @@ COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILT_BY ?= make
 LDFLAGS := -s -w -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Version=$(VERSION) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Commit=$(COMMIT) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Date=$(DATE) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.BuiltBy=$(BUILT_BY)
+GOVULNCHECK_VERSION ?= v1.1.4
+GOVULNCHECK_PACKAGE := golang.org/x/vuln/cmd/govulncheck
+GOVULNCHECK ?= govulncheck
 
-.PHONY: build build-cua-macos test test-install test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-subscription-pool-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
+.PHONY: build build-cua-macos test test-install test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-subscription-pool-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck govulncheck-install maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -49,7 +52,7 @@ test-live:
 	$(GO) test -tags=live -count=1 -p 1 ./...
 
 test-live-fixture:
-	$(GO) test -tags=live -count=1 -p 1 -run '^(TestLiveFixture.*|TestLiveClaudeConformanceMatrix|TestLiveLaunchOpenAIProviderStreamsAgentToolInput|TestLiveLaunchOpenAIProviderRoutesFamilyAfterSameSessionModelSwitch|TestLiveLaunchOpenAIProviderRoutesWorkflowFamilyAfterSameSessionModelSwitch|TestLiveLaunchOpenAIProviderAutoModeClassifierRequest|TestLiveLaunchOpenAIProviderAutoModePluginResearchAgent|TestLiveLaunchOpenAIProviderRunsDynamicWorkflow|TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent)$$' ./internal/cli
+	$(GO) test -tags=live -count=1 -p 1 -run '^(TestLiveFixture.*|TestLiveClaudeConformanceMatrix|TestLiveLaunchOpenAIProviderStreamsAgentToolInput|TestLiveLaunchOpenAIProviderRoutesFamilyAfterSameSessionModelSwitch|TestLiveLaunchOpenAIProviderRoutesWorkflowFamilyAfterSameSessionModelSwitch|TestLiveLaunchOpenAIProviderAutoModeClassifierRequest|TestLiveLaunchOpenAIProviderAutoModePluginResearchAgent|TestLiveLaunchOpenAIProviderRunsDynamicWorkflow|TestLiveLaunchAnthropicCompatibleProviderAutoModePluginResearchAgent|TestLiveResumeRouteRestoresRecordedProviderRoute)$$' ./internal/cli
 
 test-live-subscription-pool-fixture:
 	$(GO) test -tags=live -count=1 -p 1 -run '^TestLiveFixtureSubscriptionPool(FirstParty|IsolatesExistingStatuslineCredentials|RotatesOneProcessAndPreservesFinalLimit|DoesNotRotateOnTemporary429|DoesNotRotateModelOrUnknownLimits|RotatesRealClaudeWithoutRestart|KeepsRealClaudeOpenWhenAllAccountsLimited|CompactAfterProviderSwitch)$$' ./internal/cli
@@ -108,7 +111,16 @@ coverage:
 	$(GO) tool cover -func=coverage.out
 
 govulncheck:
-	govulncheck ./...
+	@command -v "$(GOVULNCHECK)" >/dev/null || (echo "$(GOVULNCHECK) $(GOVULNCHECK_VERSION) is required; run make govulncheck-install" >&2; exit 1)
+	@actual="$$("$(GOVULNCHECK)" -version 2>&1 | sed -n 's/^Scanner: govulncheck@//p')"; \
+	if test "$$actual" != "$(GOVULNCHECK_VERSION)"; then \
+		echo "govulncheck version $$actual is installed; need $(GOVULNCHECK_VERSION). Run make govulncheck-install." >&2; \
+		exit 1; \
+	fi
+	$(GOVULNCHECK) ./...
+
+govulncheck-install:
+	$(GO) install $(GOVULNCHECK_PACKAGE)@$(GOVULNCHECK_VERSION)
 
 maintainability:
 	$(GO) run ./tools/maintainability

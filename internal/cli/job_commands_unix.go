@@ -141,38 +141,6 @@ func runPromptLaunch(ctx context.Context, cmd *cobra.Command, opts *options, dep
 	return runLaunch(ctx, cmd, opts, deps, invocation)
 }
 
-func detachedSessionOption(args []string) string {
-	if option := findLaunchOption(args, "--session-id", "--resume", "--continue", "--fork-session", "--no-session-persistence", "--from-pr", "--teleport"); option != "" {
-		return option
-	}
-	for _, arg := range args {
-		if arg == "--" {
-			break
-		}
-		if option := detachedShortSessionOption(arg); option != "" {
-			return option
-		}
-	}
-	return ""
-}
-
-func detachedShortSessionOption(arg string) string {
-	if !strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "--") {
-		return ""
-	}
-	for _, option := range arg[1:] {
-		switch option {
-		case 'c', 'r':
-			return "-" + string(option)
-		case 'p', 'h', 'v':
-			// Claude bundles boolean short options; value-taking options consume the tail.
-		default:
-			return ""
-		}
-	}
-	return ""
-}
-
 func readJobPrompt(path string) (string, error) {
 	// A FIFO must be rejected by Stat rather than blocking before validation.
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)

@@ -256,7 +256,7 @@ func runClaudeStreamMatrix(ctx context.Context, opts *options, deps Dependencies
 	probe.SetErr(&errOut)
 	invocation := launchInvocation{
 		printMode: true, permissionMode: "auto", noStatusline: true,
-		authMode: launchAuthModeGatewayToken,
+		authMode: launchAuthModeGatewayToken, requireHealthyRecorder: true,
 		claudeArgs: []string{
 			"--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--verbose",
 		},
@@ -294,8 +294,8 @@ func runClaudeExplicitAliasProbe(ctx context.Context, opts *options, deps Depend
 	probe.SetErr(&out)
 	invocation := launchInvocation{
 		modelAlias: alias, printMode: true, authMode: launchAuthModeGatewayToken,
-		noStatusline: true,
-		claudeArgs:   []string{"Reply exactly " + marker + " and do not use tools."},
+		noStatusline: true, requireHealthyRecorder: true,
+		claudeArgs: []string{"Reply exactly " + marker + " and do not use tools."},
 	}
 	if err := runLaunch(ctx, probe, opts, deps, invocation); err != nil {
 		return fmt.Errorf("running explicit Claude alias probe: %w", err)
@@ -490,7 +490,7 @@ func verifyLatestClaudeMatrix(ctx context.Context, s *store.Store, aliases []str
 	if err != nil {
 		return err
 	}
-	if err := verifyClaudeRoutes(events, aliases, requireAnthropic); err != nil {
+	if err := verifyClaudeRoutes(events, aliases, requireAnthropic, true); err != nil {
 		return err
 	}
 	if requireWorkers {
@@ -512,10 +512,10 @@ func verifyLatestClaudeRoute(ctx context.Context, s *store.Store, alias string) 
 	if err != nil {
 		return err
 	}
-	return verifyClaudeRoutes(events, []string{alias}, false)
+	return verifyClaudeRoutes(events, []string{alias}, false, false)
 }
 
-func verifyClaudeRoutes(events []store.TraceEvent, aliases []string, requireAnthropic bool) error {
+func verifyClaudeRoutes(events []store.TraceEvent, aliases []string, requireAnthropic, requireClassifierEvidence bool) error {
 	expected := make([]claudeRouteExpectation, 0, len(aliases)*2+1)
 	if requireAnthropic {
 		expected = append(expected, claudeRouteExpectation{kind: "first-party-anthropic"})
@@ -526,20 +526,15 @@ func verifyClaudeRoutes(events []store.TraceEvent, aliases []string, requireAnth
 			expected = append(expected, claudeRouteExpectation{kind: "first-party-anthropic"})
 		}
 	}
-
-	next := 0
-	for index := range events {
-		event := &events[index]
-		if next == len(expected) {
-			break
-		}
-		if event.Kind != "route" || event.Status != "succeeded" || event.Route.Operation != "messages" {
-			continue
-		}
-		want := expected[next]
-		if event.Route.RouteKind == want.kind && (want.alias == "" || event.Route.ModelAlias == want.alias) {
-			next++
-		}
+	if len(expected) == 0 && !requireClassifierEvidence {
+		return nil
+	}
+	next, classifierEvents, err := verifyClaudeRouteEvents(events, expected)
+	if err != nil {
+		return err
+	}
+	if requireClassifierEvidence && classifierEvents == 0 {
+		return fmt.Errorf("claude route trace omitted auto-mode classifier evidence")
 	}
 	if next == len(expected) {
 		return nil
@@ -549,6 +544,85 @@ func verifyClaudeRoutes(events []store.TraceEvent, aliases []string, requireAnth
 		return fmt.Errorf("claude route trace omitted an ordered first-party Anthropic transition")
 	}
 	return fmt.Errorf("claude route trace omitted an ordered transition to configured alias %q", missing.alias)
+}
+
+func verifyClaudeRouteEvents(events []store.TraceEvent, expected []claudeRouteExpectation) (next, classifierEvents int, err error) {
+	progressBySession := make(map[int64]int)
+	for index := range events {
+		event := &events[index]
+		if event.Kind != "route" {
+			continue
+		}
+		if isClaudeClassifierOperation(event.Route.Operation) {
+			if err := verifyClaudeClassifierRoute(event.Route); err != nil {
+				return 0, 0, err
+			}
+			classifierEvents++
+			continue
+		}
+		if event.Route.RouteKind == "" {
+			continue
+		}
+		if event.Route.Operation == "messages" {
+			// Session zero owns launch-scoped progress when Claude does not expose
+			// request-level session identity. Known sessions never share progress.
+			progress := progressBySession[event.Route.SessionID]
+			if event.Status == "succeeded" && progress < len(expected) && claudeRouteMatches(event.Route, expected[progress]) {
+				progress++
+				progressBySession[event.Route.SessionID] = progress
+				if progress > next {
+					next = progress
+				}
+			}
+		}
+	}
+	return next, classifierEvents, nil
+}
+
+func verifyClaudeClassifierRoute(route store.RouteEvent) error {
+	if route.RouteKind == "" {
+		return fmt.Errorf("claude auto-mode classifier trace omitted route identity")
+	}
+	switch route.ClassifierSelectionSource {
+	case store.ClassifierSelectionSourceExplicit:
+		if route.ClassifierActiveAlias != "" {
+			return fmt.Errorf("claude auto-mode classifier trace recorded inconsistent explicit-selection evidence")
+		}
+		if !claudeClassifierExplicitlySelectsRegisteredRoute(route) {
+			return fmt.Errorf("claude auto-mode classifier explicit-selection evidence did not match the resolved route")
+		}
+		return nil
+	case store.ClassifierSelectionSourceActive:
+		expected := claudeRouteExpectation{kind: "first-party-anthropic"}
+		if route.ClassifierActiveAlias != "" {
+			expected = claudeRouteExpectation{kind: "registered", alias: route.ClassifierActiveAlias}
+		}
+		if !claudeRouteMatches(route, expected) {
+			return fmt.Errorf("claude auto-mode classifier route did not match its recorded active model decision")
+		}
+		return nil
+	default:
+		return fmt.Errorf("claude auto-mode classifier trace omitted selection-source evidence")
+	}
+}
+
+func claudeRouteMatches(route store.RouteEvent, expected claudeRouteExpectation) bool {
+	return route.RouteKind == expected.kind && (expected.alias == "" || route.ModelAlias == expected.alias)
+}
+
+func isClaudeClassifierOperation(operation string) bool {
+	return operation == "auto_mode_classifier" || operation == "auto_mode_classifier_count_tokens"
+}
+
+func claudeClassifierExplicitlySelectsRegisteredRoute(route store.RouteEvent) bool {
+	if route.RouteKind != "registered" || route.ModelAlias == "" {
+		return false
+	}
+	requested := strings.TrimSpace(route.RequestedModel)
+	if requested == route.ModelAlias {
+		return true
+	}
+	return gateway.DiscoveryIDMatchesAlias(requested, route.ModelAlias)
 }
 
 func verifyClaudeWorkers(ctx context.Context, s *store.Store, launchID int64, events []store.TraceEvent) error {
