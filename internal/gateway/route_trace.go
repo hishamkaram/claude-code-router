@@ -49,7 +49,9 @@ func (h *handler) observeRoute(ctx context.Context, span *observability.RouteSpa
 	span.Resolve(ctx, observability.RouteResolution{
 		SessionID: sessionID, RouteKind: observed.Kind, ModelAlias: observed.ModelAlias,
 		ProviderName: observed.ProviderName, ProviderModel: observed.ProviderModel,
-		Protocol: observed.Protocol,
+		Protocol:                  observed.Protocol,
+		ClassifierSelectionSource: route.classifierSelectionSource,
+		ClassifierActiveAlias:     route.classifierActiveAlias,
 	})
 }
 
@@ -71,6 +73,7 @@ func sessionRoute(route messageRoute) session.Route {
 	return session.Route{
 		Kind: kind, ModelAlias: modelAlias, ProviderName: providerName,
 		ProviderModel: providerModel, Protocol: route.capabilities.Protocol,
+		ConfigurationFingerprint: route.configurationFingerprint,
 	}
 }
 

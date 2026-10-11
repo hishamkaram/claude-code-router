@@ -71,6 +71,32 @@ func TestParseDiscoveryIDCompatibilityAndValidation(t *testing.T) {
 	}
 }
 
+func TestDiscoveryIDMatchesAlias(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		id    string
+		alias string
+		want  bool
+	}{
+		{name: "canonical", id: "anthropic.ccr.gpt", alias: "gpt", want: true},
+		{name: "canonical 1m", id: "anthropic.ccr.gpt[1m]", alias: "gpt", want: true},
+		{name: "legacy", id: "claude-ccr-gpt", alias: "gpt", want: true},
+		{name: "raw alias", id: "gpt", alias: "gpt"},
+		{name: "malformed context", id: "anthropic.ccr.gpt[2m]", alias: "gpt"},
+		{name: "different alias", id: "anthropic.ccr.other", alias: "gpt"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := DiscoveryIDMatchesAlias(test.id, test.alias); got != test.want {
+				t.Fatalf("DiscoveryIDMatchesAlias(%q, %q) = %v, want %v", test.id, test.alias, got, test.want)
+			}
+		})
+	}
+}
+
 func TestDiscoveryIDForModelUsesEffectiveContextCapability(t *testing.T) {
 	t.Parallel()
 	discovered, err := modelcap.SnapshotFrom(modelcap.Values{ContextWindowTokens: modelcap.Int64(1_000_000)}, "fixture")

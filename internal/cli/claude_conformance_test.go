@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/gateway"
+	"github.com/hishamkaram/claude-code-router/internal/observability"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -200,17 +202,251 @@ func TestVerifyClaudeRoutesRequiresOrderedMessageTransitions(t *testing.T) {
 	events = append(events,
 		successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
 		successfulClaudeMessageRoute(2, "registered", "fixture"),
-		store.TraceEvent{
-			ID: 3, Kind: "route", Status: "succeeded",
-			Route: store.RouteEvent{Operation: "auto_mode_classifier", RouteKind: "first-party-anthropic"},
-		},
+		successfulClaudeClassifierRoute(3, "auto_mode_classifier", "registered", "fixture"),
 	)
-	if err := verifyClaudeRoutes(events, []string{"fixture"}, true); err == nil || !strings.Contains(err.Error(), "Anthropic transition") {
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err == nil || !strings.Contains(err.Error(), "Anthropic transition") {
 		t.Fatalf("verifyClaudeRoutes() error = %v, want missing ordered Anthropic transition", err)
 	}
 	events = append(events, successfulClaudeMessageRoute(4, "first-party-anthropic", "claude-sonnet"))
-	if err := verifyClaudeRoutes(events, []string{"fixture"}, true); err != nil {
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
 		t.Fatalf("verifyClaudeRoutes() error = %v", err)
+	}
+}
+
+func TestVerifyClaudeRoutesRequiresOneSessionToCompleteOrderedTransitions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		events []store.TraceEvent
+	}{
+		{
+			name: "known sessions",
+			events: []store.TraceEvent{
+				claudeRouteForSession(successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"), 10),
+				claudeRouteForSession(successfulClaudeMessageRoute(2, "registered", "fixture"), 20),
+				claudeRouteForSession(successfulClaudeMessageRoute(3, "first-party-anthropic", "claude-sonnet"), 20),
+			},
+		},
+		{
+			name: "known and unavailable sessions",
+			events: []store.TraceEvent{
+				claudeRouteForSession(successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"), 0),
+				claudeRouteForSession(successfulClaudeMessageRoute(2, "registered", "fixture"), 10),
+				claudeRouteForSession(successfulClaudeMessageRoute(3, "first-party-anthropic", "claude-sonnet"), 0),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := verifyClaudeRoutes(test.events, []string{"fixture"}, true, false); err == nil || !strings.Contains(err.Error(), "configured alias") {
+				t.Fatalf("verifyClaudeRoutes() error = %v, want incomplete per-session transition sequence", err)
+			}
+		})
+	}
+}
+
+func TestVerifyClaudeRoutesValidatesClassifierAgainstActiveRoute(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		operation      string
+		kind           string
+		alias          string
+		status         string
+		unknownSession bool
+		wantError      string
+	}{
+		{name: "matching messages", operation: "auto_mode_classifier", kind: "registered", alias: "fixture"},
+		{name: "matching count tokens", operation: "auto_mode_classifier_count_tokens", kind: "registered", alias: "fixture"},
+		{name: "first party fallback", operation: "auto_mode_classifier", kind: "first-party-anthropic", wantError: "classifier route"},
+		{name: "failed first party fallback", operation: "auto_mode_classifier", kind: "first-party-anthropic", status: "failed", wantError: "classifier route"},
+		{name: "wrong configured alias", operation: "auto_mode_classifier", kind: "registered", alias: "other", wantError: "classifier route"},
+		{name: "missing route identity", operation: "auto_mode_classifier", wantError: "omitted route identity"},
+		{name: "captured decision without session identity", operation: "auto_mode_classifier", kind: "registered", alias: "fixture", unknownSession: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			events := []store.TraceEvent{
+				successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
+				successfulClaudeMessageRoute(2, "registered", "fixture"),
+				successfulClaudeClassifierRoute(3, test.operation, test.kind, test.alias),
+				successfulClaudeMessageRoute(4, "first-party-anthropic", "claude-sonnet"),
+			}
+			events[2].Route.ClassifierActiveAlias = "fixture"
+			if test.status != "" {
+				events[2].Status = test.status
+			}
+			if test.unknownSession {
+				events[2].Route.SessionID = 0
+			}
+			err := verifyClaudeRoutes(events, []string{"fixture"}, true, true)
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("verifyClaudeRoutes() error = %v, want error containing %q", err, test.wantError)
+			}
+			if test.wantError == "" && err != nil {
+				t.Fatalf("verifyClaudeRoutes() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyClaudeRoutesAllowsClassifierOnIntentionalFirstPartyRoute(t *testing.T) {
+	t.Parallel()
+	events := []store.TraceEvent{
+		successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
+		successfulClaudeClassifierRoute(2, "auto_mode_classifier", "first-party-anthropic", ""),
+		successfulClaudeMessageRoute(3, "registered", "fixture"),
+		successfulClaudeMessageRoute(4, "first-party-anthropic", "claude-sonnet"),
+		successfulClaudeClassifierRoute(5, "auto_mode_classifier_count_tokens", "first-party-anthropic", ""),
+	}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
+		t.Fatalf("verifyClaudeRoutes() error = %v", err)
+	}
+}
+
+func TestVerifyClaudeRoutesTracksClassifierStatePerSession(t *testing.T) {
+	t.Parallel()
+	events := []store.TraceEvent{
+		claudeRouteForSession(successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"), 10),
+		claudeRouteForSession(successfulClaudeMessageRoute(2, "registered", "fixture"), 10),
+		claudeRouteForSession(successfulClaudeMessageRoute(3, "first-party-anthropic", "claude-haiku"), 20),
+		claudeRouteForSession(successfulClaudeClassifierRoute(4, "auto_mode_classifier", "first-party-anthropic", ""), 20),
+		claudeRouteForSession(successfulClaudeClassifierRoute(5, "auto_mode_classifier", "registered", "fixture"), 10),
+		claudeRouteForSession(successfulClaudeMessageRoute(6, "first-party-anthropic", "claude-sonnet"), 10),
+	}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
+		t.Fatalf("verifyClaudeRoutes() error = %v", err)
+	}
+}
+
+func TestVerifyClaudeRoutesAcceptsExplicitClassifierAliasSwitch(t *testing.T) {
+	t.Parallel()
+	for _, requestedModel := range []string{
+		"fixture",
+		gateway.DiscoveryIDForAlias("fixture") + "[1m]",
+		"claude-ccr-fixture",
+	} {
+		t.Run(requestedModel, func(t *testing.T) {
+			explicit := successfulClaudeClassifierRoute(2, "auto_mode_classifier", "registered", "fixture")
+			explicit.Route.RequestedModel = requestedModel
+			explicit.Route.ClassifierSelectionSource = store.ClassifierSelectionSourceExplicit
+			explicit.Route.ClassifierActiveAlias = ""
+			events := []store.TraceEvent{
+				successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
+				explicit,
+				successfulClaudeClassifierRoute(3, "auto_mode_classifier", "registered", "fixture"),
+				successfulClaudeMessageRoute(4, "registered", "fixture"),
+				successfulClaudeMessageRoute(5, "first-party-anthropic", "claude-sonnet"),
+			}
+			if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
+				t.Fatalf("verifyClaudeRoutes() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestVerifyClaudeRoutesCountTokensExplicitAliasDoesNotChangeSession(t *testing.T) {
+	t.Parallel()
+	explicit := successfulClaudeClassifierRoute(2, "auto_mode_classifier_count_tokens", "registered", "fixture")
+	explicit.Route.RequestedModel = gateway.DiscoveryIDForAlias("fixture")
+	explicit.Route.ClassifierSelectionSource = store.ClassifierSelectionSourceExplicit
+	explicit.Route.ClassifierActiveAlias = ""
+	events := []store.TraceEvent{
+		successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
+		explicit,
+		successfulClaudeClassifierRoute(3, "auto_mode_classifier", "first-party-anthropic", ""),
+		successfulClaudeMessageRoute(4, "registered", "fixture"),
+		successfulClaudeMessageRoute(5, "first-party-anthropic", "claude-sonnet"),
+	}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
+		t.Fatalf("verifyClaudeRoutes() error = %v", err)
+	}
+}
+
+func TestVerifyClaudeRoutesFollowsResolvedMessageRouteAfterFailedUpstream(t *testing.T) {
+	t.Parallel()
+	failedFirstParty := successfulClaudeMessageRoute(3, "first-party-anthropic", "claude-sonnet")
+	failedFirstParty.Status = "failed"
+	events := []store.TraceEvent{
+		successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
+		successfulClaudeMessageRoute(2, "registered", "fixture"),
+		failedFirstParty,
+		successfulClaudeClassifierRoute(4, "auto_mode_classifier", "first-party-anthropic", ""),
+		successfulClaudeMessageRoute(5, "first-party-anthropic", "claude-sonnet"),
+	}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
+		t.Fatalf("verifyClaudeRoutes() error = %v", err)
+	}
+}
+
+func TestVerifyClaudeRoutesUsesLaunchOrderWhenMessageSessionIdentityIsUnavailable(t *testing.T) {
+	t.Parallel()
+	events := []store.TraceEvent{
+		claudeRouteForSession(successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"), 0),
+		claudeRouteForSession(successfulClaudeClassifierRoute(2, "auto_mode_classifier", "registered", "fixture"), 0),
+		claudeRouteForSession(successfulClaudeMessageRoute(3, "registered", "fixture"), 0),
+		claudeRouteForSession(successfulClaudeMessageRoute(4, "first-party-anthropic", "claude-sonnet"), 0),
+	}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
+		t.Fatalf("verifyClaudeRoutes() error = %v", err)
+	}
+}
+
+func TestVerifyClaudeRoutesRequiresClassifierDecisionEvidence(t *testing.T) {
+	t.Parallel()
+	classifier := successfulClaudeClassifierRoute(2, "auto_mode_classifier", "registered", "fixture")
+	classifier.Route.ClassifierSelectionSource = ""
+	events := []store.TraceEvent{
+		successfulClaudeMessageRoute(1, "registered", "fixture"),
+		classifier,
+	}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, false, true); err == nil || !strings.Contains(err.Error(), "omitted selection-source evidence") {
+		t.Fatalf("verifyClaudeRoutes() error = %v, want missing classifier decision evidence", err)
+	}
+}
+
+func TestVerifyClaudeRoutesRequiresClassifierTraceCoverage(t *testing.T) {
+	t.Parallel()
+	events := []store.TraceEvent{successfulClaudeMessageRoute(1, "registered", "fixture")}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, false, true); err == nil || !strings.Contains(err.Error(), "omitted auto-mode classifier evidence") {
+		t.Fatalf("verifyClaudeRoutes() error = %v, want missing classifier trace evidence", err)
+	}
+}
+
+func TestVerifyClaudeRoutesUsesCapturedClassifierDecisionAcrossEventOrdering(t *testing.T) {
+	t.Parallel()
+	events := []store.TraceEvent{
+		successfulClaudeMessageRoute(1, "first-party-anthropic", "claude-sonnet"),
+		successfulClaudeClassifierRoute(2, "auto_mode_classifier", "registered", "fixture"),
+		successfulClaudeMessageRoute(3, "registered", "fixture"),
+		successfulClaudeMessageRoute(4, "first-party-anthropic", "claude-sonnet"),
+	}
+	if err := verifyClaudeRoutes(events, []string{"fixture"}, true, true); err != nil {
+		t.Fatalf("verifyClaudeRoutes() error = %v", err)
+	}
+}
+
+func TestValidateConformanceRecorderSnapshotFailsClosed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		snapshot  observability.Snapshot
+		wantError string
+	}{
+		{name: "healthy", snapshot: observability.Snapshot{Enabled: true, Healthy: true}},
+		{name: "disabled", snapshot: observability.Snapshot{Healthy: true}, wantError: "disabled"},
+		{name: "unhealthy", snapshot: observability.Snapshot{Enabled: true, WriteFailures: 2, LastError: "resolve route: persistence unavailable"}, wantError: "2 write failures"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateConformanceRecorderSnapshot(test.snapshot)
+			if test.wantError == "" && err != nil {
+				t.Fatalf("validateConformanceRecorderSnapshot() error = %v", err)
+			}
+			if test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("validateConformanceRecorderSnapshot() error = %v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 
@@ -245,8 +481,28 @@ func TestFeedClaudeStreamStepsTimesOutAndClosesPipeWithError(t *testing.T) {
 func successfulClaudeMessageRoute(id int64, kind, alias string) store.TraceEvent {
 	return store.TraceEvent{
 		ID: id, Kind: "route", Status: "succeeded",
-		Route: store.RouteEvent{Operation: "messages", RouteKind: kind, ModelAlias: alias},
+		Route: store.RouteEvent{SessionID: 1, Operation: "messages", RouteKind: kind, ModelAlias: alias},
 	}
+}
+
+func successfulClaudeClassifierRoute(id int64, operation, kind, alias string) store.TraceEvent {
+	activeAlias := ""
+	if kind == "registered" {
+		activeAlias = alias
+	}
+	return store.TraceEvent{
+		ID: id, Kind: "route", Status: "succeeded",
+		Route: store.RouteEvent{
+			SessionID: 1, Operation: operation, RouteKind: kind, ModelAlias: alias,
+			ClassifierSelectionSource: store.ClassifierSelectionSourceActive,
+			ClassifierActiveAlias:     activeAlias,
+		},
+	}
+}
+
+func claudeRouteForSession(event store.TraceEvent, sessionID int64) store.TraceEvent {
+	event.Route.SessionID = sessionID
+	return event
 }
 
 func openClaudeConformanceStore(t *testing.T, ctx context.Context) *store.Store {

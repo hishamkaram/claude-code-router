@@ -24,6 +24,12 @@ func DiscoveryIDForAlias(alias string) string {
 	return discoveryAliasPrefix + escapeDiscoveryAlias(alias)
 }
 
+// DiscoveryIDMatchesAlias reports whether id is a valid CCR discovery ID for alias.
+func DiscoveryIDMatchesAlias(id, alias string) bool {
+	discovery := parseDiscoveryID(id)
+	return discovery.valid && discovery.alias == alias
+}
+
 // DiscoveryIDForModel returns the Claude-facing ID for a stored CCR model.
 func DiscoveryIDForModel(model store.Model) (string, error) {
 	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)

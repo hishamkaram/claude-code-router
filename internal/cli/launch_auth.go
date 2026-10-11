@@ -103,7 +103,7 @@ func preflightAutoLaunchAuthBeforeStore(
 	deps Dependencies,
 	invocation launchInvocation,
 ) (launchInvocation, error) {
-	if invocation.authMode != launchAuthModeAuto || invocation.modelAlias != "" {
+	if invocation.resumeRoute || invocation.authMode != launchAuthModeAuto || invocation.modelAlias != "" {
 		return invocation, nil
 	}
 	if launchClaudeAuthPresentOrUnknown(ctx, deps) {

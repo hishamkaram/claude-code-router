@@ -270,12 +270,12 @@ func TestGatewayRecordsFinalConfirmedLimitAtRetryBound(t *testing.T) {
 	pool := newGatewayTestSubscriptionPool("account-1", "oauth-1")
 	pool.autoAdvance = true
 	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		calls.Add(1)
-		writeConfirmedSubscriptionLimit(w)
-	}))
-	defer upstream.Close()
-	server := startSubscriptionPoolRetryGateway(t, upstream.URL, pool, nil)
+		body := io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}`))
+		return confirmedLimitResponse(body), nil
+	})}
+	server := startSubscriptionPoolRetryGateway(t, "https://api.anthropic.test", pool, client)
 	defer shutdownGateway(t, context.Background(), server)
 
 	resp := postSubscriptionGatewayMessage(t, context.Background(), server, "claude-sonnet-4-6")

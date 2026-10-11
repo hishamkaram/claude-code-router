@@ -38,11 +38,12 @@ type HookEvent struct {
 }
 
 type Route struct {
-	Kind          string `json:"kind"`
-	ModelAlias    string `json:"model_alias"`
-	ProviderName  string `json:"provider_name"`
-	ProviderModel string `json:"provider_model"`
-	Protocol      string `json:"protocol"`
+	Kind                     string `json:"kind"`
+	ModelAlias               string `json:"model_alias"`
+	ProviderName             string `json:"provider_name"`
+	ProviderModel            string `json:"provider_model"`
+	Protocol                 string `json:"protocol"`
+	ConfigurationFingerprint string `json:"-"`
 }
 
 type SessionSnapshot struct {
@@ -144,9 +145,46 @@ func (t *Tracker) ObserveRoute(ctx context.Context, route Route) {
 		return
 	}
 	if err := t.store.UpdateClaudeSessionRoute(ctx, t.currentSession.ID, route.Kind,
-		route.ModelAlias, route.ProviderName, route.ProviderModel); err != nil {
+		route.ModelAlias, route.ProviderName, route.ProviderModel, route.Protocol,
+		route.ConfigurationFingerprint); err != nil {
 		t.markFailureLocked(ctx)
 	}
+}
+
+// BindKnownSession persists a native session identifier supplied to CCR before
+// Claude's first lifecycle hook. This keeps an observed route resumable when a
+// timeout or cancellation interrupts Claude before it can emit SessionStart.
+func (t *Tracker) BindKnownSession(ctx context.Context, claudeSessionID, source string) error {
+	if t == nil {
+		return nil
+	}
+	if err := ValidateSessionID(claudeSessionID); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.currentSession.ID != 0 {
+		if t.currentSession.ClaudeSessionID != claudeSessionID {
+			return fmt.Errorf("%w: tracker already binds native session %q", ErrInvalidHook, t.currentSession.ClaudeSessionID)
+		}
+		return nil
+	}
+	id, err := t.store.UpsertClaudeSession(ctx, store.ClaudeSession{
+		LaunchID: t.launchID, ClaudeSessionID: claudeSessionID, Source: normalizeSource(source),
+	})
+	if err != nil {
+		return fmt.Errorf("binding known native session: %w", err)
+	}
+	current, err := t.store.GetClaudeSession(ctx, t.launchID, claudeSessionID)
+	if err != nil {
+		return fmt.Errorf("reading bound native session: %w", err)
+	}
+	current.ID = id
+	t.currentSession = SessionSnapshot{
+		ID: current.ID, ClaudeSessionID: current.ClaudeSessionID,
+		State: current.State, Source: current.Source,
+	}
+	return nil
 }
 
 func (t *Tracker) CurrentSessionID() int64 {
@@ -236,14 +274,14 @@ func ValidateHookEvent(event HookEvent) error {
 	if !isLifecycleName(event.HookEventName) {
 		return fmt.Errorf("%w: unsupported hook event", ErrInvalidHook)
 	}
-	if err := validateExternalID("session_id", event.SessionID, true); err != nil {
+	if err := ValidateSessionID(event.SessionID); err != nil {
 		return err
 	}
 	switch event.HookEventName {
 	case "SubagentStart", "SubagentStop":
-		return validateExternalID("agent_id", event.AgentID, true)
+		return validateExternalID("agent_id", event.AgentID)
 	case "TaskCreated", "TaskCompleted":
-		return validateExternalID("task_id", event.TaskID, true)
+		return validateExternalID("task_id", event.TaskID)
 	case "TeammateIdle":
 		if strings.TrimSpace(event.TeammateName) == "" {
 			return fmt.Errorf("%w: teammate_name is required", ErrInvalidHook)
@@ -332,6 +370,15 @@ func (t *Tracker) applySessionEventLocked(ctx context.Context, current store.Cla
 		}
 		t.lifecycleState = "active"
 		return t.store.SetLaunchLifecycleState(ctx, t.launchID, "active")
+	}
+	if t.currentSession.ID == 0 {
+		t.currentSession = SessionSnapshot{
+			ID: current.ID, ClaudeSessionID: current.ClaudeSessionID,
+			State: current.State, Source: current.Source,
+		}
+		if err := t.persistRouteLocked(ctx); err != nil {
+			return err
+		}
 	}
 
 	reason := normalizeEndReason(event.Reason)
@@ -462,7 +509,8 @@ func (t *Tracker) persistRouteLocked(ctx context.Context) error {
 		return nil
 	}
 	return t.store.UpdateClaudeSessionRoute(ctx, t.currentSession.ID, t.route.Kind,
-		t.route.ModelAlias, t.route.ProviderName, t.route.ProviderModel)
+		t.route.ModelAlias, t.route.ProviderName, t.route.ProviderModel, t.route.Protocol,
+		t.route.ConfigurationFingerprint)
 }
 
 func (t *Tracker) markFailureLocked(ctx context.Context) {
@@ -473,12 +521,15 @@ func (t *Tracker) markFailureLocked(ctx context.Context) {
 	_ = t.store.SetLaunchLifecycleState(ctx, t.launchID, "error")
 }
 
-func validateExternalID(name, value string, required bool) error {
+// ValidateSessionID validates the native Claude session identifier used by
+// lifecycle hooks and by launch-time session binding.
+func ValidateSessionID(value string) error {
+	return validateExternalID("session_id", value)
+}
+
+func validateExternalID(name, value string) error {
 	if value == "" {
-		if required {
-			return fmt.Errorf("%w: %s is required", ErrInvalidHook, name)
-		}
-		return nil
+		return fmt.Errorf("%w: %s is required", ErrInvalidHook, name)
 	}
 	if len(value) > 128 || !isExternalID(value) {
 		return fmt.Errorf("%w: %s has an invalid format", ErrInvalidHook, name)

@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const CurrentSchemaVersion = 9
+const CurrentSchemaVersion = 12
 
 type Store struct {
 	db *sql.DB
@@ -238,6 +238,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return s.migrateFromV7(ctx)
 	case 8:
 		return s.migrateFromV8(ctx)
+	case 9:
+		return s.migrateFromV9(ctx)
+	case 10:
+		return s.migrateFromV10(ctx)
+	case 11:
+		return s.migrateV11ToV12(ctx)
 	case CurrentSchemaVersion:
 		return s.ensureCurrentSchema(ctx)
 	default:
@@ -270,6 +276,9 @@ func (s *Store) migrateFromV1(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 9: %w", err)
 	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 1 to 12: %w", err)
+	}
 	return nil
 }
 
@@ -295,6 +304,9 @@ func (s *Store) migrateFromV2(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 9: %w", err)
 	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 2 to 12: %w", err)
+	}
 	return nil
 }
 
@@ -317,6 +329,9 @@ func (s *Store) migrateFromV3(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 9: %w", err)
 	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 3 to 12: %w", err)
+	}
 	return nil
 }
 
@@ -336,6 +351,9 @@ func (s *Store) migrateFromV4(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 4 to 9: %w", err)
 	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 4 to 12: %w", err)
+	}
 	return nil
 }
 
@@ -352,6 +370,9 @@ func (s *Store) migrateFromV5(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 5 to 9: %w", err)
 	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 5 to 12: %w", err)
+	}
 	return nil
 }
 
@@ -365,6 +386,9 @@ func (s *Store) migrateFromV6(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 6 to 9: %w", err)
 	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 6 to 12: %w", err)
+	}
 	return nil
 }
 
@@ -375,12 +399,38 @@ func (s *Store) migrateFromV7(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 7 to 9: %w", err)
 	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 7 to 12: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) migrateFromV8(ctx context.Context) error {
 	if err := s.migrateV8ToV9(ctx); err != nil {
 		return fmt.Errorf("store.Migrate: migrating schema from version 8 to 9: %w", err)
+	}
+	if err := s.migrateFromV9(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 8 to 12: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateFromV9(ctx context.Context) error {
+	if err := s.migrateV9ToV10(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 9 to 10: %w", err)
+	}
+	if err := s.migrateFromV10(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 9 to 12: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateFromV10(ctx context.Context) error {
+	if err := s.migrateV10ToV11(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 10 to 11: %w", err)
+	}
+	if err := s.migrateV11ToV12(ctx); err != nil {
+		return fmt.Errorf("store.Migrate: migrating schema from version 10 to 12: %w", err)
 	}
 	return nil
 }

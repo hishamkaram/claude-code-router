@@ -31,6 +31,8 @@ func TestRouteAndLifecycleEventRoundTrip(t *testing.T) {
 	if resolveErr := s.ResolveRouteEvent(ctx, eventID, sessionID, RouteEvent{
 		RouteKind: "registered", ModelAlias: "coder", ProviderName: "fixture",
 		ProviderModel: "model-v1", Protocol: "openai-compatible",
+		ClassifierSelectionSource: ClassifierSelectionSourceActive,
+		ClassifierActiveAlias:     "coder",
 	}); resolveErr != nil {
 		t.Fatalf("ResolveRouteEvent() error = %v", resolveErr)
 	}
@@ -59,6 +61,7 @@ func TestRouteAndLifecycleEventRoundTrip(t *testing.T) {
 	}
 	route := events[1].Route
 	if route.ModelAlias != "coder" || route.ProviderModel != "model-v1" ||
+		route.ClassifierSelectionSource != ClassifierSelectionSourceActive || route.ClassifierActiveAlias != "coder" ||
 		route.HTTPStatus != 200 || !route.Usage.Observed || route.Usage.OutputTokens != 7 ||
 		!route.Stream.Observed || route.Stream.UpstreamEventCount != 7 ||
 		!route.Stream.EarlyStreamCommit || route.Stream.TerminalPhase != "completed" {

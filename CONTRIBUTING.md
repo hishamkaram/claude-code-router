@@ -12,7 +12,7 @@ requests.
 
 ## Development Setup
 
-Install Go 1.25 or newer, then run:
+Install Go 1.26.9 or newer, then run:
 
 ```bash
 make build

@@ -74,6 +74,25 @@ func TestFamilyOverrideFailsClosedForUnroutableActiveAlias(t *testing.T) {
 	}
 }
 
+func TestClassifierFamilyOverrideCapturesActiveRouteDecision(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := newGatewayStore(t,
+		store.Provider{Name: "fixture", Type: "openai-compatible", BaseURL: "http://127.0.0.1:1"},
+		store.Model{Alias: "active", ProviderName: "fixture", ProviderModel: "model-active", Status: "degraded"},
+	)
+	h := handler{cfg: Config{Store: s}, activeModel: newActiveModelSelection("active")}
+	req := autoModeClassifierRequest("ccr-family-SONNET")
+	route, validationErr := h.selectRouteForRequest(ctx, "session-a", req)
+	if validationErr != nil {
+		t.Fatalf("selectRouteForRequest(classifier family) error = %#v", validationErr)
+	}
+	if route.model.Alias != "active" || route.classifierSelectionSource != store.ClassifierSelectionSourceActive ||
+		route.classifierActiveAlias != "active" {
+		t.Fatalf("classifier family route = %#v, want captured active alias", route)
+	}
+}
+
 func TestFamilyOverrideNativeModelIDs(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

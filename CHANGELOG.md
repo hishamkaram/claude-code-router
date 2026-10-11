@@ -3,6 +3,25 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
+## v0.6.11
+
+- Restore the exact recorded provider route when a native Claude Code session
+  resumes. SQLite session evidence owns the route identity, and CCR validates
+  the provider, model, protocol, configuration fingerprint, and secret
+  reference before starting Claude.
+- Apply top-level Anthropic tool additions and removals consistently on Chat
+  Completions and Responses routes. Keep admitted launch summaries immutable
+  if provider configuration changes after process start.
+- Raise the supported Go floor to 1.26.9, strengthen deterministic retry
+  coverage, and validate auto-mode classifier traces against the immutable route
+  decision captured for each request. Conformance now fails closed on missing
+  classifier evidence or an unhealthy trace recorder.
+
+## v0.6.10
+
+- Add the checksum-verified Linux installer published from tagged release
+  artifacts.
+
 ## v0.6.9
 
 - Preserve Anthropic's opt-in function-tool strictness on Chat Completions and
@@ -47,18 +66,6 @@ lives under `docs/acceptance/`.
   the dropped provider-specific hint through
   `X-CCR-Ignored-Anthropic-Fields: cache_control` while continuing to reject
   other unsupported fields visibly.
-
-## Unreleased
-
-- Accept and drop the Anthropic `safeguards` request field on the OpenAI Chat
-  Completions and Responses routes. Claude Code 2.1.278 auto mode sends
-  `safeguards: [{"type": "dangerous_tool_use", ...}]` to request Anthropic's
-  server-side tool-use classifier, and translated routes previously failed
-  every such request with `501 Anthropic request field "safeguards" is not
-  supported`. The field is not forwarded, the degradation is exposed through
-  `X-CCR-Ignored-Anthropic-Fields: safeguards`, and Claude Code classifies
-  tool use locally for the rest of the session. Malformed `safeguards` values
-  are rejected with 400; other unsupported fields remain rejected visibly.
 
 ## v0.6.1
 

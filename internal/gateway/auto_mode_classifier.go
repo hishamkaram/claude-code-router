@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
+	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 const autoModeClassifierSystemPrefix = "You are a security monitor for autonomous AI coding agents."
@@ -56,7 +57,11 @@ func (s *activeModelSelection) observe(sessionID string, route messageRoute) {
 
 func (h *handler) selectRouteForRequest(ctx context.Context, sessionID string, req anthropicRequest) (messageRoute, *requestValidationError) {
 	if family, ok := modelrouting.ParseOverride(req.Model); ok {
-		return h.selectFamilyRoute(ctx, sessionID, strings.TrimSpace(req.Model), family)
+		route, validationErr := h.selectFamilyRoute(ctx, sessionID, strings.TrimSpace(req.Model), family)
+		if validationErr == nil && isAutoModeClassifierRequest(req) {
+			route = withClassifierDecision(route, store.ClassifierSelectionSourceActive, selectedRouteAlias(route))
+		}
+		return route, validationErr
 	}
 	if !isAutoModeClassifierRequest(req) {
 		return h.selectRoute(ctx, req.Model)
@@ -66,11 +71,18 @@ func (h *handler) selectRouteForRequest(ctx context.Context, sessionID string, r
 		return messageRoute{}, &requestValidationError{status: http.StatusBadRequest, message: "message request model is required"}
 	}
 	if route, explicit, validationErr := h.explicitClassifierRoute(ctx, requestedModel); explicit {
+		if validationErr == nil {
+			route = withClassifierDecision(route, store.ClassifierSelectionSourceExplicit, "")
+		}
 		return route, validationErr
 	}
 	alias := h.activeModel.currentAlias(sessionID)
 	if alias == "" {
-		return h.selectRoute(ctx, requestedModel)
+		route, validationErr := h.selectRoute(ctx, requestedModel)
+		if validationErr == nil {
+			route = withClassifierDecision(route, store.ClassifierSelectionSourceActive, "")
+		}
+		return route, validationErr
 	}
 	route, validationErr := h.routeConfiguredAlias(ctx, alias, requestedModel)
 	if validationErr != nil {
@@ -83,7 +95,20 @@ func (h *handler) selectRouteForRequest(ctx context.Context, sessionID string, r
 			),
 		}
 	}
-	return route, nil
+	return withClassifierDecision(route, store.ClassifierSelectionSourceActive, alias), nil
+}
+
+func withClassifierDecision(route messageRoute, source, activeAlias string) messageRoute {
+	route.classifierSelectionSource = source
+	route.classifierActiveAlias = activeAlias
+	return route
+}
+
+func selectedRouteAlias(route messageRoute) string {
+	if route.firstPartyAnthropic {
+		return ""
+	}
+	return route.model.Alias
 }
 
 func (h *handler) selectFamilyRoute(ctx context.Context, sessionID, requested string, family modelrouting.Model) (messageRoute, *requestValidationError) {
@@ -150,8 +175,7 @@ func classifierExplicitlySelectedRoute(requestedModel string, route messageRoute
 	if requestedModel == route.model.Alias {
 		return true
 	}
-	discovery := parseDiscoveryID(requestedModel)
-	return discovery.valid && discovery.alias == route.model.Alias
+	return DiscoveryIDMatchesAlias(requestedModel, route.model.Alias)
 }
 
 func claudeCodeSessionID(r *http.Request) string {

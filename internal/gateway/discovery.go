@@ -13,41 +13,56 @@ import (
 func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	entries := make([]gatewayModelEntry, 0)
 	seen := map[string]struct{}{}
-	for _, entry := range h.firstPartyAnthropicModelEntries() {
-		appendGatewayModelEntry(&entries, seen, entry)
-	}
-	models, err := h.cfg.Store.ListModels(r.Context())
-	if err != nil {
-		writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured model aliases: %v", err))
-		return
-	}
-	configuredProviders, err := h.cfg.Store.ListProviders(r.Context())
-	if err != nil {
-		writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured providers: %v", err))
-		return
-	}
-	providerTypes := make(map[string]string, len(configuredProviders))
-	providerCapabilities := make(map[string]providers.Capabilities, len(configuredProviders))
-	for index := range configuredProviders {
-		provider := &configuredProviders[index]
-		providerTypes[provider.Name] = provider.Type
-		providerCapabilities[provider.Name] = effectiveProviderCapabilities(*provider)
-	}
-	for index := range models {
-		model := &models[index]
+	if h.cfg.PinnedRoute != nil {
 		entry, advertise, err := configuredGatewayModelEntry(
-			model,
-			providerTypes[model.ProviderName],
-			providerCapabilities[model.ProviderName],
+			&h.cfg.PinnedRoute.model,
+			h.cfg.PinnedRoute.provider.Type,
+			effectiveProviderCapabilities(h.cfg.PinnedRoute.provider),
 		)
 		if err != nil {
 			writeAnthropicError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if !advertise {
-			continue
+		if advertise {
+			appendGatewayModelEntry(&entries, seen, entry)
 		}
-		appendGatewayModelEntry(&entries, seen, entry)
+	} else {
+		for _, entry := range h.firstPartyAnthropicModelEntries() {
+			appendGatewayModelEntry(&entries, seen, entry)
+		}
+		models, err := h.cfg.Store.ListModels(r.Context())
+		if err != nil {
+			writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured model aliases: %v", err))
+			return
+		}
+		configuredProviders, err := h.cfg.Store.ListProviders(r.Context())
+		if err != nil {
+			writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured providers: %v", err))
+			return
+		}
+		providerTypes := make(map[string]string, len(configuredProviders))
+		providerCapabilities := make(map[string]providers.Capabilities, len(configuredProviders))
+		for index := range configuredProviders {
+			provider := &configuredProviders[index]
+			providerTypes[provider.Name] = provider.Type
+			providerCapabilities[provider.Name] = effectiveProviderCapabilities(*provider)
+		}
+		for index := range models {
+			model := &models[index]
+			entry, advertise, err := configuredGatewayModelEntry(
+				model,
+				providerTypes[model.ProviderName],
+				providerCapabilities[model.ProviderName],
+			)
+			if err != nil {
+				writeAnthropicError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if !advertise {
+				continue
+			}
+			appendGatewayModelEntry(&entries, seen, entry)
+		}
 	}
 	firstID, lastID := "", ""
 	if len(entries) > 0 {

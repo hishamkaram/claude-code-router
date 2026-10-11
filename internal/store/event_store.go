@@ -26,29 +26,36 @@ type StreamMetrics struct {
 	TerminalPhase          string
 }
 
+const (
+	ClassifierSelectionSourceActive   = "active"
+	ClassifierSelectionSourceExplicit = "explicit"
+)
+
 type RouteEvent struct {
-	EventID        int64
-	LaunchID       int64
-	SessionID      int64
-	RequestID      string
-	Operation      string
-	RequestedModel string
-	RouteKind      string
-	ModelAlias     string
-	ProviderName   string
-	ProviderModel  string
-	Protocol       string
-	Streaming      bool
-	Tools          bool
-	Thinking       bool
-	Status         string
-	HTTPStatus     int
-	ErrorClass     string
-	LatencyMS      int64
-	Usage          TokenUsage
-	Stream         StreamMetrics
-	OccurredAt     string
-	CompletedAt    string
+	EventID                   int64
+	LaunchID                  int64
+	SessionID                 int64
+	RequestID                 string
+	Operation                 string
+	RequestedModel            string
+	RouteKind                 string
+	ModelAlias                string
+	ProviderName              string
+	ProviderModel             string
+	Protocol                  string
+	ClassifierSelectionSource string
+	ClassifierActiveAlias     string
+	Streaming                 bool
+	Tools                     bool
+	Thinking                  bool
+	Status                    string
+	HTTPStatus                int
+	ErrorClass                string
+	LatencyMS                 int64
+	Usage                     TokenUsage
+	Stream                    StreamMetrics
+	OccurredAt                string
+	CompletedAt               string
 }
 
 type LifecycleEvent struct {
@@ -149,10 +156,11 @@ WHERE id = ? AND kind = 'route'
 	}
 	_, err = tx.ExecContext(ctx, `
 UPDATE route_events
-SET route_kind = ?, model_alias = ?, provider_name = ?, provider_model = ?, protocol = ?
+SET route_kind = ?, model_alias = ?, provider_name = ?, provider_model = ?, protocol = ?,
+  classifier_selection_source = ?, classifier_active_alias = ?
 WHERE event_id = ?
 `, event.RouteKind, event.ModelAlias, event.ProviderName, event.ProviderModel,
-		event.Protocol, eventID)
+		event.Protocol, event.ClassifierSelectionSource, event.ClassifierActiveAlias, eventID)
 	if err != nil {
 		return fmt.Errorf("store.ResolveRouteEvent: updating route details: %w", err)
 	}
@@ -381,6 +389,8 @@ SELECT
   COALESCE(route_events.provider_name, ''),
   COALESCE(route_events.provider_model, ''),
   COALESCE(route_events.protocol, ''),
+	COALESCE(route_events.classifier_selection_source, ''),
+	COALESCE(route_events.classifier_active_alias, ''),
   COALESCE(route_events.streaming, 0),
   COALESCE(route_events.tools, 0),
   COALESCE(route_events.thinking, 0),
@@ -417,7 +427,8 @@ func scanTraceEvent(row rowScanner) (TraceEvent, error) {
 		&event.Status, &event.OccurredAt, &event.CompletedAt,
 		&event.Route.RequestID, &event.Route.RequestedModel, &event.Route.RouteKind,
 		&event.Route.ModelAlias, &event.Route.ProviderName, &event.Route.ProviderModel,
-		&event.Route.Protocol, &streaming, &tools, &thinking, &event.Route.HTTPStatus,
+		&event.Route.Protocol, &event.Route.ClassifierSelectionSource,
+		&event.Route.ClassifierActiveAlias, &streaming, &tools, &thinking, &event.Route.HTTPStatus,
 		&event.Route.ErrorClass, &event.Route.LatencyMS, &usageObserved,
 		&event.Route.Usage.InputTokens, &event.Route.Usage.OutputTokens,
 		&event.Route.Usage.CacheReadTokens, &event.Route.Usage.CacheWriteTokens,

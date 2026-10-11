@@ -18,25 +18,26 @@ import (
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
-func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, modelAlias string, disableTools bool, authMode, permissionMode string) {
+func writeLaunchSummary(ctx context.Context, out io.Writer, s *store.Store, gatewayURL string, sessionID int64, pid int, resolved resolvedLaunch, permissionMode string) {
 	fmt.Fprintf(out, "Claude Code launched through %s (session=%d pid=%d)\n", gatewayURL, sessionID, pid)
+	modelAlias := resolved.modelAlias
 	if modelAlias != "" {
 		fmt.Fprintf(out, "Selected ccr model alias %q is exposed to Claude Code and used as the startup model.\n", modelAlias)
 		fmt.Fprintf(out, "Requests selecting ccr alias %q are routed through its registered provider.\n", modelAlias)
-		writeLaunchCompatibilitySummary(ctx, out, s, modelAlias)
-		if disableTools {
+		writeLaunchCompatibilitySummary(out, modelAlias, resolved.compatibility)
+		if resolved.disableTools {
 			fmt.Fprintln(out, "Selected route does not support tools; Claude Code tools are disabled for this launch.")
 		}
 	} else {
 		fmt.Fprintln(out, "No ccr startup model selected; Claude Code will use its configured default model.")
 	}
-	writeLaunchAuthSummary(out, authMode)
+	writeLaunchAuthSummary(out, resolved.authMode)
 	writeAutoModeClassifierSummary(out, modelAlias, permissionMode)
-	if providerOnlyLaunchAuthMode(authMode) {
+	if providerOnlyLaunchAuthMode(resolved.authMode) {
 		fmt.Fprintln(out, "Gateway model discovery is requested; registered aliases are exposed through /v1/models.")
 		return
 	}
-	writePreserveAuthModelGuidance(ctx, out, s, disableTools)
+	writePreserveAuthModelGuidance(ctx, out, s, resolved.disableTools)
 }
 
 func writeAutoModeClassifierSummary(out io.Writer, modelAlias, permissionMode string) {
@@ -89,20 +90,30 @@ func writeLaunchAuthSummary(out io.Writer, authMode string) {
 	}
 }
 
-func writeLaunchCompatibilitySummary(ctx context.Context, out io.Writer, s *store.Store, modelAlias string) {
-	model, err := s.GetModel(ctx, modelAlias)
-	if err != nil {
-		fmt.Fprintf(out, "Compatibility metadata unavailable for %q: %v\n", modelAlias, err)
-		return
-	}
-	provider, err := s.GetProvider(ctx, model.ProviderName)
-	if err != nil {
-		fmt.Fprintf(out, "Compatibility metadata unavailable for provider %q: %v\n", model.ProviderName, err)
-		return
-	}
+type launchCompatibilitySummary struct {
+	protocol               string
+	mode                   string
+	tokenCount             string
+	capabilities           string
+	supportsModelDiscovery bool
+}
+
+func snapshotLaunchCompatibility(provider store.Provider) *launchCompatibilitySummary {
 	caps := effectiveProviderCapabilities(provider)
-	fmt.Fprintf(out, "Provider protocol=%s mode=%s token-count=%s capabilities=%s.\n", caps.Protocol, caps.Mode, providerTokenCountMode(provider), providerCapabilitySummary(provider))
-	if !caps.SupportsModelDiscovery {
+	return &launchCompatibilitySummary{
+		protocol: caps.Protocol, mode: caps.Mode,
+		tokenCount: providerTokenCountMode(provider), capabilities: providerCapabilitySummary(provider),
+		supportsModelDiscovery: caps.SupportsModelDiscovery,
+	}
+}
+
+func writeLaunchCompatibilitySummary(out io.Writer, modelAlias string, admitted *launchCompatibilitySummary) {
+	if admitted == nil {
+		fmt.Fprintf(out, "Compatibility metadata unavailable for %q: no provider snapshot was recorded at launch admission.\n", modelAlias)
+		return
+	}
+	fmt.Fprintf(out, "Provider protocol=%s mode=%s token-count=%s capabilities=%s.\n", admitted.protocol, admitted.mode, admitted.tokenCount, admitted.capabilities)
+	if !admitted.supportsModelDiscovery {
 		fmt.Fprintln(out, "Provider model discovery is unavailable; only configured CCR aliases are exposed.")
 	}
 }
@@ -131,23 +142,30 @@ func resolveLaunchModelAlias(ctx context.Context, deps Dependencies, s *store.St
 		if validateErr != nil {
 			return "", validateErr
 		}
-		effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
-		if err != nil {
-			return "", fmt.Errorf("checking model alias %q launch capabilities: %w", requested, err)
-		}
-		capabilities := effectiveProviderCapabilities(provider)
-		if requiresUnavailableResponsesAPI(capabilities, effective.Values) {
-			return "", fmt.Errorf("model alias %q cannot be launched through Claude Code because it requires the OpenAI Responses API, but its effective provider/model capabilities do not support it; it is excluded from /model", requested)
-		}
-		if !supportsClaudeStreaming(capabilities, effective.Values) {
-			return "", fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective provider/model capabilities do not support streaming; it is excluded from /model", requested)
-		}
-		if !supportsClaudeSystemMessages(effective.Values) {
-			return "", fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective model capabilities do not support system messages; it is excluded from /model", requested)
+		if err := validateLaunchModelCapabilities(model, provider); err != nil {
+			return "", err
 		}
 		return requested, nil
 	}
 	return "", nil
+}
+
+func validateLaunchModelCapabilities(model store.Model, provider store.Provider) error {
+	effective, err := modelcap.Effective(model.DiscoveredCapabilities, model.CapabilityOverrides, model.ProviderModel)
+	if err != nil {
+		return fmt.Errorf("checking model alias %q launch capabilities: %w", model.Alias, err)
+	}
+	capabilities := effectiveProviderCapabilities(provider)
+	if requiresUnavailableResponsesAPI(capabilities, effective.Values) {
+		return fmt.Errorf("model alias %q cannot be launched through Claude Code because it requires the OpenAI Responses API, but its effective provider/model capabilities do not support it; it is excluded from /model", model.Alias)
+	}
+	if !supportsClaudeStreaming(capabilities, effective.Values) {
+		return fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective provider/model capabilities do not support streaming; it is excluded from /model", model.Alias)
+	}
+	if !supportsClaudeSystemMessages(effective.Values) {
+		return fmt.Errorf("model alias %q cannot be launched through Claude Code because its effective model capabilities do not support system messages; it is excluded from /model", model.Alias)
+	}
+	return nil
 }
 
 func routableModelAliases(ctx context.Context, s *store.Store, includeToolDisabled bool) ([]string, error) {

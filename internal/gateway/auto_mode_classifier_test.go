@@ -111,7 +111,8 @@ func TestAutoModeClassifierPrefersExplicitAliasAndUpdatesSession(t *testing.T) {
 		t.Run(requestedModel, func(t *testing.T) {
 			h := handler{cfg: Config{Store: s}, activeModel: newActiveModelSelection("active")}
 			route, validationErr := h.selectMessageRouteForRequest(ctx, "session-a", autoModeClassifierRequest(requestedModel))
-			if validationErr != nil || route.model.Alias != "switched" || route.responseModel != requestedModel {
+			if validationErr != nil || route.model.Alias != "switched" || route.responseModel != requestedModel ||
+				route.classifierSelectionSource != store.ClassifierSelectionSourceExplicit || route.classifierActiveAlias != "" {
 				t.Fatalf("explicit classifier route = %#v, error = %#v", route, validationErr)
 			}
 			assertClassifierRoute(t, &h, ctx, "session-a", "switched", "model-switched")
@@ -165,7 +166,8 @@ func TestAutoModeClassifierUsesFirstPartyOnlyWithoutActiveConfiguredAlias(t *tes
 			if validationErr != nil {
 				t.Fatalf("selectRouteForRequest(classifier) error = %#v", validationErr)
 			}
-			if !route.firstPartyAnthropic || route.responseModel != "claude-sonnet-5" {
+			if !route.firstPartyAnthropic || route.responseModel != "claude-sonnet-5" ||
+				route.classifierSelectionSource != store.ClassifierSelectionSourceActive || route.classifierActiveAlias != "" {
 				t.Fatalf("classifier route = %#v, want intentional first-party route", route)
 			}
 		})
@@ -282,7 +284,8 @@ func assertClassifierRoute(t *testing.T, h *handler, ctx context.Context, sessio
 		t.Fatalf("selectRouteForRequest(classifier) error = %#v", validationErr)
 	}
 	if route.firstPartyAnthropic || route.model.Alias != wantAlias || route.model.ProviderModel != wantProviderModel ||
-		route.responseModel != "claude-sonnet-5" {
+		route.responseModel != "claude-sonnet-5" ||
+		route.classifierSelectionSource != store.ClassifierSelectionSourceActive || route.classifierActiveAlias != wantAlias {
 		t.Fatalf("classifier route = %#v, want alias=%q providerModel=%q responseModel=claude-sonnet-5", route, wantAlias, wantProviderModel)
 	}
 }

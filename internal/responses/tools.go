@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"unicode"
 
+	"github.com/hishamkaram/claude-code-router/internal/anthropictoolchange"
 	"github.com/hishamkaram/claude-code-router/internal/cua"
 )
 
@@ -34,8 +34,9 @@ func responsesTools(rawTools []json.RawMessage) (tools []Tool, hasComputer bool,
 }
 
 type anthropicToolChange struct {
-	typeName string
-	toolName string
+	typeName   string
+	toolName   string
+	inlineTool *Tool
 }
 
 func responsesToolsAfterAnthropicChanges(tools []Tool, system json.RawMessage, messages []anthropicMsg) ([]Tool, error) {
@@ -54,30 +55,59 @@ func responsesToolsAfterAnthropicChanges(tools []Tool, system json.RawMessage, m
 		return tools, nil
 	}
 
-	defined := make(map[string]bool, len(tools))
-	active := make(map[string]bool, len(tools))
-	for _, tool := range tools {
-		name := responsesToolName(tool)
-		defined[name] = true
-		active[name] = !tool.deferred
-	}
+	working := append([]Tool(nil), tools...)
+	defined, active := responsesToolState(working)
 	for _, change := range changes {
-		if !defined[change.toolName] {
-			if change.typeName == "tool_reference" {
-				continue
-			}
-			return nil, fmt.Errorf("system %s references unknown tool %q", change.typeName, change.toolName)
+		if err := applyResponsesToolChange(&working, defined, active, change); err != nil {
+			return nil, err
 		}
-		active[change.toolName] = change.typeName != "tool_removal"
 	}
 
+	return activeResponsesTools(working, active), nil
+}
+
+func responsesToolState(tools []Tool) (defined map[string]int, active map[string]bool) {
+	defined = make(map[string]int, len(tools))
+	active = make(map[string]bool, len(tools))
+	for index, tool := range tools {
+		name := responsesToolName(tool)
+		if _, exists := defined[name]; !exists {
+			defined[name] = index
+		}
+		active[name] = !tool.deferred
+	}
+	return defined, active
+}
+
+func applyResponsesToolChange(tools *[]Tool, defined map[string]int, active map[string]bool, change anthropicToolChange) error {
+	if change.inlineTool != nil {
+		if index, exists := defined[change.toolName]; exists {
+			(*tools)[index] = *change.inlineTool
+		} else {
+			defined[change.toolName] = len(*tools)
+			*tools = append(*tools, *change.inlineTool)
+		}
+		active[change.toolName] = true
+		return nil
+	}
+	if _, exists := defined[change.toolName]; !exists {
+		if change.typeName == "tool_reference" {
+			return nil
+		}
+		return fmt.Errorf("system %s references unknown tool %q", change.typeName, change.toolName)
+	}
+	active[change.toolName] = change.typeName != "tool_removal"
+	return nil
+}
+
+func activeResponsesTools(tools []Tool, active map[string]bool) []Tool {
 	filtered := make([]Tool, 0, len(tools))
 	for _, tool := range tools {
 		if active[responsesToolName(tool)] {
 			filtered = append(filtered, tool)
 		}
 	}
-	return filtered, nil
+	return filtered
 }
 
 func responsesToolName(tool Tool) string {
@@ -140,7 +170,7 @@ func appendAnthropicToolChanges(changes []anthropicToolChange, raw json.RawMessa
 		if blockType != "tool_addition" && blockType != "tool_removal" {
 			continue
 		}
-		change, err := parseAnthropicToolChange(rawBlock, blockType)
+		change, err := parseAnthropicToolChange(rawBlock)
 		if err != nil {
 			return nil, err
 		}
@@ -218,65 +248,23 @@ func rawArrayIfPresent(raw json.RawMessage) ([]json.RawMessage, error) {
 	return blocks, nil
 }
 
-func parseAnthropicToolChange(raw json.RawMessage, blockType string) (anthropicToolChange, error) {
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
-		return anthropicToolChange{}, fmt.Errorf("decode system %s block", blockType)
-	}
-	toolRaw, err := anthropicToolReferenceRaw(fields, blockType)
+func parseAnthropicToolChange(raw json.RawMessage) (anthropicToolChange, error) {
+	change, err := anthropictoolchange.Parse(raw)
 	if err != nil {
 		return anthropicToolChange{}, err
 	}
-	name, err := anthropicToolReferenceName(toolRaw, blockType)
+	if change.Kind == anthropictoolchange.Reference {
+		return anthropicToolChange{typeName: change.BlockType, toolName: change.Name}, nil
+	}
+	tool, _, err := responsesTool(change.Definition)
 	if err != nil {
-		return anthropicToolChange{}, err
+		return anthropicToolChange{}, fmt.Errorf("system %s tool definition is invalid: %w", change.BlockType, err)
 	}
-	return anthropicToolChange{typeName: blockType, toolName: name}, nil
-}
-
-func anthropicToolReferenceRaw(fields map[string]json.RawMessage, blockType string) (json.RawMessage, error) {
-	for key := range fields {
-		// cache_control is accepted and dropped. Text system blocks on this route already
-		// tolerate it implicitly (they decode into a struct, so unknown fields fall away);
-		// the strict allowlist here made tool_addition the one system block Claude Code's
-		// prompt-cache marker could not land on.
-		if key != "type" && key != "tool" && key != "cache_control" {
-			return nil, fmt.Errorf("system %s block field %q is not supported by the OpenAI Responses gateway path", blockType, key)
-		}
-	}
-	toolRaw, ok := fields["tool"]
-	if !ok {
-		return nil, fmt.Errorf("system %s block requires a tool reference object", blockType)
-	}
-	return toolRaw, nil
-}
-
-func anthropicToolReferenceName(toolRaw json.RawMessage, blockType string) (string, error) {
-	var reference map[string]json.RawMessage
-	if err := json.Unmarshal(toolRaw, &reference); err != nil || reference == nil {
-		return "", fmt.Errorf("system %s block requires a tool reference object", blockType)
-	}
-	for key := range reference {
-		if key != "type" && key != "name" {
-			return "", fmt.Errorf("system %s tool reference field %q is not supported by the OpenAI Responses gateway path", blockType, key)
-		}
-	}
-	var referenceType string
-	if err := json.Unmarshal(reference["type"], &referenceType); err != nil || referenceType != "tool_reference" {
-		return "", fmt.Errorf("system %s tool reference type %q is not supported by the OpenAI Responses gateway path", blockType, referenceType)
-	}
-	var name string
-	if err := json.Unmarshal(reference["name"], &name); err != nil {
-		return "", fmt.Errorf("system %s tool reference name must be a string", blockType)
-	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return "", fmt.Errorf("system %s tool reference name is required", blockType)
-	}
-	if strings.IndexFunc(name, unicode.IsControl) >= 0 {
-		return "", fmt.Errorf("system %s tool reference name must not contain control characters", blockType)
-	}
-	return name, nil
+	return anthropicToolChange{
+		typeName:   change.BlockType,
+		toolName:   responsesToolName(tool),
+		inlineTool: &tool,
+	}, nil
 }
 
 func responsesTool(raw json.RawMessage) (Tool, bool, error) {

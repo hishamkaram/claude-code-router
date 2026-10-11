@@ -68,6 +68,8 @@ CREATE TABLE sessions (
   active_model_alias TEXT NOT NULL DEFAULT '',
   active_provider_name TEXT NOT NULL DEFAULT '',
   active_provider_model TEXT NOT NULL DEFAULT '',
+  active_protocol TEXT NOT NULL DEFAULT '',
+  active_route_fingerprint TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   ended_at TEXT NOT NULL DEFAULT '',
@@ -125,6 +127,8 @@ CREATE TABLE route_events (
   provider_name TEXT NOT NULL DEFAULT '',
   provider_model TEXT NOT NULL DEFAULT '',
   protocol TEXT NOT NULL DEFAULT '',
+  classifier_selection_source TEXT NOT NULL DEFAULT '',
+  classifier_active_alias TEXT NOT NULL DEFAULT '',
   streaming INTEGER NOT NULL DEFAULT 0,
   tools INTEGER NOT NULL DEFAULT 0,
   thinking INTEGER NOT NULL DEFAULT 0,
@@ -288,6 +292,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   active_model_alias TEXT NOT NULL DEFAULT '',
   active_provider_name TEXT NOT NULL DEFAULT '',
   active_provider_model TEXT NOT NULL DEFAULT '',
+  active_protocol TEXT NOT NULL DEFAULT '',
+  active_route_fingerprint TEXT NOT NULL DEFAULT '',
   started_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   ended_at TEXT NOT NULL DEFAULT '',
@@ -401,6 +407,7 @@ CREATE TABLE IF NOT EXISTS conformance_checks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_launch_state ON sessions(launch_id, state);
+CREATE INDEX IF NOT EXISTS idx_sessions_claude_session_id ON sessions(claude_session_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_agents_launch_status ON agents(launch_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_launch_status ON tasks(launch_id, status);
 CREATE INDEX IF NOT EXISTS idx_event_log_launch_time ON event_log(launch_id, occurred_at DESC);

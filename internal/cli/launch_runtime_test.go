@@ -285,6 +285,8 @@ func TestLaunchHelpDescribesPreserveAuthModelSelection(t *testing.T) {
 	for _, want := range []string{
 		"--auth-mode auto preserves a working Claude subscription or API-key",
 		"CCR uses provider-only local gateway auth",
+		"--resume-route -- --resume <session-id>",
+		"does not choose a default route or query the provider model catalog again",
 		"CCR never chooses a provider implicitly",
 		"--auth-mode provider-only",
 		"retries the same buffered request",

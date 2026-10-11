@@ -2,9 +2,190 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestFindResumeRouteUsesObservedSessionRoute(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	launchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	sessionID, sessionErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: launchID, ClaudeSessionID: "native-session", Source: "startup"})
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	if updateErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "fixture", "model-v1", "openai-compatible", "sha256:fixture"); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	route, routeErr := s.FindResumeRoute(ctx, "native-session")
+	if routeErr != nil {
+		t.Fatal(routeErr)
+	}
+	if route.SourceLaunchID != launchID || route.SourceAuthMode != "provider-only" ||
+		route.ModelAlias != "coder" || route.ProviderName != "fixture" || route.ProviderModel != "model-v1" ||
+		route.Protocol != "openai-compatible" || route.ConfigurationFingerprint != "sha256:fixture" {
+		t.Fatalf("FindResumeRoute() = %#v", route)
+	}
+}
+
+func TestFindResumeRouteRefusesObservedRouteWithoutProtocol(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	launchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	sessionID, sessionErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: launchID, ClaudeSessionID: "native-session", Source: "startup"})
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	if updateErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "fixture", "model-v1", "", "sha256:fixture"); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if _, routeErr := s.FindResumeRoute(ctx, "native-session"); !errors.Is(routeErr, ErrResumeRouteUnavailable) {
+		t.Fatalf("FindResumeRoute() error = %v, want ErrResumeRouteUnavailable", routeErr)
+	}
+}
+
+func TestFindResumeRouteRefusesObservedRouteWithoutFingerprint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	launchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	sessionID, sessionErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: launchID, ClaudeSessionID: "native-session", Source: "startup"})
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	if updateErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "fixture", "model-v1", "openai-compatible", ""); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if _, routeErr := s.FindResumeRoute(ctx, "native-session"); !errors.Is(routeErr, ErrResumeRouteUnavailable) {
+		t.Fatalf("FindResumeRoute() error = %v, want ErrResumeRouteUnavailable", routeErr)
+	}
+}
+
+func TestFindResumeRouteSkipsNewerUnobservedSession(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	oldLaunchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	oldSessionID, sessionErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: oldLaunchID, ClaudeSessionID: "native-session", Source: "startup"})
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	if updateErr := s.UpdateClaudeSessionRoute(ctx, oldSessionID, "registered", "coder", "fixture", "model-v1", "openai-compatible", "sha256:fixture"); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	newLaunchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	if _, upsertErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: newLaunchID, ClaudeSessionID: "native-session", Source: "resume"}); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+	route, routeErr := s.FindResumeRoute(ctx, "native-session")
+	if routeErr != nil {
+		t.Fatal(routeErr)
+	}
+	if route.SourceLaunchID != oldLaunchID || route.ModelAlias != "coder" {
+		t.Fatalf("FindResumeRoute() = %#v", route)
+	}
+}
+
+func TestFindResumeRouteRefusesNewerNonProviderRoute(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	oldLaunchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	oldSessionID, sessionErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: oldLaunchID, ClaudeSessionID: "native-session", Source: "startup"})
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	if updateErr := s.UpdateClaudeSessionRoute(ctx, oldSessionID, "registered", "coder", "fixture", "model-v1", "openai-compatible", "sha256:fixture"); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	newLaunchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	newSessionID, sessionErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: newLaunchID, ClaudeSessionID: "native-session", Source: "resume"})
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	if updateErr := s.UpdateClaudeSessionRoute(ctx, newSessionID, "first-party-anthropic", "", "", "", "anthropic", ""); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if _, routeErr := s.FindResumeRoute(ctx, "native-session"); !errors.Is(routeErr, ErrResumeRouteUnavailable) {
+		t.Fatalf("FindResumeRoute() error = %v, want ErrResumeRouteUnavailable", routeErr)
+	}
+}
+
+func TestFindResumeRouteRefusesUnobservedSession(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	launchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	if _, upsertErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: launchID, ClaudeSessionID: "native-session", Source: "hook-recovery"}); upsertErr != nil {
+		t.Fatal(upsertErr)
+	}
+	if _, routeErr := s.FindResumeRoute(ctx, "native-session"); !errors.Is(routeErr, ErrResumeRouteUnavailable) {
+		t.Fatalf("FindResumeRoute() error = %v, want ErrResumeRouteUnavailable", routeErr)
+	}
+}
+
+func TestFindResumeRouteKeepsSelectedRouteAfterFailedRequest(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s := openMigratedStore(t, ctx)
+	launchID, createErr := s.CreateLaunchWithAuth(ctx, "coder", "pending", "pending", "provider-only", "")
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	sessionID, sessionErr := s.UpsertClaudeSession(ctx, ClaudeSession{LaunchID: launchID, ClaudeSessionID: "native-session", Source: "startup"})
+	if sessionErr != nil {
+		t.Fatal(sessionErr)
+	}
+	if updateErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "fixture", "model-v1", "openai-compatible", "sha256:fixture"); updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	eventID, beginErr := s.BeginRouteEvent(ctx, RouteEvent{
+		LaunchID: launchID, SessionID: sessionID, RequestID: "failed-request", Operation: "messages",
+		RouteKind: "registered", ModelAlias: "coder", ProviderName: "fixture",
+		ProviderModel: "model-v1", Protocol: "openai-compatible",
+	})
+	if beginErr != nil {
+		t.Fatal(beginErr)
+	}
+	if completeErr := s.CompleteRouteEvent(ctx, eventID, "failed", 503, "provider_http", time.Millisecond, TokenUsage{}, nil); completeErr != nil {
+		t.Fatal(completeErr)
+	}
+	route, routeErr := s.FindResumeRoute(ctx, "native-session")
+	if routeErr != nil {
+		t.Fatal(routeErr)
+	}
+	if route.SourceLaunchID != launchID || route.ModelAlias != "coder" {
+		t.Fatalf("FindResumeRoute() = %#v", route)
+	}
+}
 
 func TestRuntimeStateRoundTripAndAbandonment(t *testing.T) {
 	t.Parallel()
@@ -24,7 +205,7 @@ func TestRuntimeStateRoundTripAndAbandonment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertClaudeSession() error = %v", err)
 	}
-	if routeErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "local", "model-v1"); routeErr != nil {
+	if routeErr := s.UpdateClaudeSessionRoute(ctx, sessionID, "registered", "coder", "local", "model-v1", "openai-compatible", "sha256:fixture"); routeErr != nil {
 		t.Fatalf("UpdateClaudeSessionRoute() error = %v", routeErr)
 	}
 
@@ -45,7 +226,8 @@ func TestRuntimeStateRoundTripAndAbandonment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetClaudeSession() error = %v", err)
 	}
-	if session.ActiveModelAlias != "coder" || session.ActiveProviderModel != "model-v1" {
+	if session.ActiveModelAlias != "coder" || session.ActiveProviderModel != "model-v1" ||
+		session.ActiveRouteFingerprint != "sha256:fixture" {
 		t.Fatalf("GetClaudeSession() = %#v", session)
 	}
 	agents, err := s.ListRuntimeAgents(ctx, launchID, sessionID, true)

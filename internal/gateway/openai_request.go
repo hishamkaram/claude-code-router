@@ -67,7 +67,7 @@ func toOpenAIChatRequestWithResolver(ctx context.Context, req anthropicRequest, 
 	if err != nil {
 		return openAIChatRequest{}, nil, err
 	}
-	tools, err = openAIToolsAfterAnthropicChanges(tools, req.Messages)
+	tools, err = openAIToolsAfterAnthropicChanges(tools, req.System, req.Messages)
 	if err != nil {
 		return openAIChatRequest{}, nil, err
 	}
@@ -117,13 +117,11 @@ func openAIMessagesFromRequestWithResolver(ctx context.Context, req anthropicReq
 	messages := make([]openAIMessage, 0, len(req.Messages)+2)
 	var ignoredFields []string
 	if req.System != nil {
-		text, err := anthropicContentText(req.System)
+		systemMessages, err := openAISystemMessagesFromAnthropicContent(req.System)
 		if err != nil {
 			return openAIMessageConversion{}, fmt.Errorf("unsupported system content: %w", err)
 		}
-		if text != "" {
-			messages = append(messages, openAIMessage{Role: "system", Content: text})
-		}
+		messages = append(messages, systemMessages...)
 	}
 	identityAdded := false
 	for _, message := range req.Messages {

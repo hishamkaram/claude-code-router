@@ -105,7 +105,7 @@ func TestOpenAIToolChangesFilterRemovedTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
 	}
-	filtered, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+	filtered, err := openAIToolsAfterAnthropicChanges(tools, nil, []anthropicMessage{{
 		Role: "system",
 		Content: []any{map[string]any{
 			"type":          "tool_removal",
@@ -131,7 +131,7 @@ func TestOpenAIToolChangesRespectDeferredTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
 	}
-	active, err := openAIToolsAfterAnthropicChanges(tools, nil)
+	active, err := openAIToolsAfterAnthropicChanges(tools, nil, nil)
 	if err != nil {
 		t.Fatalf("openAIToolsAfterAnthropicChanges() error = %v", err)
 	}
@@ -139,7 +139,7 @@ func TestOpenAIToolChangesRespectDeferredTools(t *testing.T) {
 		t.Fatalf("initial active tools = %#v, want only bash", active)
 	}
 
-	active, err = openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+	active, err = openAIToolsAfterAnthropicChanges(tools, nil, []anthropicMessage{{
 		Role: "system",
 		Content: []any{map[string]any{
 			"type": "tool_addition",
@@ -164,7 +164,7 @@ func TestOpenAIToolChangesRejectForcedRemovedTool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openAIToolsFromAnthropic() error = %v", err)
 	}
-	filtered, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+	filtered, err := openAIToolsAfterAnthropicChanges(tools, nil, []anthropicMessage{{
 		Role: "system",
 		Content: []any{map[string]any{
 			"type": "tool_removal",
@@ -759,7 +759,7 @@ func TestOpenAIToolChangesAcceptCachedToolAdditionBlock(t *testing.T) {
 	// Claude Code stamps cache_control on the final system block. When tools change
 	// mid-conversation that block is a tool_addition, which used to fail the whole
 	// request with 501 even though text system blocks accept the same field.
-	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+	active, err := openAIToolsAfterAnthropicChanges(tools, nil, []anthropicMessage{{
 		Role: "system",
 		Content: []any{map[string]any{
 			"type":          "tool_addition",
@@ -778,7 +778,7 @@ func TestOpenAIToolChangesAcceptCachedToolAdditionBlock(t *testing.T) {
 func TestOpenAIToolChangesRejectUnknownBlockFields(t *testing.T) {
 	t.Parallel()
 
-	_, err := openAIToolsAfterAnthropicChanges(nil, []anthropicMessage{{
+	_, err := openAIToolsAfterAnthropicChanges(nil, nil, []anthropicMessage{{
 		Role: "system",
 		Content: []any{map[string]any{
 			"type":          "tool_addition",
@@ -805,7 +805,7 @@ func TestOpenAIToolChangesActivateDeferredToolFromToolSearchResult(t *testing.T)
 
 	// Without this the model is told the tool is loaded, asks for it, and the provider
 	// never sees it in the tool list — so the call lands on some other tool entirely.
-	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+	active, err := openAIToolsAfterAnthropicChanges(tools, nil, []anthropicMessage{{
 		Role: "user",
 		Content: []any{map[string]any{
 			"type":        "tool_result",
@@ -836,7 +836,7 @@ func TestOpenAIToolChangesIgnoreToolSearchResultForUndeclaredTool(t *testing.T) 
 	}
 
 	// Must activate nothing rather than fail the request.
-	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{{
+	active, err := openAIToolsAfterAnthropicChanges(tools, nil, []anthropicMessage{{
 		Role: "user",
 		Content: []any{map[string]any{
 			"type": "tool_result",
@@ -866,7 +866,7 @@ func TestOpenAIToolChangesRemovalAfterToolSearchResultStillWins(t *testing.T) {
 	}
 
 	// Availability is chronological: a removal after an activation still removes.
-	active, err := openAIToolsAfterAnthropicChanges(tools, []anthropicMessage{
+	active, err := openAIToolsAfterAnthropicChanges(tools, nil, []anthropicMessage{
 		{Role: "user", Content: []any{map[string]any{
 			"type":    "tool_result",
 			"content": []any{map[string]any{"type": "tool_reference", "tool_name": "gsheets"}},
