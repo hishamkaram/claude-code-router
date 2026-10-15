@@ -100,6 +100,74 @@ func TestResolveProviderRejectsClaudeAccountCredentialRef(t *testing.T) {
 	}
 }
 
+func TestResolveProviderClassifiesCredentialAvailability(t *testing.T) {
+	t.Parallel()
+
+	keychainError := errors.New("keychain service unavailable")
+	tests := []struct {
+		name      string
+		cause     error
+		wantClass bool
+	}{
+		{name: "missing credential", cause: ErrNotFound, wantClass: true},
+		{name: "unavailable keychain", cause: keychainError, wantClass: true},
+		{name: "backend cancellation", cause: context.Canceled},
+		{name: "backend deadline", cause: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			backend := failingBackend{testBackend: testBackend{}, cause: tt.cause}
+			value, err := ResolveProvider(context.Background(), backend, KeyringRef("provider"))
+			if value != "" || !errors.Is(err, tt.cause) {
+				t.Fatalf("ResolveProvider() = %q, %v; cause was not preserved", value, err)
+			}
+			if errors.Is(err, ErrCredentialUnavailable) != tt.wantClass {
+				t.Fatalf("credential availability classification = %v; want %v", err, tt.wantClass)
+			}
+		})
+	}
+}
+
+func TestResolveProviderKeepsValidationAndCancellationDistinct(t *testing.T) {
+	t.Parallel()
+
+	backend := failingBackend{testBackend: testBackend{}, cause: ErrNotFound}
+	_, err := ResolveProvider(context.Background(), backend, "keyring:other/account")
+	if err == nil || errors.Is(err, ErrCredentialUnavailable) || errors.Is(err, ErrNotFound) {
+		t.Fatalf("invalid reference reached credential resolution: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = ResolveProvider(ctx, backend, KeyringRef("provider"))
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, ErrNotFound) || errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatalf("cancellation was not kept distinct from credential availability: %v", err)
+	}
+}
+
+func TestResolveProviderDistinguishesEmptyCredentialAndAnonymousProvider(t *testing.T) {
+	t.Parallel()
+
+	backend := testBackend{}
+	value, err := ResolveProvider(context.Background(), backend, EnvRef("CCR_TEST_KEY"))
+	if value != "" || !errors.Is(err, ErrCredentialUnavailable) {
+		t.Fatalf("empty referenced credential = %q, %v; want unavailable", value, err)
+	}
+	value, err = ResolveProvider(context.Background(), backend, "")
+	if value != "" || err != nil {
+		t.Fatalf("anonymous provider = %q, %v; want no credential", value, err)
+	}
+}
+
+type failingBackend struct {
+	testBackend
+	cause error
+}
+
+func (b failingBackend) Resolve(context.Context, string) (string, error) {
+	return "", b.cause
+}
+
 func TestKeyringStoreErrorUsesCredentialSpecificGuidance(t *testing.T) {
 	t.Parallel()
 

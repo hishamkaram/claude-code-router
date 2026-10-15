@@ -16,7 +16,10 @@ const (
 	fileSecretPerm os.FileMode = 0o600
 )
 
-var ErrNotFound = errors.New("secret not found")
+var (
+	ErrNotFound              = errors.New("secret not found")
+	ErrCredentialUnavailable = errors.New("provider credential unavailable")
+)
 
 type Backend interface {
 	Available(ctx context.Context) error
@@ -203,10 +206,23 @@ func ResolveProvider(ctx context.Context, backend Backend, ref string) (string, 
 		return "", fmt.Errorf("validating provider secret reference: %w", err)
 	}
 	value, err := backend.Resolve(ctx, ref)
-	if err != nil {
-		return "", err
+	if contextErr := ctx.Err(); contextErr != nil {
+		if err != nil {
+			return "", fmt.Errorf("%w: %w", contextErr, err)
+		}
+		return "", contextErr
 	}
-	return strings.TrimSpace(value), nil
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %w", ErrCredentialUnavailable, err)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%w: resolved secret is empty", ErrCredentialUnavailable)
+	}
+	return value, nil
 }
 
 func RedactRef(ref string) string {

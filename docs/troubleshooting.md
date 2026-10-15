@@ -92,6 +92,21 @@ Check that the API-key environment variable is present in the shell that starts
 CCR, or that the configured key file is a regular file with mode `0600`. Do not
 print the key while debugging.
 
+When a CLI command returns a typed provider credential-resolution error, CCR
+exits with status `77`: a valid configured provider secret reference could not
+be resolved, or resolved to an empty value. This includes an unavailable
+environment variable, key file, or OS keychain credential. The diagnostic names
+the operation and redacts file/keychain references; no credential is printed.
+This is a local credential prerequisite, not proof of an upstream HTTP 401.
+Invalid references, cancellation, deadlines, and other command errors retain
+exit status `1`. An anonymous provider with no secret reference is unchanged.
+
+Check credential availability in the same shell or service context that runs
+CCR. A successful model listing does not test secret access. If a keychain
+credential works in a terminal but cannot be read by a background runner, keep
+the failed result and resolve that runner's credential access explicitly; CCR
+does not change keychain permissions or silently choose another route.
+
 Use bounded live diagnostics when configuration checks pass but routing fails:
 
 ```bash
