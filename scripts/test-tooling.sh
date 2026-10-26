@@ -86,4 +86,66 @@ fi
 grep -F 'is required' "$scratch/result" > /dev/null
 test ! -e "$CCR_TOOL_FIXTURE_CALLS"
 
+mkdir -p "$scratch/Xcode with spaces.app/Contents/Developer"
+cat > "$scratch/tools with spaces/xcrun" <<'EOF'
+#!/bin/sh
+test "$1" = swiftc && test "$2" = --version || exit 9
+printf '%s\n' "$CCR_SWIFT_FIXTURE_VERSION"
+exit "$CCR_SWIFT_FIXTURE_EXIT"
+EOF
+chmod +x "$scratch/tools with spaces/xcrun"
+export CCR_SWIFT_FIXTURE_VERSION='Apple Swift version 6.3.1'
+export CCR_SWIFT_FIXTURE_EXIT=0
+run_swift_selection() {
+    rm -f "$scratch/github-env"
+    DEVELOPER_DIR="$scratch/Xcode with spaces.app/Contents/Developer" \
+        GITHUB_ENV="$scratch/github-env" PATH="$scratch/tools with spaces:$PATH" \
+        sh "$project_dir/scripts/select-codeql-swift.sh" > "$scratch/result" 2>&1
+}
+for CCR_SWIFT_FIXTURE_VERSION in \
+    'Apple Swift version 6.0' \
+    'Apple Swift version 6.1.2' \
+    'Apple Swift version 6.2.1' \
+    'Apple Swift version 6.3.1' \
+    'swift-driver version: 1.148.6 Apple Swift version 6.3.1 (swiftlang-6.3.1.1.2 clang-2100.0.123.102)'; do
+    run_swift_selection
+    test "$(cat "$scratch/github-env")" = "DEVELOPER_DIR=$scratch/Xcode with spaces.app/Contents/Developer"
+done
+for CCR_SWIFT_FIXTURE_VERSION in \
+    'Apple Swift version 6.4' 'Apple Swift version 6.30' \
+    'Apple Swift version 5.9' 'Swift version 6.2-dev' ''; do
+    if run_swift_selection; then
+        echo 'unsupported Swift compiler unexpectedly passed' >&2
+        exit 1
+    fi
+    test ! -e "$scratch/github-env"
+    grep -F 'requires a supported Apple Swift compiler' "$scratch/result" > /dev/null
+done
+CCR_SWIFT_FIXTURE_VERSION='Apple Swift version 6.3.1'
+CCR_SWIFT_FIXTURE_EXIT=7
+if run_swift_selection; then
+    echo 'failed Swift compiler unexpectedly passed' >&2
+    exit 1
+fi
+test ! -e "$scratch/github-env"
+grep -F 'Unable to read' "$scratch/result" > /dev/null
+CCR_SWIFT_FIXTURE_EXIT=0
+for missing_variable in DEVELOPER_DIR GITHUB_ENV; do
+    if DEVELOPER_DIR="$scratch/Xcode with spaces.app/Contents/Developer" \
+        GITHUB_ENV="$scratch/github-env" env -u "$missing_variable" \
+        sh "$project_dir/scripts/select-codeql-swift.sh" > "$scratch/result" 2>&1; then
+        echo "missing $missing_variable unexpectedly passed" >&2
+        exit 1
+    fi
+    test ! -e "$scratch/github-env"
+    grep -F "$missing_variable must" "$scratch/result" > /dev/null
+done
+rm -rf "$scratch/Xcode with spaces.app"
+if run_swift_selection; then
+    echo 'missing Xcode installation unexpectedly passed' >&2
+    exit 1
+fi
+test ! -e "$scratch/github-env"
+grep -F 'Xcode not found' "$scratch/result" > /dev/null
+
 echo 'tooling tests passed'
