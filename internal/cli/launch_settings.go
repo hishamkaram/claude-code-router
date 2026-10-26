@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
-	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
@@ -17,7 +16,7 @@ const observerTokenHeader = "X-CCR-Observer-Token"
 
 type launchSettingsOptions struct {
 	IncludeToolDisabled          bool
-	FamilyRoutingEnabled         bool
+	Environment                  map[string]string
 	PinnedRoute                  *gateway.PinnedRoute
 	LifecycleEnabled             bool
 	StatuslineEnabled            bool
@@ -45,7 +44,9 @@ type claudeHookMatcher struct {
 
 func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launchSettingsOptions) (launchSettingsResult, error) {
 	settings := make(map[string]any, 4)
-	addLaunchFamilyRouting(settings, options.FamilyRoutingEnabled)
+	if len(options.Environment) != 0 {
+		settings["env"] = options.Environment
+	}
 	result := launchSettingsResult{}
 	if err := addLaunchAvailableModels(ctx, s, options.IncludeToolDisabled, options.PinnedRoute, settings); err != nil {
 		return launchSettingsResult{}, err
@@ -70,13 +71,6 @@ func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launch
 	}
 	result.JSON = string(encoded)
 	return result, nil
-}
-
-func addLaunchFamilyRouting(settings map[string]any, enabled bool) {
-	if !enabled {
-		return
-	}
-	settings["env"] = modelrouting.DefaultModelEnvironment()
 }
 
 func addLaunchStatusline(settings map[string]any, options launchSettingsOptions) (string, error) {

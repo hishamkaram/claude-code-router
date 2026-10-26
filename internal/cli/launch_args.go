@@ -266,6 +266,12 @@ func parseLaunchCUAExternalTokenEnv(value string) (string, error) {
 }
 
 func reservedLaunchExternalTokenEnvName(value string) bool {
+	for _, name := range cloudProviderSelectors() {
+		if strings.EqualFold(name, value) {
+			return true
+		}
+	}
+	value = strings.ToUpper(value)
 	switch value {
 	case "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
 		"ANTHROPIC_CUSTOM_MODEL_OPTION", "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION",
@@ -467,6 +473,9 @@ func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, pe
 }
 
 func validateLaunchPassthroughArgs(args []string) error {
+	if findLaunchOption(args, "--settings") != "" {
+		return fmt.Errorf("--settings cannot override CCR required routing settings; use native user/project/local settings instead")
+	}
 	for _, arg := range args {
 		if arg == "--" {
 			break
@@ -488,14 +497,11 @@ func validateLaunchPassthroughArgs(args []string) error {
 	return nil
 }
 
-func validateDynamicLaunchPassthroughArgs(args []string, disableTools, hasSettings bool) error {
+func validateDynamicLaunchPassthroughArgs(args []string, disableTools bool) error {
 	if disableTools {
 		if option := findLaunchOption(args, "--tools", "--mcp-config", "--plugin-dir", "--plugin-url"); option != "" {
 			return fmt.Errorf("selected route does not support tools; %s cannot override CCR's tool disablement", option)
 		}
-	}
-	if hasSettings && findLaunchOption(args, "--settings") != "" {
-		return fmt.Errorf("--settings cannot override CCR's model allowlist for this launch")
 	}
 	return nil
 }

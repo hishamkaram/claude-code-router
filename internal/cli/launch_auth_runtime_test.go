@@ -106,7 +106,7 @@ func TestLaunchAutoProviderModelWithoutClaudeAuthUsesProviderOnly(t *testing.T) 
 		t.Fatalf("provider-only launch env missing local token: %s", launcher.environmentSummary())
 	}
 	if !launcher.unsetsEnv("ANTHROPIC_API_KEY") || !launcher.unsetsEnv("CLAUDE_CODE_OAUTH_TOKEN") ||
-		!launcher.unsetsEnv("CLAUDE_CODE_OAUTH_REFRESH_TOKEN") || !launcher.unsetsEnv("CCR_TEST_PROVIDER_TOKEN") {
+		!launcher.unsetsEnv("CLAUDE_CODE_OAUTH_REFRESH_TOKEN") || launcher.unsetsEnv("CCR_TEST_PROVIDER_TOKEN") {
 		t.Fatalf("provider-only launch env did not isolate credentials: %s", launcher.environmentSummary())
 	}
 	if launcher.hasEnvPrefix("ANTHROPIC_CUSTOM_HEADERS=") {

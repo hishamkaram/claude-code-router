@@ -86,6 +86,13 @@ unset key
 If keychain storage is unavailable, use an environment-variable or `0600` file
 reference.
 
+Exported provider keys remain available to Claude Code and its extensions even
+when a registered provider references the same variable. File/keychain-resolved
+provider keys and pooled account OAuth credentials are never injected into that
+environment. Use those reference types when the provider credential should stay
+inside CCR. See [user environment and plugins](routing.md#user-environment-and-plugins)
+for reserved authentication names, settings precedence, and the CUA-token exception.
+
 ## OpenAI Responses API
 
 Responses routing is an explicit provider capability because an

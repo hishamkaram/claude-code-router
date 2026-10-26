@@ -407,19 +407,17 @@ func TestValidateDynamicLaunchPassthroughArgs(t *testing.T) {
 		name         string
 		args         []string
 		disableTools bool
-		hasSettings  bool
 		wantErr      string
 	}{
 		{name: "allows Claude Code options", args: []string{"--chrome", "--verbose"}},
-		{name: "allows reserved-looking prompt after terminator", args: []string{"--", "--tools=Read"}, disableTools: true, hasSettings: true},
+		{name: "allows reserved-looking prompt after terminator", args: []string{"--", "--tools=Read"}, disableTools: true},
 		{name: "rejects tool override", args: []string{"--tools", "Read"}, disableTools: true, wantErr: "does not support tools"},
 		{name: "rejects MCP tool override", args: []string{"--mcp-config", "server.json"}, disableTools: true, wantErr: "does not support tools"},
-		{name: "rejects settings override", args: []string{"--settings", "{}"}, hasSettings: true, wantErr: "model allowlist"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateDynamicLaunchPassthroughArgs(tt.args, tt.disableTools, tt.hasSettings)
+			err := validateDynamicLaunchPassthroughArgs(tt.args, tt.disableTools)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("validateDynamicLaunchPassthroughArgs() error = %v", err)

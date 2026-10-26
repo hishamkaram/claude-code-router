@@ -1,112 +1,90 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/hishamkaram/claude-code-router/internal/cua"
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
+	"github.com/hishamkaram/claude-code-router/internal/modelrouting"
 	"github.com/hishamkaram/claude-code-router/internal/store"
 )
 
 type launchEnvironmentOptions struct {
-	GatewayURL             string
-	Token                  string
-	ObserverToken          string
-	LaunchID               int64
-	ModelAlias             string
-	ModelID                string
-	DisableTools           bool
-	AuthMode               string
-	ClaudeAccountName      string
-	ProviderSecretEnvNames []string
-	ExternalTokenEnv       string
+	GatewayURL        string
+	Token             string
+	ObserverToken     string
+	LaunchID          int64
+	ModelAlias        string
+	ModelID           string
+	DisableTools      bool
+	AuthMode          string
+	ClaudeAccountName string
+	ExternalTokenEnv  string
 }
 
-func launchClaudeEnv(options launchEnvironmentOptions) ClaudeEnvironment {
-	unset := []string{
-		"CLAUDE_CODE_USE_GATEWAY",
-		statuslineGatewayURLEnv,
-		statuslineTokenEnv,
-		statuslineClaudeAccountEnv,
+// launchClaudeEnv owns CCR's immutable overlay. Ordinary caller variables are
+// inherited by the workload launchers; only explicit entries below change them.
+func launchClaudeEnv(options launchEnvironmentOptions) launchEnvironment {
+	env := launchEnvironment{}
+	for _, name := range cloudProviderSelectors() {
+		env.unset(name, true)
 	}
-	for _, name := range options.ProviderSecretEnvNames {
-		if options.AuthMode == launchAuthModePreserve && name == "ANTHROPIC_API_KEY" {
-			continue
-		}
-		unset = append(unset, name)
+	for _, name := range []string{statuslineGatewayURLEnv, statuslineTokenEnv, statuslineClaudeAccountEnv} {
+		env.unset(name, false)
 	}
 	if options.ExternalTokenEnv != "" {
-		unset = append(unset, options.ExternalTokenEnv)
+		env.unset(options.ExternalTokenEnv, false)
 	}
-	env := ClaudeEnvironment{Set: make([]string, 0, 14), Unset: unset}
-	env.Set = append(
-		env.Set,
-		"ANTHROPIC_BASE_URL="+options.GatewayURL,
-		"CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1",
-		fmt.Sprintf("CCR_LAUNCH_ID=%d", options.LaunchID),
-	)
+	env.set("ANTHROPIC_BASE_URL", options.GatewayURL, true)
+	env.set("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", "1", true)
+	env.set("CCR_LAUNCH_ID", fmt.Sprint(options.LaunchID), false)
 	if options.ObserverToken != "" {
-		env.Set = append(env.Set,
-			statuslineGatewayURLEnv+"="+options.GatewayURL,
-			statuslineTokenEnv+"="+options.ObserverToken,
-		)
+		env.set(statuslineGatewayURLEnv, options.GatewayURL, false)
+		env.set(statuslineTokenEnv, options.ObserverToken, false)
 	}
 	if options.DisableTools {
-		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=")
+		env.set("ENABLE_TOOL_SEARCH", "", true)
+		env.set("CLAUDE_CODE_SIMPLE", "1", true)
 	} else {
-		// Claude Code disables deferred MCP tool search behind non-first-party gateways
-		// unless this is enabled. CCR translates the resulting tool_reference blocks.
-		env.Set = append(env.Set, "ENABLE_TOOL_SEARCH=true")
+		// This default enables deferred MCP tools behind non-first-party gateways.
+		// A native user setting may still opt out.
+		env.set("ENABLE_TOOL_SEARCH", "true", false)
 	}
-	switch options.AuthMode {
-	case launchAuthModeProviderOnly, launchAuthModeGatewayToken:
-		env.Unset = append(env.Unset,
-			"ANTHROPIC_API_KEY",
-			"ANTHROPIC_CUSTOM_HEADERS",
-			"CLAUDE_CODE_OAUTH_TOKEN",
-			"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-			"CLAUDE_CODE_OAUTH_SCOPES",
-		)
-		env.Set = append(env.Set, "ANTHROPIC_AUTH_TOKEN="+options.Token)
-	case launchAuthModeSubscriptionPool:
-		env.Unset = append(env.Unset,
-			"ANTHROPIC_API_KEY",
-			"ANTHROPIC_CUSTOM_HEADERS",
-			"CLAUDE_CODE_OAUTH_TOKEN",
-			"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-			"CLAUDE_CODE_OAUTH_SCOPES",
-		)
-		env.Set = append(env.Set,
-			"ANTHROPIC_AUTH_TOKEN="+options.Token,
-			"ANTHROPIC_CUSTOM_HEADERS="+gatewaySessionHeaderValue(options.Token),
-			statuslineClaudeAccountEnv+"="+options.ClaudeAccountName,
-		)
-	default:
-		env.Unset = append(env.Unset, "ANTHROPIC_AUTH_TOKEN")
-		env.Set = append(env.Set,
-			"ANTHROPIC_CUSTOM_HEADERS="+launchAnthropicCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS"), options.Token),
-		)
+	addLaunchAuthentication(&env, options)
+	if options.ModelID != "" {
+		env.set("ANTHROPIC_CUSTOM_MODEL_OPTION", options.ModelID, true)
+		env.set("ANTHROPIC_CUSTOM_MODEL_OPTION_NAME", "CCR "+options.ModelAlias, true)
+		env.set("ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION", "Model alias registered in ccr", true)
+		for name, value := range modelrouting.DefaultModelEnvironment() {
+			env.set(name, value, true)
+		}
 	}
-	if options.DisableTools {
-		env.Set = append(env.Set, "CLAUDE_CODE_SIMPLE=1")
-	}
-	if options.ModelID == "" {
-		return env
-	}
-	env.Set = append(
-		env.Set,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION="+options.ModelID,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME=CCR "+options.ModelAlias,
-		"ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION=Model alias registered in ccr",
-	)
 	return env
+}
+
+func addLaunchAuthentication(env *launchEnvironment, options launchEnvironmentOptions) {
+	switch options.AuthMode {
+	case launchAuthModeProviderOnly, launchAuthModeGatewayToken, launchAuthModeSubscriptionPool:
+		for _, name := range []string{
+			"ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS",
+			"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
+		} {
+			env.unset(name, false)
+		}
+		env.set("ANTHROPIC_AUTH_TOKEN", options.Token, false)
+		if options.AuthMode == launchAuthModeSubscriptionPool {
+			env.set("ANTHROPIC_CUSTOM_HEADERS", gatewaySessionHeaderValue(options.Token), false)
+			env.set(statuslineClaudeAccountEnv, options.ClaudeAccountName, false)
+		}
+	default:
+		env.unset("ANTHROPIC_AUTH_TOKEN", false)
+		env.set("ANTHROPIC_CUSTOM_HEADERS", launchAnthropicCustomHeaders(os.Getenv("ANTHROPIC_CUSTOM_HEADERS"), options.Token), false)
+	}
 }
 
 func managedCUAExternalToken(invocation launchInvocation) string {
@@ -114,48 +92,6 @@ func managedCUAExternalToken(invocation launchInvocation) string {
 		return ""
 	}
 	return strings.TrimSpace(os.Getenv(invocation.cuaTokenEnv))
-}
-
-func configuredProviderSecretEnvNames(ctx context.Context, s *store.Store) ([]string, error) {
-	configuredProviders, err := s.ListProviders(ctx)
-	if err != nil {
-		return nil, err
-	}
-	names := make(map[string]struct{})
-	for index := range configuredProviders {
-		provider := &configuredProviders[index]
-		if name, found := providerSecretEnvName(provider.SecretRef); found {
-			names[name] = struct{}{}
-		}
-	}
-	result := make([]string, 0, len(names))
-	for name := range names {
-		result = append(result, name)
-	}
-	slices.Sort(result)
-	return result, nil
-}
-
-func providerSecretEnvName(secretRef string) (string, bool) {
-	name, found := strings.CutPrefix(secretRef, "env:")
-	return name, found && name != ""
-}
-
-func unionProviderSecretEnvNames(groups ...[]string) []string {
-	names := make(map[string]struct{})
-	for _, group := range groups {
-		for _, name := range group {
-			if name != "" {
-				names[name] = struct{}{}
-			}
-		}
-	}
-	result := make([]string, 0, len(names))
-	for name := range names {
-		result = append(result, name)
-	}
-	slices.Sort(result)
-	return result
 }
 
 func launchClaudeModelID(model store.Model) (string, error) {

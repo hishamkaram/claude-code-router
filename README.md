@@ -414,6 +414,13 @@ policy, currently 30 days and 10,000 combined events, and can be purged with
 [provider credential handling](docs/providers.md#credentials) for the supported
 secret sources.
 
+Claude Code, plugins, hooks, and MCP servers inherit the caller's exported
+environment, including keys also registered with providers. CCR does not read
+shell startup files or create a separate user profile. Only its explicit routing,
+authentication, and tool controls override that environment; the CUA executor
+token remains private. File/keychain provider credentials stay inside CCR.
+See [environment inheritance and settings precedence](docs/routing.md#user-environment-and-plugins).
+
 Computer-use automation has two explicit boundaries. Direct first-party
 Anthropic CUA is client-managed: Claude Code owns the browser, approvals, and
 tool-result loop. OpenAI Responses computer use is managed by CCR only. Without

@@ -141,6 +141,54 @@ credential-isolation wrapper is unavailable.
 The `--no-history`, `--no-lifecycle`, and `--no-statusline` flags disable their
 respective feature for one launch.
 
+## User Environment and Plugins
+
+CCR's foreground and managed Claude workloads inherit the caller's exported
+environment. Registering `env:NAME` as a provider credential does not remove
+`NAME` from Claude, hooks, plugins, MCP servers, or their children. This matches
+running Claude in that shell: trusted extensions can read its exported keys.
+CCR does not read shell startup files, source profiles, or load dotenv files.
+Variables that were never exported are unavailable. Managed jobs retain the
+submitting process's environment snapshot; later shell exports do not update it.
+`HOME`, `PATH`, XDG directories, and `CLAUDE_CONFIG_DIR` remain caller-owned.
+
+CCR owns a narrow launch overlay: gateway URL and discovery, selected model and
+family routing, launch/statusline identity, tool controls, and authentication
+for the chosen mode. It disables these competing provider selectors:
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+`CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`,
+`CLAUDE_CODE_USE_ANTHROPIC_AWS`, and `CLAUDE_CODE_USE_GATEWAY`.
+The launch notice names nonempty inherited variables controlled by CCR without
+showing values. Provider-only, gateway-token and subscription-pool modes remove
+`ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, and the
+`CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, and
+`CLAUDE_CODE_OAUTH_SCOPES` values; pool mode installs its own local session header.
+Preserve mode removes stale `ANTHROPIC_AUTH_TOKEN` and merges the local session
+header into the caller's `ANTHROPIC_CUSTOM_HEADERS`. Plugins needing one of
+these reserved names see the selected auth mode's value, not necessarily the
+original shell value. The designated CUA external-executor token remains withheld.
+
+Normal Claude settings sources, plugin configuration, and native subprocess
+scrubbing still apply; CCR does not disable user-selected scrubbing. For ordinary
+plugin variables, native `settings.env` precedence can override shell exports.
+CCR pins only non-secret routing/model controls in its private temporary
+`--settings` file. Credentials and custom headers stay in process environment.
+A settings override that removes every valid local launch credential produces
+an actionable gateway 401. User `--settings` passthrough conflicts with CCR's
+required override and is rejected before launch; use native user/project/local
+settings instead. User tool-search preferences still apply on tools-enabled
+routes. Chat-only routes pin bare mode and disable plugin, hook, MCP and skill
+auto-discovery deliberately.
+
+Managed policy remains authoritative. CCR requires compatible policy; managed
+routing overrides and signed-in Claude apps gateway sessions that override
+ordinary environment routing are unsupported and are not detected by CCR.
+Proxy inheritance is unchanged; verifying loopback gateway behavior with proxies
+is a separate hardening follow-up. Nested Claude processes inherit the parent's
+CCR routing credentials and cannot use that gateway after the parent launch ends.
+Nested-session attribution and bare-mode lifecycle-hook execution are not
+verified by the environment inheritance tests.
+
 ## Authentication Modes
 
 ### `auto` (default)

@@ -135,10 +135,6 @@ func resolveRecordedResumeRoute(ctx context.Context, deps Dependencies, s *store
 	if err != nil {
 		return resolvedLaunch{}, err
 	}
-	providerSecretEnvNames, err := resumeRouteProviderSecretEnvNames(ctx, s, provider)
-	if err != nil {
-		return resolvedLaunch{}, fmt.Errorf("reading configured provider secret environment names: %w", err)
-	}
 	pinnedRoute, err := gateway.NewPinnedRouteWithSecret(model, provider, providerSecret)
 	if err != nil {
 		return resolvedLaunch{}, err
@@ -155,19 +151,7 @@ func resolveRecordedResumeRoute(ctx context.Context, deps Dependencies, s *store
 		modelAlias: route.ModelAlias, claudeModelID: claudeModelID,
 		authMode: route.SourceAuthMode, disableTools: disableTools,
 		compatibility: snapshotLaunchCompatibility(provider), pinnedRoute: &pinnedRoute,
-		providerSecretEnvNames: providerSecretEnvNames,
 	}, nil
-}
-
-func resumeRouteProviderSecretEnvNames(ctx context.Context, s *store.Store, admittedProvider store.Provider) ([]string, error) {
-	names, err := configuredProviderSecretEnvNames(ctx, s)
-	if err != nil {
-		return nil, err
-	}
-	if admittedName, found := providerSecretEnvName(admittedProvider.SecretRef); found {
-		names = unionProviderSecretEnvNames(names, []string{admittedName})
-	}
-	return names, nil
 }
 
 func validateRecordedResumeRoute(ctx context.Context, deps Dependencies, s *store.Store, route store.ResumeRoute) (store.Model, store.Provider, string, error) {
