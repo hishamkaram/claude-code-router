@@ -1,6 +1,7 @@
 # Claude Code Router
 
 [![CI](https://github.com/hishamkaram/claude-code-router/actions/workflows/ci.yml/badge.svg)](https://github.com/hishamkaram/claude-code-router/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/hishamkaram/claude-code-router/badge)](https://scorecard.dev/viewer/?uri=github.com/hishamkaram/claude-code-router)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 `ccr` is a local gateway for using Claude Code with first-party Anthropic models

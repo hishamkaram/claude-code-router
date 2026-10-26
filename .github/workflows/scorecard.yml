@@ -1,0 +1,75 @@
+name: OpenSSF Scorecard
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '43 5 * * 2'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  analysis:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      issues: read
+      pull-requests: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - name: Upload report artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 14
+      - name: Upload security report
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          sarif_file: results.sarif
+          category: openssf-scorecard
+
+  verify-publication:
+    name: Verify Scorecard publication
+    needs: analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Require public results for this commit
+        env:
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent --show-error --max-time 15 \
+              "https://api.scorecard.dev/projects/github.com/${GITHUB_REPOSITORY}?run=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${attempt}" \
+              --output "$RUNNER_TEMP/scorecard.json" && \
+              python3 -c 'import json, os, sys; result = json.load(open(sys.argv[1])); sys.exit(result.get("repo", {}).get("commit") != os.environ["EXPECTED_COMMIT"])' \
+                "$RUNNER_TEMP/scorecard.json"; then
+              echo 'Public Scorecard results match this commit.'
+              exit 0
+            fi
+            echo "Waiting for public Scorecard results (attempt $attempt/20)."
+            sleep 15
+          done
+          echo 'Scorecard publication was not verified for this commit.' >&2
+          exit 1
