@@ -17,10 +17,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
-  attestations: write
-  id-token: write
-  packages: write
+  contents: read
 
 jobs:
   checks:
@@ -46,6 +43,11 @@ jobs:
     needs: [checks, fixture-matrix, full-live]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

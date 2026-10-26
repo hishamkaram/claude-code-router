@@ -3,6 +3,16 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
+## v0.6.14
+
+- Enable GitHub dependency alerts and security-fix PRs, secret scanning, and
+  push protection. Expand Dependabot updates to Docker alongside Go
+  modules and GitHub Actions; updates remain review-first.
+- Add CodeQL scans for Go, JavaScript, Python, Actions, and Swift, plus
+  high/critical dependency review and CodeQL merge protection.
+- Publish OpenSSF Scorecard reports and a public badge. Keep its numeric score
+  advisory, and limit release write permissions to publishing jobs.
+
 ## v0.6.11
 
 - Restore the exact recorded provider route when a native Claude Code session
