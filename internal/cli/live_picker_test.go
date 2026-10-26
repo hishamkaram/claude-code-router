@@ -32,6 +32,7 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
 
+	ccrExecutable := buildLiveCCRExecutable(t, ctx)
 	configureIsolatedLivePickerClaude(t)
 
 	routedModel, provider := newLivePickerProvider(t)
@@ -40,7 +41,7 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	addLivePickerModels(t, ctx, dbPath, provider.URL)
 
-	run := startLivePickerRun(t, ctx, dbPath)
+	run := startLivePickerRun(t, ctx, dbPath, ccrExecutable)
 	defer run.close()
 
 	run.waitForText(t, ctx, "Detected a custom API key")
@@ -65,6 +66,7 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 	run.submit(t, ctx, "Reply with the routed test response.", "sending routed prompt")
 	run.assertRoutedModel(t, ctx, routedModel, "gpt-5")
 	run.waitForText(t, ctx, "picker-route-ok")
+	run.waitForText(t, ctx, "CCR | gpt | litellm/gpt-5")
 
 	run.submit(t, ctx, "/exit", "exiting Claude Code")
 	run.waitForExit(t, ctx)
@@ -107,19 +109,20 @@ func newLivePickerProvider(t *testing.T) (chan string, *httptest.Server) {
 	return routedModel, provider
 }
 
-func startLivePickerRun(t *testing.T, ctx context.Context, dbPath string) *livePickerRun {
+func startLivePickerRun(t *testing.T, ctx context.Context, dbPath, ccrExecutable string) *livePickerRun {
 	t.Helper()
 
-	launcher := &livePickerLauncher{started: make(chan livePickerSession, 1)}
+	launcher := &livePickerLauncher{started: make(chan livePickerSession, 1), statuslineExecutable: ccrExecutable}
 	commandOut := &bytes.Buffer{}
 	commandErr := &bytes.Buffer{}
 	commandDone := make(chan error, 1)
 	go func() {
 		cmd := NewRootCommand(ctx, Dependencies{
-			In:       strings.NewReader(""),
-			Out:      commandOut,
-			Err:      commandErr,
-			Launcher: launcher,
+			In:             strings.NewReader(""),
+			Out:            commandOut,
+			Err:            commandErr,
+			Launcher:       launcher,
+			ExecutablePath: ccrExecutable,
 		})
 		cmd.SetArgs([]string{"--db", dbPath, "launch", "--bare"})
 		commandDone <- cmd.Execute()
@@ -280,8 +283,9 @@ func addLivePickerModels(t *testing.T, ctx context.Context, dbPath, baseURL stri
 }
 
 type livePickerLauncher struct {
-	started chan livePickerSession
-	cwd     string
+	started              chan livePickerSession
+	cwd                  string
+	statuslineExecutable string
 }
 
 type livePickerSession struct {
@@ -290,6 +294,9 @@ type livePickerSession struct {
 }
 
 func (l *livePickerLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, _ io.Reader, _, _ io.Writer) (ClaudeProcess, error) {
+	if err := l.checkStatuslineExecutable(args); err != nil {
+		return nil, err
+	}
 	path, err := exec.LookPath("claude")
 	if err != nil {
 		return nil, fmt.Errorf("finding Claude Code: %w", err)
@@ -313,6 +320,73 @@ func (l *livePickerLauncher) Start(ctx context.Context, args []string, env Claud
 	}()
 	l.started <- livePickerSession{pty: pty, process: process}
 	return process, nil
+}
+
+func (l *livePickerLauncher) checkStatuslineExecutable(args []string) error {
+	if l.statuslineExecutable == "" {
+		return nil
+	}
+	for index, arg := range args {
+		if arg != "--settings" || index+1 >= len(args) {
+			continue
+		}
+		data, err := os.ReadFile(args[index+1])
+		if err != nil {
+			return fmt.Errorf("reading picker settings: %w", err)
+		}
+		var settings struct {
+			StatusLine struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"statusLine"`
+		}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("decoding picker settings: %w", err)
+		}
+		want, err := launchStatuslineCommand(l.statuslineExecutable)
+		if err != nil {
+			return err
+		}
+		if settings.StatusLine.Type != "command" || settings.StatusLine.Command != want {
+			return fmt.Errorf("picker statusline must invoke built CCR %q; got %q", want, settings.StatusLine.Command)
+		}
+		return nil
+	}
+	return errors.New("picker launch is missing private settings")
+}
+
+func TestLivePickerRejectsTestDriverStatusline(t *testing.T) {
+	t.Parallel()
+	executable := filepath.Join(t.TempDir(), "built ccr")
+	launcher := &livePickerLauncher{statuslineExecutable: executable}
+	for _, test := range []struct {
+		name       string
+		executable string
+		wantError  bool
+	}{
+		{name: "built CCR", executable: executable},
+		{name: "test driver fallback", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command, err := launchStatuslineCommand(test.executable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settingsPath := filepath.Join(t.TempDir(), "settings.json")
+			settings := struct {
+				StatusLine struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				} `json:"statusLine"`
+			}{}
+			settings.StatusLine.Type, settings.StatusLine.Command = "command", command
+			writeLivePickerJSON(t, settingsPath, settings)
+			err = launcher.checkStatuslineExecutable([]string{"--settings", settingsPath})
+			if (err != nil) != test.wantError {
+				t.Fatalf("statusline guard error = %v, want error %t", err, test.wantError)
+			}
+		})
+	}
 }
 
 type livePickerProcess struct {
