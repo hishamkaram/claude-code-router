@@ -68,6 +68,56 @@ func liveRealTurnResult(output string) (result string, failed, complete bool) {
 	return "", false, false
 }
 
+// Classify untrusted selection text without returning it or the requested ID.
+func liveRealSelectionSummary(selection, requestedID string) string {
+	lower := strings.ToLower(selection)
+	validationError := strings.Contains(lower, "invalid model") ||
+		strings.Contains(lower, "unknown model") ||
+		strings.Contains(lower, "model not found") ||
+		strings.Contains(lower, "model is not available") ||
+		strings.Contains(lower, "model is not allowed") ||
+		strings.Contains(lower, "not in the list of available models")
+	return fmt.Sprintf("selection_bytes=%d ack_at_start=%t ack_anywhere=%t requested_id_present=%t known_validation_error=%t",
+		len(selection), strings.HasPrefix(selection, "Set model to "),
+		strings.Contains(selection, "Set model to "),
+		requestedID != "" && strings.Contains(selection, requestedID), validationError)
+}
+
+func TestLiveRealSelectionSummary(t *testing.T) {
+	const model = "anthropic.ccr.fixture"
+	for _, test := range []struct {
+		name, selection, requestedID, flags string
+	}{
+		{"acknowledgment", "Set model to " + model, model, "ack_at_start=true ack_anywhere=true requested_id_present=true known_validation_error=false"},
+		{"warning before acknowledgment", "Warning\nSet model to " + model, model, "ack_at_start=false ack_anywhere=true requested_id_present=true known_validation_error=false"},
+		{"validation error", "Invalid model: " + model, model, "ack_at_start=false ack_anywhere=false requested_id_present=true known_validation_error=true"},
+		{"unknown response", "Unrecognized response", model, "ack_at_start=false ack_anywhere=false requested_id_present=false known_validation_error=false"},
+		{"empty response", "", model, "ack_at_start=false ack_anywhere=false requested_id_present=false known_validation_error=false"},
+		{"empty requested ID", "Set model to " + model, "", "ack_at_start=true ack_anywhere=true requested_id_present=false known_validation_error=false"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			want := fmt.Sprintf("selection_bytes=%d %s", len(test.selection), test.flags)
+			if got := liveRealSelectionSummary(test.selection, test.requestedID); got != want {
+				t.Fatalf("selection summary = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestLiveRealSelectionSummaryWithholdsUntrustedText(t *testing.T) {
+	const secret = "ccr-dummy-selection-secret"
+	const model = "anthropic.ccr.private-fixture-alias"
+	selection := "Warning: " + secret + "\nInvalid model: " + model
+	summary := liveRealSelectionSummary(selection, model)
+	if strings.Contains(summary, secret) || strings.Contains(summary, model) || strings.Contains(summary, "Warning") {
+		t.Fatal("selection summary disclosed untrusted text")
+	}
+	want := fmt.Sprintf("selection_bytes=%d ack_at_start=false ack_anywhere=false requested_id_present=true known_validation_error=true", len(selection))
+	if summary != want {
+		t.Fatal("selection summary did not retain the expected safe classifications")
+	}
+}
+
 func TestLiveRealTurnResult(t *testing.T) {
 	for _, test := range []struct {
 		name, output, result string

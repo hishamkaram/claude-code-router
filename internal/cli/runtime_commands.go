@@ -25,6 +25,8 @@ and --db. All other options and positional arguments are passed to Claude Code
 unchanged unless they would override CCR's selected model, generated model
 allowlist, or tool-safety restrictions. For example ccr launch --chrome starts
 Claude Code with its Chrome integration.
+CCR always supplies required non-secret routing settings. Native --settings
+passthrough is rejected; use native user, project, or local settings instead.
 
 Use -- to end CCR option parsing and pass Claude Code options, for example:
   ccr launch --model <alias> -p -- --output-format stream-json --verbose

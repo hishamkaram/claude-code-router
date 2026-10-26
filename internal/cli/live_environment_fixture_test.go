@@ -29,8 +29,19 @@ type liveEnvironmentFixture struct {
 
 func newLiveEnvironmentFixture(t *testing.T) liveEnvironmentFixture {
 	t.Helper()
+	return newLiveEnvironmentFixtureForProject(t, t.TempDir())
+}
+
+func newLiveEnvironmentFixtureForProject(t *testing.T, project string) liveEnvironmentFixture {
+	t.Helper()
+	// Claude keys project trust by its physical working directory. Keep one
+	// canonical path for both that key and the workload launch directory.
+	canonical, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatalf("resolve live environment project: %v", err)
+	}
 	isolateLiveResumeRouteState(t)
-	fixture := liveEnvironmentFixture{plugin: t.TempDir(), reports: t.TempDir(), project: t.TempDir()}
+	fixture := liveEnvironmentFixture{plugin: t.TempDir(), reports: t.TempDir(), project: canonical}
 	t.Chdir(fixture.project)
 	t.Setenv(liveResumeRouteProviderSecretEnv, liveResumeRouteProviderSecret)
 	t.Setenv(liveEnvironmentGenericName, liveEnvironmentGenericValue)
@@ -54,6 +65,34 @@ func newLiveEnvironmentFixture(t *testing.T) liveEnvironmentFixture {
 		Projects  map[string]projectTrust `json:"projects"`
 	}{Onboarded: true, Projects: map[string]projectTrust{fixture.project: {Accepted: true, Seen: 1}}})
 	return fixture
+}
+
+func TestLiveFixtureEnvironmentCanonicalProjectTrust(t *testing.T) {
+	project := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "project-link")
+	if err := os.Symlink(project, alias); err != nil {
+		t.Fatalf("create project path alias: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(project)
+	if err != nil {
+		t.Fatalf("resolve fixture project: %v", err)
+	}
+	fixture := newLiveEnvironmentFixtureForProject(t, alias)
+	data, err := os.ReadFile(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), ".claude.json"))
+	if err != nil {
+		t.Fatalf("read synthetic project trust: %v", err)
+	}
+	var state struct {
+		Projects map[string]struct {
+			Accepted bool `json:"hasTrustDialogAccepted"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("decode synthetic project trust: %v", err)
+	}
+	if fixture.project != canonical || !state.Projects[canonical].Accepted || len(state.Projects) != 1 {
+		t.Fatal("fixture launch directory and its sole trust key must use the canonical project path")
+	}
 }
 
 func (fixture liveEnvironmentFixture) writePlugin(t *testing.T) {

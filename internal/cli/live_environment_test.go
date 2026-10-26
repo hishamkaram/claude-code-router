@@ -161,7 +161,13 @@ func TestLiveFixtureEnvironmentForeground(t *testing.T) {
 	if _, err := liveclaude.Check(ctx); err != nil {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
-	fixture := newLiveEnvironmentFixture(t)
+	// macOS temporary paths can reach the same directory through /var and
+	// /private/var. Exercise that alias on every platform with a symlink.
+	project := filepath.Join(t.TempDir(), "project-link")
+	if err := os.Symlink(t.TempDir(), project); err != nil {
+		t.Fatalf("create project path alias: %v", err)
+	}
+	fixture := newLiveEnvironmentFixtureForProject(t, project)
 	provider := newLiveResumeRouteProvider(t)
 	t.Cleanup(provider.Close)
 	database := filepath.Join(t.TempDir(), "ccr.db")
@@ -170,6 +176,12 @@ func TestLiveFixtureEnvironmentForeground(t *testing.T) {
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	done := make(chan error, 1)
 	t.Cleanup(func() {
+		if t.Failed() {
+			transcript := strings.ToLower(launcher.Transcript())
+			t.Logf("foreground startup diagnostics: trust_prompt=%t onboarding=%t api_key_prompt=%t",
+				strings.Contains(transcript, "trust"), strings.Contains(transcript, "welcome to claude"),
+				strings.Contains(transcript, "detected a custom api key"))
+		}
 		cancel()
 		launcher.Close()
 		select {
@@ -189,6 +201,7 @@ func TestLiveFixtureEnvironmentForeground(t *testing.T) {
 	}()
 	start := launcher.WaitStart(t, ctx, done, out, errOut)
 	start.WaitReady(t, ctx, done)
+	completeLiveEnvironmentForegroundTurn(t, ctx, start, provider)
 	fixture.assertReports(t, ctx)
 	if err := start.Process.Stop(); err != nil {
 		t.Fatalf("stop foreground environment fixture: %v", err)
@@ -202,6 +215,53 @@ func TestLiveFixtureEnvironmentForeground(t *testing.T) {
 	assertLiveResumeRouteNoSecret(t, database, combined)
 	if strings.Contains(combined, liveEnvironmentGenericValue) {
 		t.Fatal("foreground output exposed synthetic plugin credential")
+	}
+}
+
+func completeLiveEnvironmentForegroundTurn(t *testing.T, ctx context.Context, start *liveSubscriptionPTYStart, provider *liveResumeRouteProvider) {
+	t.Helper()
+	snapshot := liveEnvironmentForegroundSnapshot(t, start)
+	if err := waitForPickerState(ctx, snapshot, livePickerPromptReady); err != nil {
+		t.Fatalf("foreground fixture prompt did not become ready: %v", err)
+	}
+	const prompt = "Reply with the synthetic route fixture response."
+	if _, err := start.session.pty.Write([]byte(prompt)); err != nil {
+		t.Fatalf("type foreground fixture prompt: %v", err)
+	}
+	echoed := func(view livePickerSnapshot) bool { return livePickerInputEchoed(view, prompt) }
+	if err := waitForPickerState(ctx, snapshot, echoed); err != nil {
+		t.Fatalf("foreground fixture prompt was not echoed: %v", err)
+	}
+	if _, err := start.session.pty.Write([]byte("\r")); err != nil {
+		t.Fatalf("submit foreground fixture prompt: %v", err)
+	}
+	// Interactive SessionStart hooks run in the background. Native Claude's
+	// first response, rather than an idle terminal, is the initialization boundary.
+	responseReady := func(view livePickerSnapshot) bool {
+		return provider.chatCount() > 0 &&
+			(len(livePickerTextMissing(view, []string{liveResumeRouteInitialResponse})) == 0 ||
+				len(livePickerTextMissing(view, []string{liveResumeRouteResumedResponse})) == 0)
+	}
+	if err := waitForPickerState(ctx, snapshot, responseReady); err != nil {
+		t.Fatalf("foreground fixture did not complete its routed first response: %v", err)
+	}
+}
+
+func liveEnvironmentForegroundSnapshot(t *testing.T, start *liveSubscriptionPTYStart) func() livePickerSnapshot {
+	t.Helper()
+	terminal, consumed := newLivePickerTerminal(), 0
+	return func() livePickerSnapshot {
+		// The existing PTY reader remains the sole stream owner. Derive the
+		// screen incrementally from its append-only, synchronized transcript.
+		stream := start.Transcript.String()
+		if len(stream) < consumed {
+			t.Fatal("foreground fixture transcript was not append-only")
+		}
+		if _, err := terminal.Write([]byte(stream[consumed:])); err != nil {
+			t.Fatalf("render foreground fixture screen: %v", err)
+		}
+		consumed = len(stream)
+		return terminal.Snapshot()
 	}
 }
 

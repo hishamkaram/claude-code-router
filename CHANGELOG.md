@@ -3,6 +3,17 @@
 All notable CCR release changes are recorded here. Release acceptance evidence
 lives under `docs/acceptance/`.
 
+## v0.6.15
+
+- Preserve caller-exported credentials shared by providers and plugins across
+  foreground, print, managed-job, and resume launches. Keep CUA-token and
+  mode-specific authentication protections; never load shell startup files.
+- Pin non-secret gateway/model controls against lower native settings overrides,
+  reject conflicting `--settings` before auth/database work, and explain local
+  credential failures without exposing values.
+- Match Windows environment names case-insensitively and add live hook/MCP/
+  grandchild inheritance, settings-conflict, privacy, and foreground regressions.
+
 ## v0.6.14
 
 - Enable GitHub dependency alerts and security-fix PRs, secret scanning, and

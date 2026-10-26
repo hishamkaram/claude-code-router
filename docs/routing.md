@@ -174,10 +174,11 @@ plugin variables, native `settings.env` precedence can override shell exports.
 CCR pins only non-secret routing/model controls in its private temporary
 `--settings` file. Credentials and custom headers stay in process environment.
 A settings override that removes every valid local launch credential produces
-an actionable gateway 401. User `--settings` passthrough conflicts with CCR's
+a gateway 401. The gateway response names possible credential-setting conflicts;
+Claude may initially show only its native 401 retry event. User `--settings` passthrough conflicts with CCR's
 required override and is rejected before launch; use native user/project/local
-settings instead. User tool-search preferences still apply on tools-enabled
-routes. Chat-only routes pin bare mode and disable plugin, hook, MCP and skill
+settings instead. Native `settings.env` tool-search preferences still apply on tools-enabled
+routes; CCR defaults process-level `ENABLE_TOOL_SEARCH` to `true`. Chat-only routes pin bare mode and disable plugin, hook, MCP and skill
 auto-discovery deliberately.
 
 Managed policy remains authoritative. CCR requires compatible policy; managed
