@@ -215,7 +215,7 @@ func TestLiveFixtureSubscriptionPoolRotatesRealClaudeWithoutRestart(t *testing.T
 		t.Fatalf("waiting for real Claude rate-limit request: %v", err)
 	}
 	waitForLivePickerText(
-		t, ctx, start.Transcript, commandDone, "LIVE_SAME_PROCESS_ROTATION_OK",
+		t, ctx, start.Transcript.Snapshot, commandDone, "LIVE_SAME_PROCESS_ROTATION_OK",
 	)
 	if start.PID == 0 || start.Process.Stopped() || start.Process.DoneObserved() {
 		t.Fatalf("real Claude process did not survive rotation: pid=%d", start.PID)

@@ -69,20 +69,30 @@ workflow also has a separate macOS helper job that runs its portable protocol
 fixtures and compiles the source-built preview. It runs on pull requests,
 `main`, and a daily schedule.
 
+The full live release gate also runs the complete live-tagged suite on Linux
+with a ready systemd user manager, for Claude Code 2.1.209, 2.1.310, and the
+current npm release. It repeats the interactive model-picker test ten times.
+The JSON evidence checker rejects unexpected skips and missing mandatory test
+results. Its explicit optional-test policy covers credential-dependent and
+protected-deployment tests; those capabilities still require their separate
+opt-in real-provider verification.
+
+Tag releases reuse the CI, platform fixture matrix, and full live workflows.
+Any failure, including a pre-existing failure, blocks draft publication.
+Promotion also requires the exact tag commit's entire release workflow to have
+completed successfully, including native archive smoke tests.
+
 For each release, record every gate in `docs/acceptance/vX.Y.Z.md`. A checked
 item requires reproducible PR evidence.
 
-Run the required review gate before committing the release-related change:
+Complete the required review before committing the release-related change.
+The lead reviews the full diff, and independent read-only subagents review the
+runtime changes, live-test harness, and release gates. Record their findings and
+resolution in the acceptance receipt. If an external review harness is selected,
+use the configured Delegate integration.
 
-```bash
-codex review -c 'sandbox_mode="danger-full-access"' \
-  -c 'approval_policy="never"' \
-  -c 'mcp_servers.playwright.enabled=false' \
-  -c 'mcp_servers.chrome-devtools.enabled=false' \
-  --uncommitted
-```
-
-Resolve all findings, rerun the review, commit, push, and merge the pull request.
+Resolve all findings, rerun affected checks and reviews, then commit, push, and
+merge the pull request only after all CI gates pass.
 
 ## Publish
 

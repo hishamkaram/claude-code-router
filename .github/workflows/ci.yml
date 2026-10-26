@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
@@ -18,8 +19,15 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      - name: Read pinned tool versions
+        id: tool-versions
+        run: make --no-print-directory print-tool-versions >> "$GITHUB_OUTPUT"
       - name: Test Linux installer
         run: make test-install
+      - name: Test tooling contracts
+        run: make test-tooling
+      - name: Test release blockers
+        run: make test-release-gates
       - name: Maintainability gate
         run: make maintainability
       - name: Go vet
@@ -27,7 +35,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.14.0
+          version: ${{ steps.tool-versions.outputs.golangci_lint }}
       - name: Test with race detector
         run: go test -race -count=1 -p 4 -coverprofile=coverage.out ./...
       - name: Coverage summary

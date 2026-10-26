@@ -67,7 +67,7 @@ ccr version
 
 ### Go
 
-Install from source with Go 1.26.9 or newer:
+Install from source with Go 1.27.3 or newer:
 
 ```bash
 go install github.com/hishamkaram/claude-code-router/cmd/ccr@latest
