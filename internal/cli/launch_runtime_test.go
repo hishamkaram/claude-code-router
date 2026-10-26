@@ -72,8 +72,8 @@ func TestLaunchPreserveAuthModeDoesNotValidateConfiguredAnthropicSecret(t *testi
 	}
 }
 
-func TestLaunchUnsetsRegisteredProviderSecretEnvironment(t *testing.T) {
-	t.Parallel()
+func TestLaunchInheritsRegisteredProviderSecretEnvironment(t *testing.T) {
+	t.Setenv("CCR_TEST_PROVIDER_TOKEN", "test-provider-token")
 
 	server := newModelsServer(t, []string{"gpt-5"})
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
@@ -91,8 +91,13 @@ func TestLaunchUnsetsRegisteredProviderSecretEnvironment(t *testing.T) {
 	}, "--db", dbPath, "launch", "--model", "gpt"); err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
-	if !launcher.unsetsEnv("CCR_TEST_PROVIDER_TOKEN") || launcher.hasEnvPrefix("CCR_TEST_PROVIDER_TOKEN=") {
-		t.Fatalf("Claude Code child inherited registered provider credential: %s", launcher.environmentSummary())
+	child := environmentEntries(applyClaudeEnvironment(os.Environ(), launcher.env))
+	if child["CCR_TEST_PROVIDER_TOKEN"] != "test-provider-token" {
+		t.Fatal("Claude Code child lost a caller credential shared with a registered provider")
+	}
+	settings, ok := launcher.settingsArgValue()
+	if !ok || strings.Contains(settings, "test-provider-token") || strings.Contains(settings, "CCR_TEST_PROVIDER_TOKEN") {
+		t.Fatal("generated settings copied a caller provider credential")
 	}
 }
 

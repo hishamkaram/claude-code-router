@@ -68,7 +68,11 @@ func TestLaunchSeparatorDynamicValidation(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, true, true); err == nil {
+				validationErr := validateLaunchPassthroughArgs(invocation.claudeArgs)
+				if validationErr == nil {
+					validationErr = validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, true)
+				}
+				if validationErr == nil {
 					t.Fatalf("accepted unsafe option %s", option)
 				}
 			})

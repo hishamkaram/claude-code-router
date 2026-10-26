@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,18 @@ func TestGatewayRejectsMissingLocalToken(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("gateway status = %d, want 401", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS"} {
+		if !strings.Contains(string(body), name) {
+			t.Fatalf("gateway rejection missing settings guidance for %s", name)
+		}
+	}
+	if strings.Contains(string(body), "local-token") {
+		t.Fatal("gateway rejection exposed its credential")
 	}
 }
 

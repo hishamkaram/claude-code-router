@@ -14,11 +14,7 @@ func TestSubscriptionPoolEnvironmentKeepsOAuthOnlyInGatewayMemory(t *testing.T) 
 		LaunchID:          42,
 		AuthMode:          launchAuthModeSubscriptionPool,
 		ClaudeAccountName: "personal",
-		ProviderSecretEnvNames: []string{
-			"ANTHROPIC_API_KEY",
-			"OPENROUTER_API_KEY",
-		},
-	})
+	}).processEnvironment()
 
 	set := environmentEntries(env.Set)
 	if set["ANTHROPIC_AUTH_TOKEN"] != "gateway-session-token" {
@@ -39,7 +35,6 @@ func TestSubscriptionPoolEnvironmentKeepsOAuthOnlyInGatewayMemory(t *testing.T) 
 		"CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
 		"CLAUDE_CODE_OAUTH_SCOPES",
-		"OPENROUTER_API_KEY",
 	} {
 		if !containsString(env.Unset, name) {
 			t.Fatalf("%s was not removed from the inherited environment", name)
@@ -64,7 +59,7 @@ func TestProviderOnlyEnvironmentRemovesInheritedClaudeAuth(t *testing.T) {
 				GatewayURL: "http://127.0.0.1:43123",
 				Token:      "gateway-session-token",
 				AuthMode:   authMode,
-			})
+			}).processEnvironment()
 			base := []string{
 				"ANTHROPIC_CUSTOM_HEADERS=Authorization: Bearer stale-account",
 				"CLAUDE_CODE_OAUTH_TOKEN=stale-oauth",

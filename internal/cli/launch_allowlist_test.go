@@ -405,8 +405,10 @@ func TestLaunchExtendsClaudeAvailableModelsWithoutStartupModel(t *testing.T) {
 		t.Fatalf("launch args = %#v, want Claude Code default startup model", launcher.args)
 	}
 	payload := launchSettingsPayload(t, launcher)
-	if len(payload.Env) != 0 {
-		t.Fatalf("family routing environment = %#v, want no override for native default launch", payload.Env)
+	for name := range modelrouting.DefaultModelEnvironment() {
+		if _, exists := payload.Env[name]; exists {
+			t.Fatalf("native default launch unexpectedly pinned family %s", name)
+		}
 	}
 	for _, want := range []string{"sonnet", "anthropic.ccr.gpt", "anthropic.ccr.qwen"} {
 		if !slices.Contains(payload.AvailableModels, want) {
@@ -470,9 +472,7 @@ func TestLaunchProviderModelSetsClaudeFamilyRoutingDefaults(t *testing.T) {
 	}
 	payload := launchSettingsPayload(t, launcher)
 	want := modelrouting.DefaultModelEnvironment()
-	if !slices.Equal(mapKeys(payload.Env), mapKeys(want)) {
-		t.Fatalf("family environment keys = %#v, want %#v", payload.Env, want)
-	}
+	assertPinnedLaunchSettings(t, launcher, payload.Env)
 	for key, wantValue := range want {
 		if payload.Env[key] != wantValue {
 			t.Fatalf("family environment[%q] = %q, want %q", key, payload.Env[key], wantValue)
@@ -571,13 +571,4 @@ func launchSettingsPayload(t *testing.T, launcher *fakeLauncher) launchSettings 
 		t.Fatalf("settings JSON %q did not parse: %v", settings, err)
 	}
 	return payload
-}
-
-func mapKeys(values map[string]string) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	return keys
 }

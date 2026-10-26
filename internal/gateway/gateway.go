@@ -313,7 +313,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.authorized(r) {
-		writeAnthropicError(w, http.StatusUnauthorized, "invalid local gateway token")
+		writeAnthropicError(w, http.StatusUnauthorized, "invalid local gateway token; settings or managed env values for ANTHROPIC_AUTH_TOKEN or ANTHROPIC_CUSTOM_HEADERS may be replacing CCR launch credentials")
 		return
 	}
 	if r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models") {

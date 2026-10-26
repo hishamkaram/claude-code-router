@@ -132,9 +132,18 @@ func TestLaunchVisibilityOptOutsAreIndependent(t *testing.T) {
 		"launch", "--no-history", "--no-lifecycle", "--no-statusline"); err != nil {
 		t.Fatalf("launch error = %v", err)
 	}
-	if settings, ok := launcher.settingsArgValue(); ok {
-		t.Fatalf("opted-out launch generated settings %q", settings)
+	settings, ok := launcher.settingsArgValue()
+	if !ok {
+		t.Fatal("opted-out launch lost required routing settings")
 	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(settings), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) != 1 {
+		t.Fatal("opted-out launch retained optional settings")
+	}
+	assertPinnedLaunchSettings(t, launcher, launchSettingsPayload(t, launcher).Env)
 	launches := readLaunches(t, dbPath)
 	if len(launches) != 1 || launches[0].LifecycleState != "disabled" ||
 		launches[0].StatuslineState != "disabled" {
@@ -186,25 +195,26 @@ func TestLaunchStartupFailureIsFinalized(t *testing.T) {
 
 func TestLaunchRejectedSettingsOverrideHasNoRuntimeSideEffects(t *testing.T) {
 	setTestClaudeHome(t)
-	dbPath := filepath.Join(t.TempDir(), "ccr.db")
+	database := filepath.Join(t.TempDir(), "ccr.db")
 	launcher := &fakeLauncher{pid: os.Getpid()}
-	gatewayStarts := 0
+	authCalls, gatewayStarts := 0, 0
 	deps := Dependencies{
-		Launcher: launcher,
+		Launcher:         launcher,
+		DetectClaudeAuth: func(context.Context) (bool, error) { authCalls++; return false, errors.New("auth must not run") },
 		StartGateway: func(context.Context, gateway.Config) (*gateway.Server, error) {
 			gatewayStarts++
-			return nil, errors.New("gateway should not start")
+			return nil, errors.New("gateway must not start")
 		},
 	}
-	_, _, err := runCommandWithDeps(t, deps, "--db", dbPath, "launch", "--settings", "./claude.json")
-	if err == nil || !strings.Contains(err.Error(), "--settings cannot override") {
-		t.Fatalf("launch error = %v, want settings override error", err)
+	_, _, err := runCommandWithDeps(t, deps, "--db", database, "launch", "--no-lifecycle", "--no-statusline", "--settings", "./claude.json")
+	if err == nil || !strings.Contains(err.Error(), "--settings cannot override CCR required routing settings") {
+		t.Fatalf("unexpected settings rejection: %v", err)
 	}
-	if launcher.starts != 0 || gatewayStarts != 0 {
-		t.Fatalf("launcher starts = %d, gateway starts = %d; want zero", launcher.starts, gatewayStarts)
+	if authCalls != 0 || launcher.starts != 0 || gatewayStarts != 0 {
+		t.Fatal("invalid settings caused auth or launch side effects")
 	}
-	if launches := readLaunches(t, dbPath); len(launches) != 0 {
-		t.Fatalf("launches = %#v, want none", launches)
+	if _, statErr := os.Stat(database); !os.IsNotExist(statErr) {
+		t.Fatal("invalid settings created a database")
 	}
 }
 

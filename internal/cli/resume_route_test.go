@@ -285,16 +285,10 @@ func TestLaunchResumeRouteUsesAdmittedProviderSecretEnvironmentAfterMutation(t *
 			}
 		}
 	}
-	if !launcher.unsetsEnv(admittedSecretEnv) {
-		t.Fatalf("resumed launch did not scrub admitted provider secret environment: %s", launcher.environmentSummary())
-	}
 	childEnvironment := environmentEntries(applyClaudeEnvironment(os.Environ(), launcher.env))
-	for _, name := range []string{admittedSecretEnv, mutatedSecretEnv} {
-		if !launcher.unsetsEnv(name) {
-			t.Fatalf("resumed launch did not scrub provider secret environment %q: %s", name, launcher.environmentSummary())
-		}
-		if _, exists := childEnvironment[name]; exists {
-			t.Fatalf("provider secret environment %q remained in the Claude Code environment", name)
+	for name, expected := range map[string]string{admittedSecretEnv: admittedSecret, mutatedSecretEnv: mutatedSecret} {
+		if childEnvironment[name] != expected {
+			t.Fatalf("resumed launch did not inherit caller variable %s", name)
 		}
 	}
 }

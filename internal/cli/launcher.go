@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -47,14 +48,19 @@ func (ExecClaudeLauncher) Start(ctx context.Context, args []string, env ClaudeEn
 }
 
 func applyClaudeEnvironment(base []string, overlay ClaudeEnvironment) []string {
+	return mergeClaudeEnvironment(base, overlay, runtime.GOOS == "windows")
+}
+
+func mergeClaudeEnvironment(base []string, overlay ClaudeEnvironment, caseInsensitive bool) []string {
+	key := func(name string) string { return environmentName(name, caseInsensitive) }
 	replaced := make(map[string]struct{}, len(overlay.Set)+len(overlay.Unset))
 	for _, name := range overlay.Unset {
-		replaced[name] = struct{}{}
+		replaced[key(name)] = struct{}{}
 	}
 	for _, entry := range overlay.Set {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok {
-			replaced[name] = struct{}{}
+			replaced[key(name)] = struct{}{}
 		}
 	}
 
@@ -62,13 +68,20 @@ func applyClaudeEnvironment(base []string, overlay ClaudeEnvironment) []string {
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok {
-			if _, skip := replaced[name]; skip {
+			if _, skip := replaced[key(name)]; skip {
 				continue
 			}
 		}
 		merged = append(merged, entry)
 	}
 	return append(merged, overlay.Set...)
+}
+
+func environmentName(name string, caseInsensitive bool) string {
+	if caseInsensitive {
+		return strings.ToUpper(name)
+	}
+	return name
 }
 
 type execClaudeProcess struct {

@@ -25,6 +25,8 @@ and --db. All other options and positional arguments are passed to Claude Code
 unchanged unless they would override CCR's selected model, generated model
 allowlist, or tool-safety restrictions. For example ccr launch --chrome starts
 Claude Code with its Chrome integration.
+CCR always supplies required non-secret routing settings. Native --settings
+passthrough is rejected; use native user, project, or local settings instead.
 
 Use -- to end CCR option parsing and pass Claude Code options, for example:
   ccr launch --model <alias> -p -- --output-format stream-json --verbose
@@ -175,9 +177,6 @@ type resolvedLaunch struct {
 	disableTools  bool
 	compatibility *launchCompatibilitySummary
 	pinnedRoute   *gateway.PinnedRoute
-	// nil means a normal launch reads the current configured providers; a non-nil
-	// slice is the admitted provider environment snapshot for a pinned route.
-	providerSecretEnvNames []string
 }
 
 type launchExecution struct {
@@ -249,9 +248,17 @@ func runLaunchAttempt(
 	}
 	defer shutdownGateway(ctx, execution.server)
 
+	env := launchClaudeEnv(launchEnvironmentOptions{
+		GatewayURL: execution.server.URL(), Token: execution.token,
+		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
+		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
+		DisableTools: resolved.disableTools, AuthMode: resolved.authMode,
+		ClaudeAccountName: selectedClaudeAccountName(execution.claudeAccount),
+		ExternalTokenEnv:  invocation.cuaTokenEnv,
+	})
 	claudeSettings, err := launchClaudeSettingsArg(ctx, s, launchSettingsOptions{
 		IncludeToolDisabled: resolved.disableTools, LifecycleEnabled: !invocation.noLifecycle,
-		FamilyRoutingEnabled:         resolved.modelAlias != "",
+		Environment:                  env.settingsEnvironment(),
 		PinnedRoute:                  resolved.pinnedRoute,
 		StatuslineEnabled:            !invocation.noStatusline,
 		IsolateStatuslineCredentials: selectedAccount != nil,
@@ -268,10 +275,7 @@ func runLaunchAttempt(
 		cmd.ErrOrStderr(), selectedAccount, invocation.noStatusline,
 		claudeSettings.StatuslineState,
 	)
-	if passthroughErr := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, claudeSettings.JSON != ""); passthroughErr != nil {
-		return passthroughErr
-	}
-	return runClaudeLaunchProcess(ctx, cmd, deps, execution, claudeSettings.JSON)
+	return runClaudeLaunchProcess(ctx, cmd, deps, execution, claudeSettings.JSON, env)
 }
 
 func prepareLaunchInvocation(
@@ -329,7 +333,7 @@ func preflightLaunchWithStore(
 	if err != nil {
 		return resolvedLaunch{}, err
 	}
-	if passthroughErr := validateResolvedLaunchPassthroughArgs(ctx, s, invocation, resolved); passthroughErr != nil {
+	if passthroughErr := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools); passthroughErr != nil {
 		return resolvedLaunch{}, passthroughErr
 	}
 	if cuaErr := validateManagedCUALaunch(ctx, s, deps, invocation, resolved); cuaErr != nil {
@@ -391,44 +395,6 @@ func startLaunchManagedCUA(ctx context.Context, cmd *cobra.Command, deps Depende
 	}
 	execution.managedCUA = managedCUA
 	return nil
-}
-
-func validateResolvedLaunchPassthroughArgs(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch) error {
-	if err := validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, false); err != nil {
-		return err
-	}
-	if findLaunchOption(invocation.claudeArgs, "--settings") == "" {
-		return nil
-	}
-	hasSettings, err := launchWillInjectSettings(ctx, s, invocation, resolved)
-	if err != nil {
-		return err
-	}
-	return validateDynamicLaunchPassthroughArgs(invocation.claudeArgs, resolved.disableTools, hasSettings)
-}
-
-func launchWillInjectSettings(ctx context.Context, s *store.Store, invocation launchInvocation, resolved resolvedLaunch) (bool, error) {
-	if !invocation.noLifecycle {
-		return true, nil
-	}
-	if !invocation.noStatusline {
-		if resolved.authMode == launchAuthModeSubscriptionPool {
-			return true, nil
-		}
-		_, state, err := claudeStatuslineSetting()
-		if err != nil {
-			return false, err
-		}
-		if state == claudeStatuslineAbsent {
-			return true, nil
-		}
-	}
-	settings := make(map[string]any, 1)
-	addLaunchFamilyRouting(settings, resolved.modelAlias != "")
-	if err := addLaunchAvailableModels(ctx, s, resolved.disableTools, resolved.pinnedRoute, settings); err != nil {
-		return false, err
-	}
-	return len(settings) > 0, nil
 }
 
 func resolveLaunch(ctx context.Context, deps Dependencies, s *store.Store, invocation launchInvocation) (resolvedLaunch, error) {
@@ -569,6 +535,7 @@ func runClaudeLaunchProcess(
 	deps Dependencies,
 	execution *launchExecution,
 	claudeSettings string,
+	env launchEnvironment,
 ) (resultErr error) {
 	invocation := execution.invocation
 	resolved := execution.resolved
@@ -581,23 +548,11 @@ func runClaudeLaunchProcess(
 	}()
 	claudeArgs := launchClaudeArgs(resolved.claudeModelID, invocation.printMode, resolved.disableTools,
 		claudeSettingsPath, invocation.permissionMode, invocation.claudeArgs)
-	currentProviderSecretEnvNames, err := configuredProviderSecretEnvNames(ctx, execution.store)
-	if err != nil {
-		return fmt.Errorf("reading current configured provider secret environment names before launch: %w", err)
-	}
-	providerSecretEnvNames := unionProviderSecretEnvNames(resolved.providerSecretEnvNames, currentProviderSecretEnvNames)
-	env := launchClaudeEnv(launchEnvironmentOptions{
-		GatewayURL: execution.server.URL(), Token: execution.token,
-		ObserverToken: execution.observerToken, LaunchID: execution.launchID,
-		ModelAlias: resolved.modelAlias, ModelID: resolved.claudeModelID,
-		DisableTools: resolved.disableTools, AuthMode: resolved.authMode,
-		ClaudeAccountName:      selectedClaudeAccountName(execution.claudeAccount),
-		ProviderSecretEnvNames: providerSecretEnvNames, ExternalTokenEnv: invocation.cuaTokenEnv,
-	})
 	outputLock := &sync.Mutex{}
 	out := launchProcessWriter(cmd.OutOrStdout(), outputLock)
 	errOut := launchProcessWriter(cmd.ErrOrStderr(), outputLock)
-	process, err := deps.Launcher.Start(ctx, claudeArgs, env, cmd.InOrStdin(), out, errOut)
+	writeLaunchEnvironmentNotice(errOut, env, os.Environ())
+	process, err := deps.Launcher.Start(ctx, claudeArgs, env.processEnvironment(), cmd.InOrStdin(), out, errOut)
 	if err != nil {
 		return fmt.Errorf("launching Claude Code through the gateway: %w", err)
 	}

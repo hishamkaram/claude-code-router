@@ -87,7 +87,8 @@ return result
 	auth := configuredLiveRealFirstPartyAuth()
 	args := []string{"--db", dbPath, "launch", "--print"}
 	args = append(args, auth.args()...)
-	args = append(args,
+	args = append(
+		args,
 		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "auto", "--tools", "Workflow",
 	)
@@ -349,7 +350,8 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 	t.Helper()
 	args := []string{"--db", dbPath, "launch", "--print"}
 	args = append(args, configuredLiveRealFirstPartyAuth().args()...)
-	args = append(args,
+	args = append(
+		args,
 		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
 		"--permission-mode", "auto",
 	)
@@ -363,7 +365,7 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 			t.Fatalf("%s model selection: %v", label, err)
 		}
 		if !strings.HasPrefix(selection, "Set model to ") {
-			t.Fatalf("%s: Claude Code rejected model selection (output withheld)", label)
+			t.Fatalf("%s: Claude Code rejected model selection (output withheld; %s)", label, liveRealSelectionSummary(selection, model))
 		}
 		result, err := liveRealTurn(ctx, run, liveStreamInput(t, "Reply with only this exact marker, without punctuation or commentary:\n"+sentinel))
 		if err != nil || strings.TrimSpace(result) != sentinel {
