@@ -18,7 +18,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/xpty"
@@ -33,6 +32,7 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 		t.Skipf("live Claude Code unavailable: %v", err)
 	}
 
+	ccrExecutable := buildLiveCCRExecutable(t, ctx)
 	configureIsolatedLivePickerClaude(t)
 
 	routedModel, provider := newLivePickerProvider(t)
@@ -41,13 +41,13 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
 	addLivePickerModels(t, ctx, dbPath, provider.URL)
 
-	run := startLivePickerRun(t, ctx, dbPath)
+	run := startLivePickerRun(t, ctx, dbPath, ccrExecutable)
 	defer run.close()
 
 	run.waitForText(t, ctx, "Detected a custom API key")
 	run.write(t, "\x1b[A\r", "accepting isolated placeholder API key")
 	run.waitForText(t, ctx, "Claude Code v")
-	run.write(t, "/model\r", "opening /model picker")
+	run.submit(t, ctx, "/model", "opening /model picker")
 	run.waitForText(t, ctx,
 		"Select model",
 		"Opus",
@@ -60,14 +60,15 @@ func TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels(t *testing.T) {
 	)
 
 	run.write(t, "\x1b", "closing /model picker")
-	time.Sleep(500 * time.Millisecond)
-	run.write(t, "/model anthropic.ccr.gpt\r", "selecting registered model by ID")
+	run.waitForText(t, ctx, "Kept model as")
+	run.submit(t, ctx, "/model anthropic.ccr.gpt", "selecting registered model by ID")
 	run.waitForText(t, ctx, "Set model to anthropic.ccr.gpt")
-	run.write(t, "Reply with the routed test response.\r", "sending routed prompt")
+	run.submit(t, ctx, "Reply with the routed test response.", "sending routed prompt")
 	run.assertRoutedModel(t, ctx, routedModel, "gpt-5")
-	time.Sleep(500 * time.Millisecond)
+	run.waitForText(t, ctx, "picker-route-ok")
+	run.waitForText(t, ctx, "CCR | gpt | litellm/gpt-5")
 
-	run.write(t, "/exit\r", "exiting Claude Code")
+	run.submit(t, ctx, "/exit", "exiting Claude Code")
 	run.waitForExit(t, ctx)
 }
 
@@ -76,7 +77,7 @@ type livePickerRun struct {
 	commandDone chan error
 	commandOut  *bytes.Buffer
 	commandErr  *bytes.Buffer
-	transcript  *synchronizedBuffer
+	transcript  *livePickerTerminal
 	readDone    chan error
 }
 
@@ -108,19 +109,20 @@ func newLivePickerProvider(t *testing.T) (chan string, *httptest.Server) {
 	return routedModel, provider
 }
 
-func startLivePickerRun(t *testing.T, ctx context.Context, dbPath string) *livePickerRun {
+func startLivePickerRun(t *testing.T, ctx context.Context, dbPath, ccrExecutable string) *livePickerRun {
 	t.Helper()
 
-	launcher := &livePickerLauncher{started: make(chan livePickerSession, 1)}
+	launcher := &livePickerLauncher{started: make(chan livePickerSession, 1), statuslineExecutable: ccrExecutable}
 	commandOut := &bytes.Buffer{}
 	commandErr := &bytes.Buffer{}
 	commandDone := make(chan error, 1)
 	go func() {
 		cmd := NewRootCommand(ctx, Dependencies{
-			In:       strings.NewReader(""),
-			Out:      commandOut,
-			Err:      commandErr,
-			Launcher: launcher,
+			In:             strings.NewReader(""),
+			Out:            commandOut,
+			Err:            commandErr,
+			Launcher:       launcher,
+			ExecutablePath: ccrExecutable,
 		})
 		cmd.SetArgs([]string{"--db", dbPath, "launch", "--bare"})
 		commandDone <- cmd.Execute()
@@ -135,7 +137,7 @@ func startLivePickerRun(t *testing.T, ctx context.Context, dbPath string) *liveP
 		t.Fatalf("waiting for Claude Code PTY: %v", ctx.Err())
 	}
 
-	transcript := &synchronizedBuffer{}
+	transcript := newLivePickerTerminal()
 	readDone := make(chan error, 1)
 	go func() {
 		_, err := io.Copy(transcript, session.pty)
@@ -158,7 +160,7 @@ func (r *livePickerRun) close() {
 
 func (r *livePickerRun) waitForText(t *testing.T, ctx context.Context, wants ...string) {
 	t.Helper()
-	waitForLivePickerText(t, ctx, r.transcript, r.commandDone, wants...)
+	waitForLivePickerText(t, ctx, r.transcript.Snapshot, r.commandDone, wants...)
 }
 
 func (r *livePickerRun) write(t *testing.T, input, action string) {
@@ -166,6 +168,21 @@ func (r *livePickerRun) write(t *testing.T, input, action string) {
 	if _, err := r.session.pty.Write([]byte(input)); err != nil {
 		t.Fatalf("%s: %v", action, err)
 	}
+}
+
+func (r *livePickerRun) submit(t *testing.T, ctx context.Context, input, action string) {
+	t.Helper()
+	stepCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := waitForPickerState(stepCtx, r.transcript.Snapshot, livePickerPromptReady); err != nil {
+		t.Fatalf("%s: prompt not ready: %v\n%s", action, err, r.transcript.Snapshot().diagnostics())
+	}
+	r.write(t, input, action)
+	echoed := func(view livePickerSnapshot) bool { return livePickerInputEchoed(view, input) }
+	if err := waitForPickerState(stepCtx, r.transcript.Snapshot, echoed); err != nil {
+		t.Fatalf("%s: typed input not echoed: %q: %v\n%s", action, input, err, r.transcript.Snapshot().diagnostics())
+	}
+	r.write(t, "\r", action)
 }
 
 func (r *livePickerRun) assertRoutedModel(t *testing.T, ctx context.Context, routedModel <-chan string, want string) {
@@ -266,8 +283,9 @@ func addLivePickerModels(t *testing.T, ctx context.Context, dbPath, baseURL stri
 }
 
 type livePickerLauncher struct {
-	started chan livePickerSession
-	cwd     string
+	started              chan livePickerSession
+	cwd                  string
+	statuslineExecutable string
 }
 
 type livePickerSession struct {
@@ -276,11 +294,14 @@ type livePickerSession struct {
 }
 
 func (l *livePickerLauncher) Start(ctx context.Context, args []string, env ClaudeEnvironment, _ io.Reader, _, _ io.Writer) (ClaudeProcess, error) {
+	if err := l.checkStatuslineExecutable(args); err != nil {
+		return nil, err
+	}
 	path, err := exec.LookPath("claude")
 	if err != nil {
 		return nil, fmt.Errorf("finding Claude Code: %w", err)
 	}
-	pty, err := xpty.NewPty(140, 60)
+	pty, err := xpty.NewPty(livePickerCols, livePickerRows)
 	if err != nil {
 		return nil, fmt.Errorf("creating Claude Code PTY: %w", err)
 	}
@@ -299,6 +320,73 @@ func (l *livePickerLauncher) Start(ctx context.Context, args []string, env Claud
 	}()
 	l.started <- livePickerSession{pty: pty, process: process}
 	return process, nil
+}
+
+func (l *livePickerLauncher) checkStatuslineExecutable(args []string) error {
+	if l.statuslineExecutable == "" {
+		return nil
+	}
+	for index, arg := range args {
+		if arg != "--settings" || index+1 >= len(args) {
+			continue
+		}
+		data, err := os.ReadFile(args[index+1])
+		if err != nil {
+			return fmt.Errorf("reading picker settings: %w", err)
+		}
+		var settings struct {
+			StatusLine struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+			} `json:"statusLine"`
+		}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return fmt.Errorf("decoding picker settings: %w", err)
+		}
+		want, err := launchStatuslineCommand(l.statuslineExecutable)
+		if err != nil {
+			return err
+		}
+		if settings.StatusLine.Type != "command" || settings.StatusLine.Command != want {
+			return fmt.Errorf("picker statusline must invoke built CCR %q; got %q", want, settings.StatusLine.Command)
+		}
+		return nil
+	}
+	return errors.New("picker launch is missing private settings")
+}
+
+func TestLivePickerRejectsTestDriverStatusline(t *testing.T) {
+	t.Parallel()
+	executable := filepath.Join(t.TempDir(), "built ccr")
+	launcher := &livePickerLauncher{statuslineExecutable: executable}
+	for _, test := range []struct {
+		name       string
+		executable string
+		wantError  bool
+	}{
+		{name: "built CCR", executable: executable},
+		{name: "test driver fallback", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command, err := launchStatuslineCommand(test.executable)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settingsPath := filepath.Join(t.TempDir(), "settings.json")
+			settings := struct {
+				StatusLine struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				} `json:"statusLine"`
+			}{}
+			settings.StatusLine.Type, settings.StatusLine.Command = "command", command
+			writeLivePickerJSON(t, settingsPath, settings)
+			err = launcher.checkStatuslineExecutable([]string{"--settings", settingsPath})
+			if (err != nil) != test.wantError {
+				t.Fatalf("statusline guard error = %v, want error %t", err, test.wantError)
+			}
+		})
+	}
 }
 
 type livePickerProcess struct {
@@ -362,40 +450,27 @@ func (b *synchronizedBuffer) String() string {
 	return b.buf.String()
 }
 
-func waitForLivePickerText(t *testing.T, ctx context.Context, transcript *synchronizedBuffer, commandDone <-chan error, wants ...string) {
+func (b *synchronizedBuffer) Snapshot() livePickerSnapshot {
+	return livePickerSnapshot{stream: b.String()}
+}
+
+func waitForLivePickerText(t *testing.T, ctx context.Context, snapshot func() livePickerSnapshot, commandDone <-chan error, wants ...string) {
 	t.Helper()
 
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		plain := ansi.Strip(transcript.String())
-		compact := normalizeLiveClaudeText(plain)
-		foundAll := true
-		for _, want := range wants {
-			compactWant := normalizeLiveClaudeText(want)
-			if !strings.Contains(plain, want) && !strings.Contains(compact, compactWant) {
-				foundAll = false
-				break
-			}
-		}
-		if foundAll {
+		view := snapshot()
+		missing := livePickerTextMissing(view, wants)
+		if len(missing) == 0 {
 			return
 		}
 		select {
 		case err := <-commandDone:
-			t.Fatalf("ccr launch stopped while waiting for %q: %v\ntranscript:\n%s", wants, err, plain)
+			t.Fatalf("ccr launch stopped while waiting for %q: %v\n%s", missing, err, view.diagnostics())
 		case <-ctx.Done():
-			t.Fatalf("waiting for live picker text %q: %v\ntranscript:\n%s", wants, ctx.Err(), plain)
+			t.Fatalf("waiting for live picker text %q: %v\n%s", missing, ctx.Err(), view.diagnostics())
 		case <-ticker.C:
 		}
 	}
-}
-
-func normalizeLiveClaudeText(value string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) || r == '`' {
-			return -1
-		}
-		return r
-	}, ansi.Strip(value))
 }

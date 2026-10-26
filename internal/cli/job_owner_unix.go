@@ -26,7 +26,7 @@ func newJobOwnerCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	return &cobra.Command{Use: "_job-owner", Hidden: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return runJobOwner(ctx, cmd, deps) }}
 }
 
-func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) error {
+func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) (runErr error) {
 	input, ack, lease := os.NewFile(3, "job-admission"), os.NewFile(4, "job-ack"), os.NewFile(5, "job-lease")
 	defer func() { _ = input.Close() }()
 	defer func() { _ = ack.Close() }()
@@ -70,7 +70,11 @@ func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) err
 	server := &http.Server{Handler: owner, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second}
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(listener) }()
-	defer func() { _ = server.Close(); <-served }()
+	defer func() {
+		if err := closeJobControlServer(server, served); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("closing job control server: %w", err))
+		}
+	}()
 	if err := s.Write(r); err != nil {
 		return err
 	}
@@ -78,6 +82,15 @@ func runJobOwner(ctx context.Context, cmd *cobra.Command, deps Dependencies) err
 	_ = json.NewEncoder(ack).Encode(jobReceipt{JobID: r.JobID, SessionID: r.SessionID, SubmissionID: r.SubmissionID})
 	_ = ack.Close()
 	return executeOwnedJob(runCtx, cmd, deps, admission, r, owner, registry, sessionLease)
+}
+
+func closeJobControlServer(server *http.Server, served <-chan error) error {
+	closeErr := server.Close()
+	serveErr := <-served
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(closeErr, serveErr)
 }
 
 func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies, admission jobAdmission, record jobs.Record, owner *jobs.Owner, registry *jobs.Registry, lease *jobs.SessionLease) error {
@@ -167,15 +180,16 @@ func (l *jobClaudeLauncher) Start(ctx context.Context, args []string, env Claude
 	return p, nil
 }
 
-func (l *jobClaudeLauncher) result() (cleanup jobs.Cleanup, code *int) {
+func (l *jobClaudeLauncher) result() (cleanup jobs.Cleanup, code *int, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.process == nil {
-		return jobs.Cleanup{Coverage: "unknown", Reason: "workload not started"}, nil
+		return jobs.Cleanup{Coverage: "unknown", Reason: "workload not started"}, nil, nil
 	}
 	// A foreground shutdown timeout must not publish a detached terminal receipt
 	// while the owned subprocess/reaper is still active.
-	_ = l.process.Stop()
-	<-l.process.Done()
-	return l.process.Result()
+	stopErr := l.process.Stop()
+	waitErr := <-l.process.Done()
+	cleanup, code = l.process.Result()
+	return cleanup, code, errors.Join(stopErr, waitErr)
 }

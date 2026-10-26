@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,21 @@ import (
 )
 
 func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	entries, err := h.modelEntries(r.Context())
+	if err != nil {
+		writeAnthropicError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	firstID, lastID := "", ""
+	if len(entries) > 0 {
+		firstID, lastID = entries[0].ID, entries[len(entries)-1].ID
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": entries, "first_id": firstID, "last_id": lastID, "has_more": false,
+	})
+}
+
+func (h *handler) modelEntries(ctx context.Context) ([]gatewayModelEntry, error) {
 	entries := make([]gatewayModelEntry, 0)
 	seen := map[string]struct{}{}
 	if h.cfg.PinnedRoute != nil {
@@ -20,57 +36,47 @@ func (h *handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			effectiveProviderCapabilities(h.cfg.PinnedRoute.provider),
 		)
 		if err != nil {
-			writeAnthropicError(w, http.StatusInternalServerError, err.Error())
-			return
+			return nil, err
 		}
 		if advertise {
 			appendGatewayModelEntry(&entries, seen, entry)
 		}
-	} else {
-		for _, entry := range h.firstPartyAnthropicModelEntries() {
-			appendGatewayModelEntry(&entries, seen, entry)
-		}
-		models, err := h.cfg.Store.ListModels(r.Context())
-		if err != nil {
-			writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured model aliases: %v", err))
-			return
-		}
-		configuredProviders, err := h.cfg.Store.ListProviders(r.Context())
-		if err != nil {
-			writeAnthropicError(w, http.StatusInternalServerError, fmt.Sprintf("listing configured providers: %v", err))
-			return
-		}
-		providerTypes := make(map[string]string, len(configuredProviders))
-		providerCapabilities := make(map[string]providers.Capabilities, len(configuredProviders))
-		for index := range configuredProviders {
-			provider := &configuredProviders[index]
-			providerTypes[provider.Name] = provider.Type
-			providerCapabilities[provider.Name] = effectiveProviderCapabilities(*provider)
-		}
-		for index := range models {
-			model := &models[index]
-			entry, advertise, err := configuredGatewayModelEntry(
-				model,
-				providerTypes[model.ProviderName],
-				providerCapabilities[model.ProviderName],
-			)
-			if err != nil {
-				writeAnthropicError(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if !advertise {
-				continue
-			}
-			appendGatewayModelEntry(&entries, seen, entry)
-		}
+		return entries, nil
 	}
-	firstID, lastID := "", ""
-	if len(entries) > 0 {
-		firstID, lastID = entries[0].ID, entries[len(entries)-1].ID
+	for _, entry := range h.firstPartyAnthropicModelEntries() {
+		appendGatewayModelEntry(&entries, seen, entry)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"data": entries, "first_id": firstID, "last_id": lastID, "has_more": false,
-	})
+	models, err := h.cfg.Store.ListModels(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing configured model aliases: %w", err)
+	}
+	configuredProviders, err := h.cfg.Store.ListProviders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing configured providers: %w", err)
+	}
+	providerTypes := make(map[string]string, len(configuredProviders))
+	providerCapabilities := make(map[string]providers.Capabilities, len(configuredProviders))
+	for index := range configuredProviders {
+		provider := &configuredProviders[index]
+		providerTypes[provider.Name] = provider.Type
+		providerCapabilities[provider.Name] = effectiveProviderCapabilities(*provider)
+	}
+	for index := range models {
+		model := &models[index]
+		entry, advertise, err := configuredGatewayModelEntry(
+			model,
+			providerTypes[model.ProviderName],
+			providerCapabilities[model.ProviderName],
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !advertise {
+			continue
+		}
+		appendGatewayModelEntry(&entries, seen, entry)
+	}
+	return entries, nil
 }
 
 func (h *handler) firstPartyAnthropicModelEntries() []gatewayModelEntry {

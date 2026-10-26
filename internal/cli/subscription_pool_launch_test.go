@@ -214,6 +214,21 @@ func TestStopClaudeProcessAndWaitIsBounded(t *testing.T) {
 	}
 }
 
+func TestStopClaudeProcessAndWaitPreservesCompletionErrors(t *testing.T) {
+	t.Parallel()
+	stopErr := errors.New("dummy stop failure")
+	waitErr := errors.New("dummy completion failure")
+	process := &blockingClaudeProcess{done: make(chan error, 1)}
+	process.stop = func() error {
+		process.done <- waitErr
+		return stopErr
+	}
+	err := stopClaudeProcessAndWait(process, process.Done(), time.Second)
+	if !errors.Is(err, stopErr) || !errors.Is(err, waitErr) {
+		t.Fatalf("stopClaudeProcessAndWait() = %v, want both failures", err)
+	}
+}
+
 func TestSubscriptionCooldownClassifiesConfirmedAndTransientLimits(t *testing.T) {
 	t.Parallel()
 

@@ -54,7 +54,10 @@ func stopClaudeProcessAndWait(process ClaudeProcess, done <-chan error, timeout 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
-	case <-done:
+	case waitErr := <-done:
+		if waitErr != nil {
+			return errors.Join(stopErr, fmt.Errorf("waiting for Claude Code to stop: %w", waitErr))
+		}
 		return stopErr
 	case <-timer.C:
 		return errors.Join(stopErr, fmt.Errorf("timed out after %s waiting for Claude Code to stop", timeout))

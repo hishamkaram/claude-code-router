@@ -8,11 +8,13 @@ COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unknown)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILT_BY ?= make
 LDFLAGS := -s -w -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Version=$(VERSION) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Commit=$(COMMIT) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.Date=$(DATE) -X github.com/hishamkaram/claude-code-router/internal/buildinfo.BuiltBy=$(BUILT_BY)
-GOVULNCHECK_VERSION ?= v1.1.4
+GOLANGCI_LINT_VERSION ?= v2.15.0
+GOLANGCI_LINT ?= golangci-lint
+GOVULNCHECK_VERSION ?= v1.9.0
 GOVULNCHECK_PACKAGE := golang.org/x/vuln/cmd/govulncheck
 GOVULNCHECK ?= govulncheck
 
-.PHONY: build build-cua-macos test test-install test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-subscription-pool-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck govulncheck-install maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
+.PHONY: build build-cua-macos test test-install test-tooling print-tool-versions test-race test-cua-browser-entrypoint test-cua-docker-fixture test-cua-macos-fixture test-live test-live-fixture test-live-subscription-pool-fixture test-live-real test-live-real-routing test-live-real-vision test-live-real-anthropic-cua test-live-real-openai-responses-cua test-live-real-cua-executors test-live-real-subscription-pool test-live-real-full test-live-matrix test-live-matrix-full test-live-switch test-live-subagents test-live-workflows vet lint coverage govulncheck govulncheck-install maintainability check check-live check-live-fixture check-live-real check-live-real-full clean help
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -30,6 +32,16 @@ test:
 
 test-install:
 	sh scripts/test-install.sh
+
+test-tooling:
+	+sh scripts/test-tooling.sh
+
+.PHONY: test-release-gates
+test-release-gates:
+	sh scripts/test-release-gates.sh
+
+print-tool-versions:
+	@printf 'golangci_lint=%s\ngovulncheck=%s\n' '$(GOLANGCI_LINT_VERSION)' '$(GOVULNCHECK_VERSION)'
 
 test-race:
 	$(GO) test $(GOFLAGS) -count=1 -p 4 ./...
@@ -104,7 +116,13 @@ vet:
 	$(GO) vet ./...
 
 lint:
-	golangci-lint run ./...
+	@command -v "$(GOLANGCI_LINT)" >/dev/null || (echo "golangci-lint $(GOLANGCI_LINT_VERSION) is required; install the pinned official binary or set GOLANGCI_LINT to its path" >&2; exit 1)
+	@actual="$$("$(GOLANGCI_LINT)" version 2>&1 | sed -n 's/^golangci-lint has version \([^ ]*\).*/v\1/p')"; \
+	if test "$$actual" != "$(GOLANGCI_LINT_VERSION)"; then \
+		echo "golangci-lint version $$actual is installed; need $(GOLANGCI_LINT_VERSION). Install the pinned official binary or set GOLANGCI_LINT to its path." >&2; \
+		exit 1; \
+	fi
+	"$(GOLANGCI_LINT)" run ./...
 
 coverage:
 	$(GO) test $(GOFLAGS) -count=1 -p 4 -coverprofile=coverage.out ./...
@@ -117,7 +135,7 @@ govulncheck:
 		echo "govulncheck version $$actual is installed; need $(GOVULNCHECK_VERSION). Run make govulncheck-install." >&2; \
 		exit 1; \
 	fi
-	$(GOVULNCHECK) ./...
+	"$(GOVULNCHECK)" ./...
 
 govulncheck-install:
 	$(GO) install $(GOVULNCHECK_PACKAGE)@$(GOVULNCHECK_VERSION)
@@ -125,7 +143,7 @@ govulncheck-install:
 maintainability:
 	$(GO) run ./tools/maintainability
 
-check: maintainability vet lint test-race govulncheck
+check: test-tooling test-release-gates maintainability vet lint test-race govulncheck
 
 check-live: check test-live
 

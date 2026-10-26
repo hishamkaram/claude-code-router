@@ -48,7 +48,10 @@ func streamJSONJob(args []string) bool {
 }
 
 func collectJobOutcome(ctx context.Context, launcher *jobClaudeLauncher, accounting *gateway.RequestAccounting, observer *jobs.OutputObserver, record jobs.Record, observed bool, runErr error) jobs.FinalOutcome {
-	cleanup, code := launcher.result()
+	cleanup, code, completionErr := launcher.result()
+	if completionErr != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("waiting for owned Claude Code: %w", completionErr))
+	}
 	if reapErr := jobs.ReapOrphans(); reapErr != nil {
 		cleanup = jobs.Cleanup{Coverage: "unknown", Reason: "adopted child reaping failed"}
 		runErr = errors.Join(runErr, reapErr)

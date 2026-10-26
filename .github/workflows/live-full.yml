@@ -1,0 +1,82 @@
+name: Full live release gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  full-live:
+    name: Full live suite / Claude ${{ matrix.claude-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        claude-version: ["2.1.209", "2.1.310", "latest"]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCR_LIVE_CONTAINMENT: systemd-scope
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1"
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install Claude Code
+        run: npm install --global "@anthropic-ai/claude-code@${{ matrix.claude-version }}"
+      - name: Provision Linux user manager
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Require a ready systemd user manager
+        run: |
+          timeout 30s bash -c '
+            until busctl --user status org.freedesktop.systemd1 > /dev/null 2>&1; do
+              sleep 0.1
+            done
+          '
+      - name: Full live-tagged suite
+        run: |
+          claude --version
+          git rev-parse HEAD
+          go test -tags=live -json -count=1 -p 1 ./... | tee "$RUNNER_TEMP/full-live.jsonl"
+      - name: Repeat the interactive model-picker regression
+        run: |
+          go test -tags=live -json -count=10 -p 1 -timeout 5m \
+            -run '^TestLiveLaunchModelPickerShowsAnthropicAndRegisteredModels$' ./internal/cli \
+            | tee "$RUNNER_TEMP/picker-repeated.jsonl"
+      - name: Reject unexpected skips and missing live evidence
+        run: go run ./tools/livegate "$RUNNER_TEMP/full-live.jsonl" "$RUNNER_TEMP/picker-repeated.jsonl"
+      - name: Preserve full live evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: full-live-${{ matrix.claude-version }}
+          path: |
+            ${{ runner.temp }}/full-live.jsonl
+            ${{ runner.temp }}/picker-repeated.jsonl
+
+  required:
+    name: Full live release gate
+    if: always()
+    needs: full-live
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every full-suite matrix entry
+        env:
+          FULL_LIVE_RESULT: ${{ needs.full-live.result }}
+        run: test "$FULL_LIVE_RESULT" = success

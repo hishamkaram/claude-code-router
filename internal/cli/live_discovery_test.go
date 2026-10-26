@@ -27,14 +27,21 @@ func TestLiveGatewayTokenLaunchDiscoversConfiguredAlias(t *testing.T) {
 
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	chatCalled := false
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, ".claude"))
+	// Claude 2.1.209 suppresses local gateway discovery in essential-traffic
+	// mode. Enable this fixture's discovery while disabling other traffic.
+	t.Setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "")
+	t.Setenv("DISABLE_TELEMETRY", "1")
+	t.Setenv("DISABLE_ERROR_REPORTING", "1")
+	t.Setenv("DISABLE_AUTOUPDATER", "1")
+	var chatCalled atomic.Bool
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
 		case "/v1/chat/completions":
-			chatCalled = true
+			chatCalled.Store(true)
 			payload, ok := decodeLiveOpenAIChatPayload(t, w, r)
 			if !ok {
 				return
@@ -52,7 +59,7 @@ func TestLiveGatewayTokenLaunchDiscoversConfiguredAlias(t *testing.T) {
 	if err != nil {
 		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
 	}
-	if !chatCalled || !strings.Contains(out, "gateway-discovery-ok") {
+	if !chatCalled.Load() || !strings.Contains(out, "gateway-discovery-ok") {
 		t.Fatalf("launch did not complete through fake provider\nstdout:\n%s\nstderr:\n%s", out, errOut)
 	}
 
