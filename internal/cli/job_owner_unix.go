@@ -102,7 +102,10 @@ func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies,
 	if record.RequestedResumeSession != "" {
 		sessionFlag = "--resume"
 	}
-	invocation.claudeArgs = append([]string{sessionFlag, record.SessionID}, invocation.claudeArgs...)
+	invocation.claudeArgs, err = ownedJobClaudeArgs(invocation.claudeArgs, sessionFlag, record.SessionID)
+	if err != nil {
+		return owner.FinishAdmission(context.WithoutCancel(ctx), registry, jobs.FinalOutcome{RunError: err})
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	accounting := gateway.NewRequestAccounting()
@@ -141,6 +144,22 @@ func executeOwnedJob(ctx context.Context, cmd *cobra.Command, deps Dependencies,
 	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer finishCancel()
 	return owner.FinishAdmission(finishCtx, registry, outcome)
+}
+
+// The job owner preserves admitted source controls at the front when inserting
+// its native session identity. The admitted argv is never mutated in place.
+func ownedJobClaudeArgs(args []string, sessionFlag, sessionID string) ([]string, error) {
+	if err := validateDetachedClaudeBoundary(args); err != nil {
+		return nil, fmt.Errorf("building owned job session arguments: %w", err)
+	}
+	sources, err := parseNativeSettingsSources(args)
+	if err != nil {
+		return nil, fmt.Errorf("building owned job session arguments: %w", err)
+	}
+	forwarded := make([]string, 0, len(args)+2)
+	forwarded = append(forwarded, args[:sources.PrefixArgs]...)
+	forwarded = append(forwarded, sessionFlag, sessionID)
+	return append(forwarded, args[sources.PrefixArgs:]...), nil
 }
 
 type jobClaudeLauncher struct {

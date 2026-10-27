@@ -473,6 +473,9 @@ func launchClaudeArgs(modelID string, printMode, disableTools bool, settings, pe
 }
 
 func validateLaunchPassthroughArgs(args []string) error {
+	if _, err := parseNativeSettingsSources(args); err != nil {
+		return err
+	}
 	if findLaunchOption(args, "--settings") != "" {
 		return fmt.Errorf("--settings cannot override CCR required routing settings; use native user/project/local settings instead")
 	}

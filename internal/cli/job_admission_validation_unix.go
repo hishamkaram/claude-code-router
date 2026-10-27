@@ -2,7 +2,20 @@
 
 package cli
 
-import "github.com/hishamkaram/claude-code-router/internal/jobs"
+import (
+	"fmt"
+
+	"github.com/hishamkaram/claude-code-router/internal/jobs"
+)
+
+func validateDetachedClaudeBoundary(args []string) error {
+	for _, arg := range args {
+		if arg == "--" {
+			return fmt.Errorf("standalone -- is not supported in detached Claude options; use --name=value for option values and --prompt-file for prompt text")
+		}
+	}
+	return nil
+}
 
 func validateDetachedAdmission(invocation launchInvocation) error {
 	if invocation.submissionID != "" {

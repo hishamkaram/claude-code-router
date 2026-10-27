@@ -348,6 +348,11 @@ func liveRealGatewayStarter(launchID *int64) func(context.Context, gateway.Confi
 
 func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, models []store.Model) int64 {
 	t.Helper()
+	traceStore, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal("opening matrix route evidence failed; details withheld")
+	}
+	t.Cleanup(func() { _ = traceStore.Close() })
 	args := []string{"--db", dbPath, "launch", "--print"}
 	args = append(args, configuredLiveRealFirstPartyAuth().args()...)
 	args = append(
@@ -357,39 +362,73 @@ func runLiveRealSwitchMatrix(t *testing.T, ctx context.Context, dbPath string, m
 	)
 	var launchID int64
 	run := startLiveCompactionCommand(t, ctx, Dependencies{StartGateway: liveRealGatewayStarter(&launchID)}, args)
-	check := func(label, model, sentinel string) {
+	correlated := liveNativeVersionAtLeast(t, ctx, [3]int{2, 1, 310})
+	t.Logf("native input/result UUID join enabled=%t (older clients retain serial completion)", correlated)
+	turn := func(label, phase, input string) (string, error) {
+		if !correlated {
+			return liveRealTurn(ctx, run, input)
+		}
+		result, metadata, turnErr := liveRealCorrelatedTurn(ctx, run, input)
+		t.Logf("%s %s native result attribution: %+v", label, phase, metadata)
+		return result, turnErr
+	}
+	proofs := make([]liveRealProviderMarkerProof, 0, 1+2*len(models))
+	check := func(label, model, sentinel string, expected *store.Model) {
 		// Bind each response to this turn rather than a predictable history pattern.
 		sentinel += "_" + rand.Text()
-		selection, err := liveRealTurn(ctx, run, liveStreamInput(t, "/model "+model))
+		selection, err := turn(label, "selection", liveStreamInput(t, "/model "+model))
 		if err != nil {
 			t.Fatalf("%s model selection: %v", label, err)
 		}
 		if !strings.HasPrefix(selection, "Set model to ") {
 			t.Fatalf("%s: Claude Code rejected model selection (output withheld; %s)", label, liveRealSelectionSummary(selection, model))
 		}
-		result, err := liveRealTurn(ctx, run, liveStreamInput(t, "Reply with only this exact marker, without punctuation or commentary:\n"+sentinel))
+		boundary := liveRealRouteBoundary(t, ctx, traceStore, launchID)
+		result, err := turn(label, "reply", liveStreamInput(t, "Reply with only this exact marker, without punctuation or commentary:\n"+sentinel))
 		if err != nil || strings.TrimSpace(result) != sentinel {
 			// Background turns may have shifted the stream; further results are ambiguous.
 			t.Fatalf("%s: expected turn marker %q, result_bytes=%d, error=%v", label, sentinel, len(result), err)
 		} else {
-			t.Logf("%s: completed expected turn", label)
+			proof := requireLiveRealMarkerRouteProof(t, ctx, traceStore, launchID, boundary, expected)
+			provider := liveRealProviderKey{firstParty: true}
+			if expected != nil {
+				provider = liveRealProviderKey{name: expected.ProviderName}
+			}
+			proofs = append(proofs, liveRealProviderMarkerProof{label: label, provider: provider, route: proof})
+			t.Logf("%s: completed expected turn (route_proof=%s transport_failures=%d)", label, proof.Mode, proof.TransportFailures)
 		}
 	}
-	check("initial Anthropic", "sonnet", "CCR_LIVE_REAL_ANTHROPIC_INITIAL")
+	check("initial Anthropic", "sonnet", "CCR_LIVE_REAL_ANTHROPIC_INITIAL", nil)
 	for index, model := range models {
 		discoveryID, err := gateway.DiscoveryIDForModel(model)
 		if err != nil {
 			t.Fatalf("DiscoveryIDForModel(%s) error = %v", model.Alias, err)
 		}
-		check(model.Alias, discoveryID, fmt.Sprintf("CCR_LIVE_REAL_ALIAS_%d", index))
-		check("return from "+model.Alias, "sonnet", fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index))
+		check(model.Alias, discoveryID, fmt.Sprintf("CCR_LIVE_REAL_ALIAS_%d", index), &model)
+		check("return from "+model.Alias, "sonnet", fmt.Sprintf("CCR_LIVE_REAL_ANTHROPIC_RETURN_%d", index), nil)
 	}
+	providers := []liveRealProviderKey{{firstParty: true}}
+	for _, model := range models {
+		providers = append(providers, liveRealProviderKey{name: model.ProviderName})
+	}
+	if missing := liveRealMissingStreamingProviders(providers, proofs); len(missing) != 0 {
+		t.Fatalf("selected providers lack a clean streaming marker: %v", missing)
+	}
+	recovered := liveRealRecoveredMarkers(proofs)
+	t.Logf("same-target native recoveries: count=%d markers=%v", len(recovered), recovered)
 	out, errOut, err := run.finish(ctx)
 	if err != nil {
 		if liveAnthropicAuthUnavailable(out + "\n" + errOut) {
 			t.Fatalf("real provider switch matrix requires valid first-party Anthropic authentication; sign in to Claude Code, configure ANTHROPIC_API_KEY, or set CCR_LIVE_REAL_CLAUDE_ACCOUNT to an available pooled account, then retry; %s", liveRealOutputSummary(out, errOut))
 		}
 		failLiveRealCommand(t, "real provider switch matrix", err, out, errOut)
+	}
+	if correlated {
+		metadata, drainErr := liveRealCorrelatedDrain(run)
+		t.Logf("native final result attribution: %+v", metadata)
+		if drainErr != nil {
+			t.Fatalf("real matrix final native results: %v", drainErr)
+		}
 	}
 	return launchID
 }

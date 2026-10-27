@@ -3,8 +3,8 @@
 ## Launch Model Visibility
 
 `ccr launch` starts Claude Code through one fixed local Anthropic-compatible
-gateway. When routable aliases exist, CCR passes an ephemeral Claude Code
-allowlist for that launch:
+gateway. When routable aliases exist, CCR derives an ephemeral Claude Code
+allowlist and native `modelPicker` catalog from the same registered model IDs:
 
 - existing user `availableModels` entries are preserved;
 - if no user allowlist exists, CCR includes known first-party Claude model IDs;
@@ -13,6 +13,40 @@ allowlist for that launch:
 - an alias with an effective context window of at least 1,000,000 tokens gets a
   terminal `[1m]` picker marker;
 - `~/.claude/settings.json` is never written.
+
+The catalog lets native `/model` accept a registered ID after its policy checks
+without sending an inference probe. It does not promise provider availability:
+the first actual turn still contacts the selected provider and reports any
+failure visibly, without falling back to Anthropic. Request translation, token
+budgets and thinking preferences are unchanged.
+
+CCR keeps user picker rows, their order and metadata, and any explicit
+`replaceBuiltInOptions` preference. It reads only the enabled user
+`settings.json`, honoring `CLAUDE_CONFIG_DIR` and `--setting-sources`; project
+and local picker rows are not promoted into launch settings. A pinned resume
+offers only its admitted model. Invalid user picker fields fail explicitly,
+including during pinned or resume launches, rather than losing the user's
+configuration. Managed `modelPicker` policy remains above
+CCR's launch settings. If policy omits the registered ID, native selection may
+still perform its inference check and report a timeout; the administrator must
+include that ID in the managed picker to use catalog selection.
+
+Put `--setting-sources` before other forwarded Claude options, for example
+`ccr launch --model coding --setting-sources "project, user" --bare`.
+Only its leading argument prefix is unambiguous. A matching token later in
+native options can be private prompt text, so CCR rejects it before auth or
+database work. Use `--append-system-prompt=--setting-sources=project` to pass
+that literal text. An immediate native `--` after the source prefix preserves
+literal positional text. A later `--` may itself be another option's value
+and cannot establish that boundary. Existing saved jobs with the old option
+order fail explicitly and require resubmission; CCR never rewrites them.
+New managed jobs keep the admitted source prefix before their session flags.
+
+The native setting is documented for Claude Code 2.1.242 and later. Selection
+without an inference probe is verified on 2.1.310 and 2.1.311. Claude Code
+2.1.209 retains its legacy inference validation and remains dependent on provider
+latency during selection. See the native
+[`modelPicker` setting](https://code.claude.com/docs/en/settings-reference#modelpicker).
 
 Without `--model`, Claude Code keeps its normal startup model when Claude auth
 is available. In resolved preserve mode, IDs beginning with `anthropic.` become
@@ -221,7 +255,8 @@ For first-party Anthropic routes it preserves an existing Claude Code
 subscription login or Anthropic API-key authentication. This is the normal mode
 when a session can use both first-party and external routes. Claude Code does
 not run authenticated gateway discovery in this mode; CCR supplies registered
-picker rows through the launch-only `availableModels` override instead.
+picker rows through the launch-only `availableModels` and `modelPicker`
+settings instead.
 
 ### `provider-only`
 

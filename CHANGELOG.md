@@ -13,6 +13,13 @@ lives under `docs/acceptance/`.
   credential failures without exposing values.
 - Match Windows environment names case-insensitively and add live hook/MCP/
   grandchild inheritance, settings-conflict, privacy, and foreground regressions.
+- Advertise registered aliases through Claude's native model picker catalog to
+  avoid slow inference probes on supported modern clients. Claude 2.1.209 keeps
+  legacy validation. Keep policy checks, user preferences, and exact routing.
+- Breaking CLI change: put `--setting-sources` before other forwarded Claude
+  Code options. Ambiguous later occurrences fail before auth or database work;
+  use inline option values for literal flag-like prompt text. Saved jobs with
+  the old ordering must be resubmitted; stored requests are never reordered.
 
 ## v0.6.14
 

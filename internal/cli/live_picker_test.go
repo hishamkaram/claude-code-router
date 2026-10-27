@@ -109,7 +109,7 @@ func newLivePickerProvider(t *testing.T) (chan string, *httptest.Server) {
 	return routedModel, provider
 }
 
-func startLivePickerRun(t *testing.T, ctx context.Context, dbPath, ccrExecutable string) *livePickerRun {
+func startLivePickerRun(t *testing.T, ctx context.Context, dbPath, ccrExecutable string, startupArgs ...string) *livePickerRun {
 	t.Helper()
 
 	launcher := &livePickerLauncher{started: make(chan livePickerSession, 1), statuslineExecutable: ccrExecutable}
@@ -124,7 +124,8 @@ func startLivePickerRun(t *testing.T, ctx context.Context, dbPath, ccrExecutable
 			Launcher:       launcher,
 			ExecutablePath: ccrExecutable,
 		})
-		cmd.SetArgs([]string{"--db", dbPath, "launch", "--bare"})
+		args := append([]string{"--db", dbPath, "launch"}, startupArgs...)
+		cmd.SetArgs(append(args, "--bare"))
 		commandDone <- cmd.Execute()
 	}()
 

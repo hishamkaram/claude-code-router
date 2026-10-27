@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/hishamkaram/claude-code-router/internal/gateway"
@@ -23,6 +24,7 @@ type launchSettingsOptions struct {
 	IsolateStatuslineCredentials bool
 	GatewayURL                   string
 	StatuslineExecutable         string
+	ClaudeArgs                   []string
 }
 
 type launchSettingsResult struct {
@@ -48,7 +50,7 @@ func launchClaudeSettingsArg(ctx context.Context, s *store.Store, options launch
 		settings["env"] = options.Environment
 	}
 	result := launchSettingsResult{}
-	if err := addLaunchAvailableModels(ctx, s, options.IncludeToolDisabled, options.PinnedRoute, settings); err != nil {
+	if err := addLaunchModelCatalog(ctx, s, options, settings); err != nil {
 		return launchSettingsResult{}, err
 	}
 	if options.LifecycleEnabled {
@@ -112,16 +114,19 @@ func addCCRStatusline(settings map[string]any, state, executable string) (string
 	return state, nil
 }
 
-func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDisabled bool, pinnedRoute *gateway.PinnedRoute, settings map[string]any) error {
-	if pinnedRoute != nil {
-		settings["availableModels"] = []string{pinnedRoute.DiscoveryID()}
-		return nil
+// The registry (or admitted pinned route) owns model identity. Both native
+// settings are projections of the same canonical IDs, never a second registry.
+func addLaunchModelCatalog(ctx context.Context, s *store.Store, options launchSettingsOptions, settings map[string]any) error {
+	if options.PinnedRoute != nil {
+		ids := []string{options.PinnedRoute.DiscoveryID()}
+		settings["availableModels"] = ids
+		return addLaunchModelPicker(settings, ids, options.ClaudeArgs, true)
 	}
 	existing, configured, err := claudeAvailableModels()
 	if err != nil {
 		return err
 	}
-	models, hasRoutable, err := routableModels(ctx, s, includeToolDisabled)
+	models, hasRoutable, err := routableModels(ctx, s, options.IncludeToolDisabled)
 	if err != nil {
 		return fmt.Errorf("building Claude Code model allowlist extension: %w", err)
 	}
@@ -132,18 +137,18 @@ func addLaunchAvailableModels(ctx context.Context, s *store.Store, includeToolDi
 	if !configured {
 		baseIDs = gateway.FirstPartyAnthropicModelIDs()
 	}
-	ids, err := mergedClaudeModelIDs(baseIDs, models)
+	ids, err := registeredClaudeModelIDs(models)
 	if err != nil {
 		return fmt.Errorf("building Claude Code model IDs: %w", err)
 	}
-	settings["availableModels"] = ids
-	return nil
+	settings["availableModels"] = mergedClaudeModelIDs(baseIDs, ids)
+	return addLaunchModelPicker(settings, ids, options.ClaudeArgs, false)
 }
 
-func mergedClaudeModelIDs(baseIDs []string, models []store.Model) ([]string, error) {
-	ids := make([]string, 0, len(baseIDs)+len(models))
-	seen := make(map[string]struct{}, len(baseIDs)+len(models))
-	for _, id := range baseIDs {
+func mergedClaudeModelIDs(baseIDs, registeredIDs []string) []string {
+	ids := make([]string, 0, len(baseIDs)+len(registeredIDs))
+	seen := make(map[string]struct{}, len(baseIDs)+len(registeredIDs))
+	for _, id := range slices.Concat(baseIDs, registeredIDs) {
 		id = strings.TrimSpace(id)
 		if id == "" {
 			continue
@@ -154,15 +159,16 @@ func mergedClaudeModelIDs(baseIDs []string, models []store.Model) ([]string, err
 		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
+	return ids
+}
+
+func registeredClaudeModelIDs(models []store.Model) ([]string, error) {
+	ids := make([]string, 0, len(models))
 	for index := range models {
 		id, err := gateway.DiscoveryIDForModel(models[index])
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
 	return ids, nil

@@ -33,8 +33,9 @@ func TestLiveConfiguredProviderIdleTurn(t *testing.T) {
 	var launchID int64
 	run := startLiveCompactionCommand(t, ctx, Dependencies{StartGateway: liveRealGatewayStarter(&launchID)}, []string{
 		"--db", dbPath, "launch", "--model", alias, "--auth-mode", "provider-only", "--print",
+		"--setting-sources", "",
 		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-		"--bare", "--setting-sources", "", "--strict-mcp-config", "--tools", "",
+		"--bare", "--strict-mcp-config", "--tools", "",
 	})
 	for index, marker := range []string{"CCR_LIVE_IDLE_FIRST", "CCR_LIVE_IDLE_SECOND"} {
 		if index > 0 {
