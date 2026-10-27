@@ -27,6 +27,9 @@ allowlist, or tool-safety restrictions. For example ccr launch --chrome starts
 Claude Code with its Chrome integration.
 CCR always supplies required non-secret routing settings. Native --settings
 passthrough is rejected; use native user, project, or local settings instead.
+Put --setting-sources before other forwarded Claude Code options. It accepts
+user, project and local separated by commas, or an empty string for no sources.
+Use --append-system-prompt=<text> for literal prompt text that resembles a flag.
 
 Use -- to end CCR option parsing and pass Claude Code options, for example:
   ccr launch --model <alias> -p -- --output-format stream-json --verbose
@@ -134,6 +137,7 @@ func newLaunchCommand(ctx context.Context, opts *options, deps Dependencies) *co
 	cmd.Flags().String("auth-mode", launchAuthModeAuto, "Gateway auth mode: auto, preserve, provider-only, or subscription-pool")
 	cmd.Flags().String("claude-account", "", "Named Claude account to use with subscription-pool auth")
 	cmd.Flags().String("permission-mode", "", "Optional Claude Code permission mode to pass through")
+	cmd.Flags().String("setting-sources", "", "Native settings sources; place before other Claude Code options")
 	cmd.Flags().BoolP("print", "p", false, "Run Claude Code in non-interactive print mode, reading the prompt from stdin")
 	cmd.Flags().Bool("detach", false, "Return a durable job ID; requires -p and --prompt-file")
 	cmd.Flags().String("prompt-file", "", "Read a non-interactive prompt from this file before launch")
@@ -264,6 +268,7 @@ func runLaunchAttempt(
 		IsolateStatuslineCredentials: selectedAccount != nil,
 		GatewayURL:                   execution.server.URL(),
 		StatuslineExecutable:         deps.ExecutablePath,
+		ClaudeArgs:                   invocation.claudeArgs,
 	})
 	if err != nil {
 		return err

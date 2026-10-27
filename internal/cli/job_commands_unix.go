@@ -118,10 +118,8 @@ func runPromptLaunch(ctx context.Context, cmd *cobra.Command, opts *options, dep
 		return err
 	}
 	if invocation.detach {
-		for _, arg := range invocation.claudeArgs {
-			if arg == "--" {
-				return fmt.Errorf("standalone -- is not supported in detached Claude options; use --name=value for option values and --prompt-file for prompt text")
-			}
+		if err := validateDetachedClaudeBoundary(invocation.claudeArgs); err != nil {
+			return err
 		}
 		if err := validateDetachedAdmission(invocation); err != nil {
 			return err

@@ -12,9 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/hishamkaram/claude-code-router/internal/gateway"
 	"github.com/hishamkaram/claude-code-router/internal/liveclaude"
 )
 
@@ -132,23 +134,28 @@ func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	if _, err := liveclaude.Check(ctx); err != nil {
-		t.Skipf("live Claude Code unavailable: %v", err)
+		t.Fatalf("required live Claude Code unavailable: %v", err)
 	}
-
-	chatCalled := false
+	isolateLiveClaudeAuth(t)
+	t.Setenv("ANTHROPIC_API_KEY", liveFixtureAPIKey)
+	t.Setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+	t.Setenv("CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL", "1")
+	t.Setenv("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+	t.Chdir(t.TempDir())
+	var chatCalls, firstPartyCalls atomic.Int64
+	var capturedModel atomic.Pointer[string]
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, `{"data":[{"id":"gpt-5"}]}`)
 		case "/v1/chat/completions":
-			chatCalled = true
-			var payload liveOpenAIChatPayload
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				t.Errorf("provider decode error = %v", err)
-				http.Error(w, "bad request", http.StatusBadRequest)
+			payload, ok := decodeLiveOpenAIChatPayload(t, w, r)
+			if !ok {
 				return
 			}
+			chatCalls.Add(1)
+			capturedModel.Store(&payload.Model)
 			if payload.Model != "gpt-5" {
 				t.Errorf("provider model = %q, want gpt-5", payload.Model)
 				http.Error(w, "bad model", http.StatusBadRequest)
@@ -160,35 +167,51 @@ func TestLiveLaunchNoStartupModelCanSelectConfiguredOpenAIAlias(t *testing.T) {
 		}
 	}))
 	defer provider.Close()
-
+	firstParty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		firstPartyCalls.Add(1)
+		http.Error(w, "unexpected first-party request", http.StatusBadRequest)
+	}))
+	defer firstParty.Close()
 	dbPath := filepath.Join(t.TempDir(), "ccr.db")
-	for _, args := range [][]string{
-		{"--db", dbPath, "provider", "add", "litellm", "--base-url", provider.URL, "--no-api-key"},
-		{"--db", dbPath, "model", "add", "gpt", "--provider", "litellm", "--model", "gpt-5"},
-	} {
-		if out, errOut, err := runLiveCommand(ctx, Dependencies{}, args...); err != nil {
-			t.Fatalf("run %v error = %v\nstdout:\n%s\nstderr:\n%s", args, err, out, errOut)
-		}
+	addLiveOpenAIModel(t, ctx, dbPath, provider.URL)
+	deps := Dependencies{StartGateway: func(startCtx context.Context, cfg gateway.Config) (*gateway.Server, error) {
+		cfg.AnthropicBaseURL = firstParty.URL
+		return gateway.Start(startCtx, cfg)
+	}}
+	run := startLiveCompactionCommand(t, ctx, deps, []string{
+		"--db", dbPath, "launch", "--print",
+		"--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+	})
+	selection, err := liveRealTurn(ctx, run, liveStreamInput(t, "/model anthropic.ccr.gpt"))
+	normalizedSelection := normalizeLiveClaudeText(selection)
+	acknowledgedModel := strings.HasPrefix(normalizedSelection, normalizeLiveClaudeText("Set model to anthropic.ccr.gpt")) ||
+		strings.HasPrefix(normalizedSelection, normalizeLiveClaudeText("Set model to CCR gpt (gpt-5)"))
+	if err != nil || !acknowledgedModel {
+		t.Fatalf("launch missing native model switch confirmation: error=%v; %s", err, liveRealSelectionSummary(selection, "anthropic.ccr.gpt"))
 	}
-
-	out, errOut, err := runLiveCommand(ctx, Dependencies{}, "--db", dbPath, "launch", "--print", "/model anthropic.ccr.gpt")
-	if err != nil {
-		if liveAutoLaunchAuthUnavailable(err) {
-			t.Skipf("live Claude Code Anthropic auth unavailable before model selection: %v", err)
-		}
-		t.Fatalf("launch error = %v\nstdout:\n%s\nstderr:\n%s", err, out, errOut)
+	wantSelectionCalls := int64(1)
+	if liveNativeVersionAtLeast(t, ctx, [3]int{2, 1, 242}) {
+		wantSelectionCalls = 0
 	}
-	if !chatCalled {
-		if liveAnthropicAuthUnavailable(out + errOut) {
-			t.Skipf("live Claude Code Anthropic auth unavailable before model selection:\nstdout:\n%s\nstderr:\n%s", out, errOut)
-		}
-		t.Fatalf("fake OpenAI-compatible chat endpoint was not called\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	if got := chatCalls.Load(); got != wantSelectionCalls {
+		t.Fatalf("native model selection inference requests=%d, want=%d", got, wantSelectionCalls)
 	}
-	if !strings.Contains(normalizeLiveClaudeText(out), normalizeLiveClaudeText("Set model to anthropic.ccr.gpt")) {
-		t.Fatalf("launch output missing model switch confirmation:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	result, err := liveRealTurn(ctx, run, liveStreamInput(t, "Reply with the no-startup synthetic provider response."))
+	if err != nil || strings.TrimSpace(result) != "no-startup-selection-ok" {
+		t.Fatalf("selected alias did not complete a real turn: result_matches=%t error=%v", strings.TrimSpace(result) == "no-startup-selection-ok", err)
 	}
-	if !strings.Contains(errOut, "No ccr startup model selected") {
-		t.Fatalf("launch stderr missing no-startup summary:\nstdout:\n%s\nstderr:\n%s", out, errOut)
+	model := capturedModel.Load()
+	if chatCalls.Load() <= wantSelectionCalls || model == nil || *model != "gpt-5" {
+		t.Fatal("real no-startup turn did not route through the captured gpt-5 provider model")
+	}
+	if _, _, err := run.finish(ctx); err != nil {
+		t.Fatalf("finish no-startup native launch: %v", err)
+	}
+	if !strings.Contains(run.errOut.String(), "No ccr startup model selected") {
+		t.Fatal("launch stderr missing no-startup summary")
+	}
+	if firstPartyCalls.Load() != 0 {
+		t.Fatal("no-startup selection or real turn contacted the first-party trap")
 	}
 }
 

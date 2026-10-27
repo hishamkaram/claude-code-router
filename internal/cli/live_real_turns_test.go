@@ -19,36 +19,60 @@ import (
 // Only submit the next turn after Claude Code completes the current one.
 // Diagnostics deliberately omit real-provider output and error bodies.
 func liveRealTurn(ctx context.Context, run *liveCompactionRun, input string) (string, error) {
+	result, _, err := liveRealTurnWithCorrelation(ctx, run, input, "")
+	return result, err
+}
+
+func liveRealTurnWithCorrelation(ctx context.Context, run *liveCompactionRun, input, inputUUID string) (string, liveRealTurnMetadata, error) {
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("starting turn: %w", err)
+		return "", liveRealTurnMetadata{}, fmt.Errorf("starting turn: %w", err)
 	}
 	stop := context.AfterFunc(ctx, func() { _ = run.input.Close() })
 	defer stop()
-	offset := len(run.out.String())
+	reader := &liveRealResultReader{offset: len(run.out.String())}
+	if inputUUID != "" {
+		if run.correlatedResults == nil {
+			run.correlatedResults = &liveRealResultReader{correlated: true}
+		}
+		reader = run.correlatedResults
+		if reader.inputUUID != "" {
+			return "", reader.metadata(), fmt.Errorf("previous correlated native input has not completed")
+		}
+		reader.inputUUID = inputUUID
+		reader.observed = liveRealTurnMetadata{}
+		if _, failed, _ := reader.next(run.out.String()); failed {
+			return "", reader.metadata(), liveRealResultFailure(reader.metadata())
+		}
+	} else if run.correlatedResults != nil {
+		return "", liveRealTurnMetadata{}, fmt.Errorf("cannot switch a correlated native session to serial completion")
+	}
 	if _, err := io.WriteString(run.input, input); err != nil {
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		}
-		return "", fmt.Errorf("writing turn: %w", err)
+		return "", reader.metadata(), fmt.Errorf("writing turn: %w", err)
 	}
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if result, failed, complete := liveRealTurnResult(run.out.String()[offset:]); complete {
+		if result, failed, complete := reader.next(run.out.String()); complete {
 			if failed {
-				return "", fmt.Errorf("Claude Code returned an error result (body withheld)")
+				return "", reader.metadata(), liveRealResultFailure(reader.metadata())
 			}
-			return result, nil
+			return result, reader.metadata(), nil
 		}
 		select {
 		case <-ctx.Done():
-			return "", fmt.Errorf("waiting for turn: %w", ctx.Err())
+			return "", reader.metadata(), fmt.Errorf("waiting for turn: %w", ctx.Err())
 		case <-run.done:
 			// The final result can arrive between the snapshot and process exit.
-			if result, failed, complete := liveRealTurnResult(run.out.String()[offset:]); complete && !failed {
-				return result, nil
+			if result, failed, complete := reader.read(run.out.String(), true); complete {
+				if failed {
+					return "", reader.metadata(), liveRealResultFailure(reader.metadata())
+				}
+				return result, reader.metadata(), nil
 			}
-			return "", fmt.Errorf("Claude Code exited before a successful turn result (output withheld)")
+			return "", reader.metadata(), fmt.Errorf("Claude Code exited before a successful turn result (output withheld)")
 		case <-ticker.C:
 		}
 	}

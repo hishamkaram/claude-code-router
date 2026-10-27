@@ -118,12 +118,13 @@ func addLiveCompactionModel(t *testing.T, ctx context.Context, dbPath, baseURL s
 }
 
 type liveCompactionRun struct {
-	input  *os.File
-	out    *synchronizedBuffer
-	errOut *synchronizedBuffer
-	cancel context.CancelFunc
-	done   chan struct{}
-	err    error
+	correlatedResults *liveRealResultReader
+	input             *os.File
+	out               *synchronizedBuffer
+	errOut            *synchronizedBuffer
+	cancel            context.CancelFunc
+	done              chan struct{}
+	err               error
 }
 
 func startLiveCompactionRun(t *testing.T, ctx context.Context, dbPath, sessionID string, claudeArgs ...string) *liveCompactionRun {
