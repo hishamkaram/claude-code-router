@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright:v1.54.1-jammy@sha256:f72b8d294edee6beadacfc1868abf746dbc31316b1927f39f393107053c58bd1
+FROM mcr.microsoft.com/playwright:v1.65.0-jammy@sha256:5a8620d70618963ec6628dd77cc25ec6a4b232e26c4a41241a8c1def04e2dc04
 
 LABEL org.opencontainers.image.title="CCR managed browser preview"
 LABEL org.opencontainers.image.description="Chromium runtime image for Claude Code Router managed computer-use preview"
